@@ -128,7 +128,7 @@ class VerticalTraceTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], VERTICAL_TRACE_GRAPH_VERSION)
-        result = validate_vertical_trace_coverage(first, mode="shadow")
+        result = validate_vertical_trace_coverage(first, mode="enforce")
         self.assertTrue(result.ok)
         self.assertEqual(result.coverage["required_surface_count"], result.coverage["covered_surface_count"])
         main_web = next(
@@ -188,10 +188,31 @@ class VerticalTraceTest(unittest.TestCase):
         self.assertEqual(finding.subject_ref, "SURF:SC-1:api")
         self.assertFalse(result.to_dict()["would_block"])
 
+    def test_surface_declared_not_exercised_is_not_a_missing_surface(self) -> None:
+        # r7 designer-0066: SC-6 data behind a 401 refused before any data access.
+        design = self._design_graph(skip=("SC-1", "api"))
+        design["surface_not_exercised"] = [
+            {
+                "scenario_id": "SC-1",
+                "surface": "api",
+                "reason": "refused before the request boundary is reached",
+                "evidence_refs": ["RLA-api"],
+                "requirement_refs": [],
+                "declared_in_partition": "SC-1|api",
+            }
+        ]
+        design["artifact_digest"] = graph_digest(design)
+        graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
+
+        surface = next(node for node in graph["nodes"] if node["id"] == "SURF:SC-1:api")
+        self.assertEqual(surface["design_not_exercised"]["reason"], "refused before the request boundary is reached")
+        categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings}
+        self.assertNotIn("required_surface_missing", categories)
+
     def test_unknown_requirement_and_not_applicable_design_are_blocked(self) -> None:
         design = self._design_graph(unknown_ref=True, include_not_applicable=("SC-2", "api"))
         graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
-        categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="shadow").blocking_findings}
+        categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings}
 
         self.assertIn("unknown_requirement_ref", categories)
         self.assertIn("not_applicable_surface_designed", categories)
@@ -344,7 +365,7 @@ class VerticalTraceTest(unittest.TestCase):
 
         finding = next(
             item
-            for item in validate_vertical_trace_coverage(graph, mode="shadow").blocking_findings
+            for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings
             if item.category == "design_node_untraced"
         )
         self.assertEqual(finding.subject_ref, node["id"])
@@ -364,17 +385,6 @@ class VerticalTraceTest(unittest.TestCase):
         )
 
         self.assertIn("unknown_requirement_ref", {str(item.get("category") or "") for item in feedback})
-        self.assertEqual(
-            _vertical_trace_repair_feedback(
-                state={
-                    "vertical_trace_contract_version": VERTICAL_TRACE_GRAPH_VERSION,
-                    "vertical_trace_mode": "shadow",
-                },
-                approved=SimpleNamespace(canonical_model=self.model),
-                graph=design,
-            ),
-            [],
-        )
 
 
 if __name__ == "__main__":

@@ -2,33 +2,89 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
+import urllib.parse
 
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.artifacts.writers import _test_report_markdown
 from sdlc_harness.profiles import (
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
     VerificationStagePolicy,
-    build_planning_path_policy,
-    build_qa_test_policy,
     build_verification_stage_policy,
-    get_language_profile,
+    build_verification_stage_policy_version,
     get_project_profile,
 )
+from sdlc_harness.agents.developer.closure_contract import CLOSURE_DEVELOPER_STAGE_IDS
+from sdlc_harness.profiles import (
+    BROWSER_STAGE_POLICY_VERSION,
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+    browser_stage_facts,
+    build_browser_stage_policy,
+    build_runtime_closure_stage_policy,
+)
 from sdlc_harness.verification import (
+    BROWSER_CAPTURE_SPEC_PATH,
+    RUNTIME_PROBE_SPEC_PATH,
+    BrowserCaptureRun,
+    RuntimeProbeRun,
     VerificationResult,
     VerificationRunner,
     VerificationStageResult,
-    resolve_verification_preparation_spec,
     resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
+from sdlc_harness.verification.runner import (
+    _capture_screenshot,
+    _playwright_verified_test_files,
+    _run_bounded,
+    _runtime_probe_outcomes,
+    _windows_io_path,
+)
+
+
+class RunBoundedTest(unittest.TestCase):
+    """Real processes: a stage timeout must end the grandchild that holds the output pipes."""
+
+    def test_returns_output_and_exit_code_without_a_shell(self) -> None:
+        with patch("sdlc_harness.verification.runner.subprocess.Popen", wraps=subprocess.Popen) as popen:
+            completed = _run_bounded(
+                [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"],
+                cwd=os.getcwd(),
+                env=dict(os.environ),
+                timeout=30,
+            )
+        self.assertIs(popen.call_args.kwargs["shell"], False)
+        self.assertEqual((completed.returncode, completed.stdout.strip(), completed.stderr.strip()), (3, "out", "err"))
+
+    def test_timeout_kills_the_grandchild_that_holds_the_pipes(self) -> None:
+        # The parent prints, starts a grandchild that inherits stdout, then sleeps; plain
+        # subprocess.run would block ~60s on the grandchild's pipe after killing the parent.
+        script = (
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print('started', flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            _run_bounded([sys.executable, "-c", script], cwd=os.getcwd(), env=dict(os.environ), timeout=2)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertIn("started", caught.exception.output or "")
+
+
+# Package scripts of the Harness-owned v2 stages (database, build, health, e2e, cleanup).
+V2_HARNESS_SCRIPTS = ("db:up", "db:migrate", "db:seed", "db:smoke", "build:web", "verify:bootstrap", "test:e2e", "db:down")
 
 
 class ProfiledVerificationTest(unittest.TestCase):
@@ -41,6 +97,7 @@ class ProfiledVerificationTest(unittest.TestCase):
                     "scripts": {
                         "typecheck": "tsc --noEmit",
                         "test:unit": "vitest run",
+                        **{script: "node -e 0" for script in V2_HARNESS_SCRIPTS},
                     }
                 }
             ),
@@ -49,17 +106,10 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.policy = build_verification_stage_policy(
             project=get_project_profile("typescript_fullstack_v1")
         )
-        project = get_project_profile("typescript_fullstack_v1")
-        self.qa_policy = build_qa_test_policy(
-            planning_policy=build_planning_path_policy(
-                project=project,
-                language=get_language_profile(project.language_profile_id),
-            )
-        )
         self.packet = {
             "run_id": "run_profiled_verification",
-            "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-            "verification_stage_ids": ["typecheck", "unit"],
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "verification_stage_ids": list(self.policy.stage_ids),
             "test_intents": [
                 {"stage_id": "typecheck", "purpose": "Check TypeScript contracts."},
                 {"stage_id": "unit", "purpose": "Run unit tests."},
@@ -69,24 +119,28 @@ class ProfiledVerificationTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def _stage_calls(self) -> int:
+        return sum(1 + len(spec.additional_argv) for spec in resolve_verification_stage_specs(self.policy))
+
+    def _unit_packet(self, *paths: str) -> dict[str, object]:
+        return {**self.packet, "output_contract": {"allowed_paths": list(paths)}}
+
     def test_registry_resolves_exact_order_and_rejects_drift(self) -> None:
-        preparation = resolve_verification_preparation_spec(self.policy)
-        self.assertIsNotNone(preparation)
-        self.assertEqual(preparation.preparation_id, "dependency_setup")
-        self.assertEqual(preparation.argv, ("npm", "ci"))
         preparations = resolve_verification_preparation_specs(self.policy)
+        self.assertEqual(preparations[0].argv, ("npm", "ci"))
         self.assertEqual(
             [item.preparation_id for item in preparations],
             ["dependency_setup", "generated_source_setup"],
         )
         self.assertEqual(preparations[1].argv, ("npm", "run", "db:generate"))
         specs = resolve_verification_stage_specs(self.policy)
-        self.assertEqual([item.stage_id for item in specs], ["typecheck", "unit"])
-        self.assertEqual(specs[0].argv, ("npm", "run", "typecheck"))
-        self.assertEqual(specs[1].argv, ("npm", "run", "test:unit"))
-        self.assertEqual(specs[1].required_test_framework, "vitest")
+        self.assertEqual([item.stage_id for item in specs], list(self.policy.stage_ids))
+        by_id = {item.stage_id: item for item in specs}
+        self.assertEqual(by_id["typecheck"].argv, ("npm", "run", "typecheck"))
+        self.assertEqual(by_id["unit"].argv, ("npm", "run", "test:unit"))
+        self.assertEqual(by_id["unit"].required_test_framework, "vitest")
         self.assertEqual(
-            specs[1].machine_reporter_args,
+            by_id["unit"].machine_reporter_args,
             ("--reporter=json", "--outputFile={report_path}"),
         )
 
@@ -115,13 +169,14 @@ class ProfiledVerificationTest(unittest.TestCase):
         with self.assertRaises(HarnessError):
             resolve_verification_stage_specs(wrong_version)
 
+
     def test_runner_prepares_dependencies_once_per_lockfile(self) -> None:
         (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
         runner = VerificationRunner()
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed) as run,
         ):
             first = runner.run(
                 target_path=self.target,
@@ -137,9 +192,9 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual(first.status, "passed")
         self.assertEqual(first.preparation_results[0].reason, "Verification preparation completed successfully.")
         self.assertIn("current inputs", second.preparation_results[0].reason)
-        self.assertEqual(run.call_count, 5)
+        self.assertEqual(run.call_count, 1 + 2 * self._stage_calls())
         self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
-        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "typecheck"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "db:up"])
         marker = self.target / "node_modules" / ".sdlc-harness-dependency-setup.json"
         self.assertTrue(marker.is_file())
 
@@ -154,7 +209,7 @@ class ProfiledVerificationTest(unittest.TestCase):
 
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed) as run,
         ):
             first = VerificationRunner().run(
                 target_path=self.target,
@@ -180,10 +235,12 @@ class ProfiledVerificationTest(unittest.TestCase):
             [item.stage_id for item in first.preparation_results],
             ["dependency_setup", "generated_source_setup"],
         )
-        self.assertEqual(run.call_count, 9)
+        stage_calls = self._stage_calls()
+        # first: ci + generate + stages; second: stages; third: generate (schema changed) + stages
+        self.assertEqual(run.call_count, 3 + 3 * stage_calls)
         self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
         self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "db:generate"])
-        self.assertEqual(run.call_args_list[6].args[0], ["npm", "run", "db:generate"])
+        self.assertEqual(run.call_args_list[2 + 2 * stage_calls].args[0], ["npm", "run", "db:generate"])
         marker = self.target / "node_modules" / ".sdlc-harness-generated-source-setup.json"
         self.assertTrue(marker.is_file())
 
@@ -207,7 +264,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
             patch(
-                "sdlc_harness.verification.runner.subprocess.run",
+                "sdlc_harness.verification.runner._run_bounded",
                 side_effect=[installed, failed],
             ) as run,
         ):
@@ -237,7 +294,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=failed) as run,
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -261,7 +318,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed),
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=failed),
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -281,7 +338,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed),
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=failed),
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -308,7 +365,7 @@ class ProfiledVerificationTest(unittest.TestCase):
                 "sdlc_harness.verification.runner.shutil.which",
                 return_value="C:/npm.cmd",
             ) as which,
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed) as run,
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -317,17 +374,23 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "passed")
-        self.assertEqual(result.planned_stage_ids, ("typecheck", "unit"))
-        self.assertEqual(result.executed_stage_ids, ("typecheck", "unit"))
-        self.assertEqual([item.stage_id for item in result.stage_results], ["typecheck", "unit"])
-        self.assertEqual(run.call_count, 2)
+        specs = resolve_verification_stage_specs(self.policy)
+        self.assertEqual(result.planned_stage_ids, self.policy.stage_ids)
+        self.assertEqual(result.executed_stage_ids, self.policy.stage_ids)
+        self.assertEqual([item.stage_id for item in result.stage_results], list(self.policy.stage_ids))
+        self.assertEqual(run.call_count, self._stage_calls())
         self.assertEqual(which.call_args_list[0].kwargs["path"], "safe-path")
-        self.assertEqual(run.call_args_list[0].args[0], ["C:/npm.cmd", "run", "typecheck"])
-        self.assertEqual(run.call_args_list[1].args[0], ["C:/npm.cmd", "run", "test:unit"])
+        argvs = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(argvs[0], ["C:/npm.cmd", "run", "db:up"])
+        self.assertIn(["C:/npm.cmd", "run", "typecheck"], argvs)
+        self.assertIn(["C:/npm.cmd", "run", "test:unit"], argvs)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in run.call_args_list],
+            [spec.timeout_seconds for spec in specs for _ in range(1 + len(spec.additional_argv))],
+        )
         for call in run.call_args_list:
-            self.assertIs(call.kwargs["shell"], False)
+            # shell=False is fixed inside _run_bounded (see RunBoundedTest).
             self.assertEqual(call.kwargs["cwd"], str(self.target.resolve()))
-            self.assertEqual(call.kwargs["timeout"], 120)
             self.assertEqual(call.kwargs["env"]["CI"], "1")
             self.assertNotIn("NODE_OPTIONS", call.kwargs["env"])
             self.assertNotIn("SDLC_SECRET", call.kwargs["env"])
@@ -336,7 +399,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed) as run,
         ):
             result = VerificationRunner().run_stage(
                 target_path=self.target,
@@ -351,11 +414,42 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0], ["npm", "run", "typecheck"])
 
+    def test_lane_packet_declaring_a_subset_of_the_suite_runs_one_stage(self) -> None:
+        # Closure and readiness packets declare only (typecheck, unit) of the pinned v2 suite.
+        lane_packet = {**self.packet, "verification_stage_ids": ["typecheck", "unit"]}
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed),
+        ):
+            result = VerificationRunner().run_stage(
+                target_path=self.target, work_packet=lane_packet, stage_id="typecheck", verification_policy=self.policy
+            )
+        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+
+        for declared, stage_id in (
+            (["unit", "typecheck"], "typecheck"),  # out of the suite's order
+            (["typecheck", "lint"], "typecheck"),  # a stage the suite does not have
+            (["typecheck"], "unit"),  # the requested stage is not declared
+            ([], "typecheck"),
+        ):
+            with self.subTest(declared=declared, stage_id=stage_id), self.assertRaises(HarnessError) as caught:
+                VerificationRunner().run_stage(
+                    target_path=self.target,
+                    work_packet={**self.packet, "verification_stage_ids": declared},
+                    stage_id=stage_id,
+                    verification_policy=self.policy,
+                )
+            self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
+        # The full suite still needs the exact pinned stage list.
+        with self.assertRaises(HarnessError):
+            VerificationRunner().run(target_path=self.target, work_packet=lane_packet, verification_policy=self.policy)
+
     def test_runner_stops_after_first_failed_stage(self) -> None:
         failed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="type error")
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=failed) as run,
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -364,15 +458,15 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertEqual(result.stderr, "type error")
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_records_timeout_and_stops(self) -> None:
         timeout = subprocess.TimeoutExpired(cmd=["npm"], timeout=120, output="partial", stderr="slow")
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", side_effect=timeout) as run,
+            patch("sdlc_harness.verification.runner._run_bounded", side_effect=timeout) as run,
         ):
             result = VerificationRunner().run(
                 target_path=self.target,
@@ -381,15 +475,15 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertTrue(result.timed_out)
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertIn("partial", result.stdout)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_records_process_start_failure(self) -> None:
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
             patch(
-                "sdlc_harness.verification.runner.subprocess.run",
+                "sdlc_harness.verification.runner._run_bounded",
                 side_effect=OSError("executable disappeared"),
             ) as run,
         ):
@@ -400,31 +494,33 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertIn("executable disappeared", result.stderr)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_fails_preflight_when_script_or_npm_is_missing(self) -> None:
         (self.target / "package.json").write_text(
             json.dumps({"scripts": {"typecheck": "tsc --noEmit"}}),
             encoding="utf-8",
         )
-        with patch("sdlc_harness.verification.runner.subprocess.run") as run:
+        with patch("sdlc_harness.verification.runner._run_bounded") as run:
             missing_script = VerificationRunner().run(
                 target_path=self.target,
                 work_packet=self.packet,
                 verification_policy=self.policy,
             )
-        self.assertIn("test:unit", missing_script.reason)
+        self.assertIn("db:up", missing_script.reason)
         run.assert_not_called()
 
         (self.target / "package.json").write_text(
-            json.dumps({"scripts": {"typecheck": "tsc", "test:unit": "vitest run"}}),
+            json.dumps(
+                {"scripts": {"typecheck": "tsc", "test:unit": "vitest run", **{name: "node -e 0" for name in V2_HARNESS_SCRIPTS}}}
+            ),
             encoding="utf-8",
         )
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value=None),
-            patch("sdlc_harness.verification.runner.subprocess.run") as run,
+            patch("sdlc_harness.verification.runner._run_bounded") as run,
         ):
             missing_npm = VerificationRunner().run(
                 target_path=self.target,
@@ -436,7 +532,7 @@ class ProfiledVerificationTest(unittest.TestCase):
 
     def test_runner_rejects_missing_policy_stage_drift_and_raw_execution_fields(self) -> None:
         with (
-            patch("sdlc_harness.verification.runner.subprocess.run") as run,
+            patch("sdlc_harness.verification.runner._run_bounded") as run,
             self.assertRaises(HarnessError),
         ):
             VerificationRunner().run(target_path=self.target, work_packet=self.packet)
@@ -455,7 +551,7 @@ class ProfiledVerificationTest(unittest.TestCase):
             "test_intents": [{"stage_id": "typecheck", "command": "echo unsafe"}],
         }
         with (
-            patch("sdlc_harness.verification.runner.subprocess.run") as run,
+            patch("sdlc_harness.verification.runner._run_bounded") as run,
             self.assertRaises(HarnessError),
         ):
             VerificationRunner().run(
@@ -465,7 +561,7 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
         run.assert_not_called()
 
-    def test_profiled_qa_executes_exact_required_vitest_file(self) -> None:
+    def test_developer_unit_executes_exact_required_vitest_file(self) -> None:
         qa_path = "apps/api/src/generated.test.ts"
         qa_file = self.target / qa_path
         qa_file.parent.mkdir(parents=True)
@@ -496,26 +592,26 @@ class ProfiledVerificationTest(unittest.TestCase):
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
             patch(
-                "sdlc_harness.verification.runner.subprocess.run",
+                "sdlc_harness.verification.runner._run_bounded",
                 side_effect=run_with_report,
             ) as run,
         ):
-            result = VerificationRunner().run(
+            result = VerificationRunner().run_stage(
                 target_path=self.target,
-                work_packet=self.packet,
+                work_packet=self._unit_packet(qa_path),
+                stage_id="unit",
                 required_test_files=[qa_path],
                 verification_policy=self.policy,
-                qa_policy=self.qa_policy,
             )
         self.assertEqual(result.status, "passed")
         self.assertEqual(result.selected_test_files, (qa_path,))
         self.assertEqual(result.verified_test_files, (qa_path,))
-        unit_argv = run.call_args_list[1].args[0]
+        unit_argv = run.call_args_list[0].args[0]
         self.assertEqual(unit_argv[:5], ["npm", "run", "test:unit", "--", "--reporter=json"])
         self.assertTrue(unit_argv[5].startswith("--outputFile="))
         self.assertEqual(unit_argv[6], qa_path)
         self.assertEqual(
-            result.stage_results[1].argv,
+            result.stage_results[0].argv,
             (
                 "npm",
                 "run",
@@ -527,7 +623,7 @@ class ProfiledVerificationTest(unittest.TestCase):
             ),
         )
 
-    def test_profiled_qa_fails_without_exact_vitest_json_evidence(self) -> None:
+    def test_developer_unit_fails_without_exact_vitest_json_evidence(self) -> None:
         qa_path = "apps/api/src/generated.test.ts"
         qa_file = self.target / qa_path
         qa_file.parent.mkdir(parents=True)
@@ -535,14 +631,14 @@ class ProfiledVerificationTest(unittest.TestCase):
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed),
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed),
         ):
-            missing = VerificationRunner().run(
+            missing = VerificationRunner().run_stage(
                 target_path=self.target,
-                work_packet=self.packet,
+                work_packet=self._unit_packet(qa_path),
+                stage_id="unit",
                 required_test_files=[qa_path],
                 verification_policy=self.policy,
-                qa_policy=self.qa_policy,
             )
         self.assertEqual(missing.status, "failed")
         self.assertEqual(missing.verified_test_files, ())
@@ -573,44 +669,23 @@ class ProfiledVerificationTest(unittest.TestCase):
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
             patch(
-                "sdlc_harness.verification.runner.subprocess.run",
+                "sdlc_harness.verification.runner._run_bounded",
                 side_effect=run_with_wrong_report,
             ),
         ):
-            mismatched = VerificationRunner().run(
+            mismatched = VerificationRunner().run_stage(
                 target_path=self.target,
-                work_packet=self.packet,
+                work_packet=self._unit_packet(qa_path),
+                stage_id="unit",
                 required_test_files=[qa_path],
                 verification_policy=self.policy,
-                qa_policy=self.qa_policy,
             )
         self.assertEqual(mismatched.status, "failed")
         self.assertEqual(mismatched.verified_test_files, ("apps/api/src/other.test.ts",))
         self.assertIn("does not match the exact selected", mismatched.reason)
 
-    def test_profiled_qa_keeps_selected_but_not_verified_when_typecheck_fails(self) -> None:
-        qa_path = "apps/api/src/generated.test.ts"
-        qa_file = self.target / qa_path
-        qa_file.parent.mkdir(parents=True)
-        qa_file.write_text("import { it } from 'vitest';\n", encoding="utf-8")
-        failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="type error")
-        with (
-            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
-            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed) as run,
-        ):
-            result = VerificationRunner().run(
-                target_path=self.target,
-                work_packet=self.packet,
-                required_test_files=[qa_path],
-                verification_policy=self.policy,
-                qa_policy=self.qa_policy,
-            )
-        self.assertEqual(result.selected_test_files, (qa_path,))
-        self.assertEqual(result.verified_test_files, ())
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
-        self.assertEqual(run.call_count, 1)
 
-    def test_profiled_qa_records_executed_file_when_vitest_assertion_fails(self) -> None:
+    def test_developer_unit_records_executed_file_when_vitest_assertion_fails(self) -> None:
         qa_path = "apps/api/src/generated.test.ts"
         qa_file = self.target / qa_path
         qa_file.parent.mkdir(parents=True)
@@ -651,16 +726,16 @@ class ProfiledVerificationTest(unittest.TestCase):
         with (
             patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
             patch(
-                "sdlc_harness.verification.runner.subprocess.run",
+                "sdlc_harness.verification.runner._run_bounded",
                 side_effect=run_with_failed_report,
             ),
         ):
-            result = VerificationRunner().run(
+            result = VerificationRunner().run_stage(
                 target_path=self.target,
-                work_packet=self.packet,
+                work_packet=self._unit_packet(qa_path),
+                stage_id="unit",
                 required_test_files=[qa_path],
                 verification_policy=self.policy,
-                qa_policy=self.qa_policy,
             )
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.failure_kind, "implementation")
@@ -669,7 +744,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertIn("delete flow restores state after interruption", result.reason)
         self.assertIn("expected true to be false", result.reason)
 
-    def test_profiled_qa_required_files_need_policy_and_existing_safe_paths(self) -> None:
+    def test_required_test_files_run_only_inside_a_developer_unit(self) -> None:
         with self.assertRaises(HarnessError) as missing_policy:
             VerificationRunner().run(
                 target_path=self.target,
@@ -680,17 +755,16 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual(missing_policy.exception.error_code, "qa_test_policy_invalid")
 
         for path, error_code in (
-            ("--reporter=verbose", "qa_test_out_of_scope"),
-            ("tests/e2e/generated.spec.ts", "qa_test_out_of_scope"),
+            ("--reporter=verbose", "developer_unit_test_out_of_scope"),
             ("apps/api/src/missing.test.ts", "qa_test_file_missing"),
         ):
             with self.subTest(path=path), self.assertRaises(HarnessError) as caught:
-                VerificationRunner().run(
+                VerificationRunner().run_stage(
                     target_path=self.target,
-                    work_packet=self.packet,
+                    work_packet=self._unit_packet("apps/api/src/missing.test.ts"),
+                    stage_id="unit",
                     required_test_files=[path],
                     verification_policy=self.policy,
-                    qa_policy=self.qa_policy,
                 )
             self.assertEqual(caught.exception.error_code, error_code)
 
@@ -742,6 +816,657 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertIn("### typecheck", markdown)
         self.assertIn('[\"npm\", \"run\", \"typecheck\"]', markdown)
         self.assertIn("- Timeout: `120` seconds", markdown)
+
+
+CLOSURE_SCRIPTS = {
+    "db:up": "db up",
+    "db:migrate": "db migrate",
+    "db:seed": "db seed",
+    "typecheck": "tsc",
+    "test:unit": "vitest run",
+    "db:smoke": "db smoke",
+    "build:web": "vite build",
+    "verify:bootstrap": "verify bootstrap",
+    "test:e2e": "playwright test",
+    "db:down": "db down",
+}
+
+
+def probe_report(*probes: tuple[str, str, dict[str, object] | None]) -> dict[str, object]:
+    """Playwright JSON for the Harness probe spec: (title, status, annotation payload)."""
+
+    specs = []
+    for title, status, observation in probes:
+        test: dict[str, object] = {"results": [{"status": status}]}
+        if observation is not None:
+            test["annotations"] = [{"type": "runtime_probe", "description": json.dumps(observation)}]
+        specs.append({"title": title, "tests": [test]})
+    unexpected = sum(1 for _, status, _ in probes if status != "passed")
+    return {"suites": [{"file": RUNTIME_PROBE_SPEC_PATH, "specs": specs}], "stats": {"unexpected": unexpected}}
+
+
+class RuntimeClosureVerificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.target = Path(self.temp_dir.name)
+        (self.target / "package.json").write_text(json.dumps({"scripts": CLOSURE_SCRIPTS}), encoding="utf-8")
+        spec = self.target / RUNTIME_PROBE_SPEC_PATH
+        spec.parent.mkdir(parents=True)
+        spec.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        self.project = get_project_profile("typescript_fullstack_v1")
+        self.policy = build_runtime_closure_stage_policy(project=self.project)
+        self.packet = {
+            "run_id": "run_runtime_closure_verification",
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "verification_stage_ids": list(self.policy.stage_ids),
+            "test_intents": [{"stage_id": "typecheck", "purpose": "Closure changes type-check."}],
+            "qa_test_intents": [],
+        }
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def run_closure(self, report, runtime_probe, *, fail_stage: str = "", fail_stderr: str = ""):
+        def fake_run(argv, **kwargs):
+            del kwargs
+            if "test:e2e" in argv and report is not None:
+                path = self.target / "playwright-report/results.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(report), encoding="utf-8")
+            failed = (fail_stage and fail_stage in argv) or (
+                "test:e2e" in argv and report is not None and report["stats"]["unexpected"]
+            )
+            stderr = fail_stderr if fail_stage and fail_stage in argv else ""
+            return subprocess.CompletedProcess(args=argv, returncode=1 if failed else 0, stdout="", stderr=stderr)
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner._run_bounded", side_effect=fake_run) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+                runtime_probe=runtime_probe,
+            )
+        return result, run
+
+    def test_closure_policy_order_ownership_and_registry(self) -> None:
+        self.assertEqual(self.policy.policy_version, RUNTIME_CLOSURE_STAGE_POLICY_VERSION)
+        self.assertEqual(
+            self.policy.stage_ids,
+            (
+                "database_ready",
+                "migrate_and_seed",
+                "typecheck",
+                "unit",
+                "api_database_integration",
+                "frontend_build",
+                "service_health",
+                "runtime_probe",
+                "cleanup",
+            ),
+        )
+        ownership = self.policy.metadata()["stage_ownership"]
+        self.assertEqual(ownership["runtime_probe"], "harness_global")
+        self.assertEqual(
+            tuple(stage for stage, owner in ownership.items() if owner == "developer_intent"),
+            CLOSURE_DEVELOPER_STAGE_IDS,
+        )
+        self.assertNotIn("runtime_probe", self.project.verification_stage_ids)  # catalog untouched
+        specs = {spec.stage_id: spec for spec in resolve_verification_stage_specs(self.policy)}
+        self.assertEqual(specs["runtime_probe"].argv, ("npm", "run", "test:e2e"))
+        self.assertFalse(specs["runtime_probe"].developer_selectable)
+        self.assertTrue(specs["cleanup"].always_run)
+        self.assertIn("runtime_probe", self.policy.prompt_context()["stage_capabilities"])
+        # The implementation verification suite keeps browser_e2e where the closure suite has runtime_probe.
+        self.assertIn("browser_e2e", build_verification_stage_policy(project=self.project).stage_ids)
+
+    def test_runtime_probe_runs_only_the_harness_spec_with_run_scoped_stand_in_env(self) -> None:
+        report = probe_report(
+            ("RP-1", "failed", {"probe_id": "RP-1", "actual_status": 500, "actual_items": None, "response_body_excerpt": "boom"}),
+            ("RP-2", "passed", {"probe_id": "RP-2", "actual_status": 200, "actual_items": 3, "response_body_excerpt": "[1,2,3]"}),
+        )
+        result, run = self.run_closure(
+            report, RuntimeProbeRun(probe_ids=("RP-1", "RP-2"), stand_in_env_keys=("LEDGER_URL",))
+        )
+
+        calls = [call.args[0] for call in run.call_args_list]
+        probe_index = calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH])
+        probe_env = run.call_args_list[probe_index].kwargs["env"]
+        self.assertRegex(probe_env["LEDGER_URL"], r"^http://127\.0\.0\.1:4[0-9]{4}$")
+        self.assertIn("DATABASE_URL", probe_env)
+        for index, call in enumerate(run.call_args_list):
+            if index != probe_index:
+                self.assertNotIn("LEDGER_URL", call.kwargs["env"])
+        self.assertEqual(calls[-1], ["npm", "run", "db:down"])  # cleanup still runs after the failed stage
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_kind, "implementation")
+        stage = next(item for item in result.stage_results if item.stage_id == "runtime_probe")
+        # Every probe is read even though the first one failed.
+        self.assertEqual([item["status"] for item in stage.probe_results], ["failed", "passed"])
+        self.assertEqual(stage.probe_results[0]["observation"]["actual_status"], 500)
+        self.assertIn("probe_results", stage.to_dict())
+
+    def test_runtime_probe_report_missing_a_probe_is_a_policy_failure(self) -> None:
+        report = probe_report(("RP-1", "passed", None))
+        result, _ = self.run_closure(report, RuntimeProbeRun(probe_ids=("RP-1", "RP-2")))
+
+        stage = next(item for item in result.stage_results if item.stage_id == "runtime_probe")
+        self.assertEqual(stage.status, "failed")
+        self.assertEqual(stage.failure_kind, "policy")
+        self.assertIn("RP-2", stage.reason)
+
+    def test_runtime_probe_passes_when_every_probe_passes(self) -> None:
+        report = probe_report(("RP-1", "passed", {"probe_id": "RP-1", "actual_status": 204}))
+        result, _ = self.run_closure(report, RuntimeProbeRun(probe_ids=("RP-1",)))
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertEqual(result.executed_stage_ids, self.policy.stage_ids)
+
+    def test_report_files_resolve_against_playwright_root_dir(self) -> None:
+        # Real Playwright JSON: files are relative to config.rootDir (testDir), nested in describe suites.
+        root_dir = (self.target / "tests/e2e").as_posix()
+        probe_payload = probe_report(("RP-1", "passed", {"probe_id": "RP-1", "actual_status": 200}))
+        specs = probe_payload["suites"][0].pop("specs")
+        probe_payload["suites"][0].update(
+            {"file": "runtime-closure.probe.spec.ts", "specs": [], "suites": [{"title": "group", "specs": specs}]}
+        )
+        probe_payload["config"] = {"rootDir": root_dir}
+        report_path = self.target / "probe-results.json"
+        report_path.write_text(json.dumps(probe_payload), encoding="utf-8")
+        outcomes, error = _runtime_probe_outcomes(
+            report_path=report_path, target_root=self.target, probe_ids=("RP-1",)
+        )
+        self.assertEqual(error, "")
+        self.assertEqual([item["status"] for item in outcomes], ["passed"])
+
+        qa_path = "tests/e2e/approved-flow.spec.ts"
+        (self.target / qa_path).write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        qa_payload = {
+            "config": {"rootDir": root_dir},
+            "suites": [
+                {
+                    "file": "approved-flow.spec.ts",
+                    "specs": [{"title": "flow", "tests": [{"results": [{"status": "passed"}]}]}],
+                }
+            ],
+            "stats": {"unexpected": 0},
+        }
+        report_path.write_text(json.dumps(qa_payload), encoding="utf-8")
+        verified, qa_error, _ = _playwright_verified_test_files(
+            report_path=report_path, target_root=self.target, selected_test_files=(qa_path,)
+        )
+        self.assertEqual((verified, qa_error), ((qa_path,), ""))
+
+        with tempfile.TemporaryDirectory() as outside:
+            qa_payload["config"] = {"rootDir": Path(outside).as_posix()}
+            report_path.write_text(json.dumps(qa_payload), encoding="utf-8")
+            _, outside_error, _ = _playwright_verified_test_files(
+                report_path=report_path, target_root=self.target, selected_test_files=(qa_path,)
+            )
+        self.assertIn("outside the target repository", outside_error)
+
+    def test_run_scoped_database_env_names_the_database_compose_creates(self) -> None:
+        report = probe_report(("RP-1", "passed", {"probe_id": "RP-1", "actual_status": 204}))
+        _, run = self.run_closure(report, RuntimeProbeRun(probe_ids=("RP-1",)))
+
+        scoped = [call.kwargs["env"] for call in run.call_args_list if "DATABASE_URL" in call.kwargs["env"]]
+        self.assertTrue(scoped)
+        for env in scoped:
+            url = urllib.parse.urlsplit(env["DATABASE_URL"])
+            self.assertEqual(url.username, env["POSTGRES_USER"])
+            self.assertEqual(url.password, env["POSTGRES_PASSWORD"])
+            self.assertEqual(url.path.lstrip("/"), env["POSTGRES_DB"])
+            self.assertEqual(str(url.port), env["SDLC_POSTGRES_PORT"])
+
+    def test_database_authentication_failure_is_environment(self) -> None:
+        result, run = self.run_closure(
+            None,
+            RuntimeProbeRun(probe_ids=("RP-1",)),
+            fail_stage="db:migrate",
+            fail_stderr="Error: P1000: Authentication failed against database server, the provided database "
+            "credentials for `postgres` are not valid.",
+        )
+        self.assertEqual((result.status, result.failure_kind), ("failed", "environment"))
+        self.assertEqual(run.call_args_list[-1].args[0], ["npm", "run", "db:down"])
+
+    def test_runtime_probe_without_probes_does_not_start_playwright(self) -> None:
+        result, run = self.run_closure(None, RuntimeProbeRun(probe_ids=()))
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertNotIn(
+            ["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH],
+            [call.args[0] for call in run.call_args_list],
+        )
+
+    def test_runtime_probe_fails_closed_on_missing_spec_and_unsafe_inputs(self) -> None:
+        for runtime_probe in (
+            None,
+            RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("DATABASE_URL",)),
+            RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("PATH",)),
+            RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("NODE_OPTIONS",)),
+            RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("POSTGRES_PASSWORD",)),
+            RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("lower_case",)),
+            RuntimeProbeRun(probe_ids=("X-1",)),
+            RuntimeProbeRun(probe_ids=("RP-1", "RP-1")),
+        ):
+            with self.subTest(runtime_probe=runtime_probe), self.assertRaises(HarnessError) as caught:
+                self.run_closure(None, runtime_probe)
+            self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
+
+        (self.target / RUNTIME_PROBE_SPEC_PATH).unlink()
+        result, run = self.run_closure(None, RuntimeProbeRun(probe_ids=("RP-1",)))
+        self.assertEqual((result.status, result.failure_kind), ("failed", "policy"))
+        run.assert_not_called()
+
+    def test_playwright_failure_keeps_every_error_message(self) -> None:
+        report = probe_report(*[(f"RP-{index}", "failed", None) for index in range(1, 5)])
+        for index, spec in enumerate(report["suites"][0]["specs"], start=1):
+            spec["tests"][0]["results"][0]["error"] = {"message": f"\x1b[31mExpected 200\x1b[39m\n  Received {500 + index}"}
+        report_path = self.target / "results.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        _, error, kind = _playwright_verified_test_files(
+            report_path=report_path, target_root=self.target, selected_test_files=(RUNTIME_PROBE_SPEC_PATH,)
+        )
+        self.assertEqual(kind, "implementation")
+        self.assertIn("RP-1: failed: Expected 200 Received 501", error)
+        self.assertIn("RP-4: failed: Expected 200 Received 504", error)  # no longer only the first three
+        self.assertNotIn("\x1b", error)
+
+
+def capture_report(target: Path, captures: dict[str, list[dict[str, object]]], *, failed: tuple[str, ...] = ()):
+    """Playwright JSON for the Harness capture spec; writes each screenshot under test-results/."""
+
+    specs = []
+    for title, steps in captures.items():
+        attachments, annotations = [], []
+        for step in steps:
+            name = f"capture:{title.replace('@', ':')}:{step['step']}"
+            path = target / "test-results" / title.replace("@", "-") / f"{step['step']}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"png {title} {step['step']}".encode("utf-8"))
+            attachments.append({"name": name, "path": str(path), "contentType": "image/png"})
+            view_id, viewport_id = title.split("@")
+            payload = {
+                "view_id": view_id,
+                "viewport_id": viewport_id,
+                "status": "passed",
+                "error": None,
+                "attachment": name,
+                "aria_snapshot": "- main",
+                "aria_truncated": False,
+                "focus": None,
+                "layout": {"viewport": {"width": 1, "height": 1}, "scroll_width": 1, "horizontal_overflow": False, "dialogs": []},
+                "styles": [],
+                **step,
+            }
+            annotations.append({"type": "browser_capture", "description": json.dumps(payload)})
+        status = "failed" if title in failed else "passed"
+        specs.append(
+            {
+                "title": title,
+                # Real reports repeat runtime annotations on the test and on its result.
+                "tests": [{"annotations": annotations, "results": [{"status": status, "attachments": attachments, "annotations": annotations}]}],
+            }
+        )
+    unexpected = len(failed)
+    return {"suites": [{"file": BROWSER_CAPTURE_SPEC_PATH, "specs": specs}], "stats": {"unexpected": unexpected}}
+
+
+class BrowserCaptureVerificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.target = Path(self.temp_dir.name) / "target"
+        self.evidence = Path(self.temp_dir.name) / "evidence"
+        self.target.mkdir()
+        (self.target / "package.json").write_text(json.dumps({"scripts": CLOSURE_SCRIPTS}), encoding="utf-8")
+        for path in (RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH):
+            spec = self.target / path
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        self.project = get_project_profile("typescript_fullstack_v1")
+        self.policy = build_browser_stage_policy(project=self.project)
+        self.facts = browser_stage_facts(self.project.profile_id)
+        self.packet = {
+            "run_id": "run_browser_capture_verification",
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "verification_stage_ids": list(self.policy.stage_ids),
+            "test_intents": [{"stage_id": "typecheck", "purpose": "Readiness changes type-check."}],
+            "qa_test_intents": [],
+        }
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def capture(self, **overrides) -> BrowserCaptureRun:
+        values = {
+            "view_ids": ("V-0",),
+            "viewport_ids": ("desktop", "mobile"),
+            "stand_in_env_keys": ("ETOUR_BASE_URL",),
+            "demo_flag_env_key": self.facts.demo_flag_env_key,
+            "forbidden_build_literals": ("demo-operator-token",),
+            "build_output_dir": self.facts.build_output_dir,
+            "evidence_dir": self.evidence,
+        }
+        values.update(overrides)
+        return BrowserCaptureRun(**values)
+
+    def run_suite(self, capture, *, captures=None, build_text="console.log('production');", failed=()):
+        probe = probe_report(("RP-1", "passed", {"probe_id": "RP-1", "actual_status": 200}))
+        if captures is None:
+            captures = {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}]}
+
+        def fake_run(argv, **kwargs):
+            del kwargs
+            if "build:web" in argv:
+                bundle = self.target / self.facts.build_output_dir / "assets" / "index.js"
+                bundle.parent.mkdir(parents=True, exist_ok=True)
+                bundle.write_text(build_text, encoding="utf-8")
+            report = None
+            if RUNTIME_PROBE_SPEC_PATH in argv:
+                report = probe
+            elif BROWSER_CAPTURE_SPEC_PATH in argv:
+                report = capture_report(self.target, captures, failed=failed)
+            elif "--" in argv:
+                # repository_e2e: the repository's own specs, one passing test each.
+                own = argv[argv.index("--") + 1:]
+                report = {
+                    "suites": [
+                        {"file": path, "specs": [{"title": path, "tests": [{"results": [{"status": "passed"}]}]}]}
+                        for path in own
+                    ],
+                    "stats": {"unexpected": 0},
+                }
+            if report is not None:
+                path = self.target / "playwright-report/results.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(report), encoding="utf-8")
+            code = 1 if report is not None and report["stats"]["unexpected"] else 0
+            return subprocess.CompletedProcess(args=argv, returncode=code, stdout="", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner._run_bounded", side_effect=fake_run) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+                runtime_probe=RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("ETOUR_BASE_URL",)),
+                browser_capture=capture,
+            )
+        return result, run
+
+    def stage(self, result, stage_id: str):
+        return next(item for item in result.stage_results if item.stage_id == stage_id)
+
+    def test_browser_policy_order_ownership_registry_and_facts(self) -> None:
+        self.assertEqual(self.policy.policy_version, BROWSER_STAGE_POLICY_VERSION)
+        closure = build_runtime_closure_stage_policy(project=self.project).stage_ids
+        self.assertEqual(
+            self.policy.stage_ids, (*closure[:-2], "repository_e2e", "runtime_probe", "browser_capture", "cleanup")
+        )
+        self.assertEqual(self.policy.owner_for_stage("repository_e2e"), "harness_global")
+        self.assertEqual(self.policy.owner_for_stage("browser_capture"), "harness_global")
+        self.assertNotIn("browser_capture", self.project.verification_stage_ids)  # catalog untouched
+        specs = {spec.stage_id: spec for spec in resolve_verification_stage_specs(self.policy)}
+        self.assertEqual(specs["browser_capture"].argv, ("npm", "run", "test:e2e"))
+        self.assertFalse(specs["browser_capture"].developer_selectable)
+        self.assertEqual(specs["browser_capture"].report_kind, "playwright")
+        self.assertIn("browser_capture", self.policy.prompt_context()["stage_capabilities"])
+        self.assertEqual(
+            (self.facts.demo_flag_env_key, self.facts.build_output_dir), ("VITE_SDLC_DEMO_RUNTIME", "apps/web/dist")
+        )
+        with self.assertRaises(HarnessError):
+            browser_stage_facts("unknown_profile")
+
+    def test_flag_reaches_only_browser_capture_and_evidence_is_copied_with_hashes(self) -> None:
+        network = [
+            {
+                "kind": "request_failed",
+                "method": "DELETE",
+                "path": "/records/demo",
+                "cross_origin": True,
+                "request_header_names": ["authorization", "content-type", "x-operator-id"],
+                "error": "net::ERR_FAILED",
+            }
+        ]
+        result, run = self.run_suite(
+            self.capture(),
+            captures={
+                "V-0@desktop": [{"step": 0, "network": network, "network_truncated": False}],
+                "V-0@mobile": [{"step": 0}],
+            },
+        )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertEqual(result.executed_stage_ids, self.policy.stage_ids)
+        calls = [call.args[0] for call in run.call_args_list]
+        capture_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH])].kwargs["env"]
+        probe_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH])].kwargs["env"]
+        self.assertEqual(capture_env["VITE_SDLC_DEMO_RUNTIME"], "1")
+        self.assertEqual(capture_env["ETOUR_BASE_URL"], probe_env["ETOUR_BASE_URL"])  # same stand-in port
+        self.assertEqual(capture_env["DATABASE_URL"], probe_env["DATABASE_URL"])  # same run-scoped database
+        self.assertEqual(capture_env["COMPOSE_PROJECT_NAME"], probe_env["COMPOSE_PROJECT_NAME"])
+        self.assertNotIn("VITE_SDLC_DEMO_RUNTIME", probe_env)  # probes run against the production build
+        for call in run.call_args_list:
+            if call.args[0] != ["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH]:
+                self.assertNotIn("VITE_SDLC_DEMO_RUNTIME", call.kwargs["env"])
+
+        build = self.stage(result, "frontend_build")
+        self.assertEqual(build.build_scan["hits"], [])
+        self.assertEqual(build.build_scan["files_scanned"], 1)
+        captures = self.stage(result, "browser_capture").capture_results
+        self.assertEqual([(item["view_id"], item["viewport_id"], item["step"]) for item in captures],
+                         [("V-0", "desktop", 0), ("V-0", "mobile", 0)])
+        self.assertEqual(captures[0]["network"], network)
+        for item in captures:
+            copied = self.evidence / item["screenshot"]["file"]
+            self.assertTrue(copied.is_file())
+            self.assertEqual(item["screenshot"]["sha256"], hashlib.sha256(copied.read_bytes()).hexdigest())
+        self.assertIn("capture_results", self.stage(result, "browser_capture").to_dict())
+
+    def test_stage_results_record_env_names_by_source_without_secret_values(self) -> None:
+        # L5.5.1: Documentation Closure may only cite env a passed stage really ran with.
+        result, run = self.run_suite(
+            self.capture(),
+            captures={"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}]},
+        )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        capture = self.stage(result, "browser_capture").env_keys
+        probe = self.stage(result, "runtime_probe").env_keys
+        typecheck = self.stage(result, "typecheck").env_keys
+        self.assertEqual(capture["harness"], ["ETOUR_BASE_URL", "VITE_SDLC_DEMO_RUNTIME"])
+        self.assertEqual(capture["harness_constants"], {"VITE_SDLC_DEMO_RUNTIME": "1"})
+        self.assertEqual(probe["harness"], ["ETOUR_BASE_URL"])
+        self.assertEqual(probe["harness_constants"], {})
+        self.assertIn("DATABASE_URL", probe["run_scoped"])
+        self.assertEqual((typecheck["harness"], typecheck["run_scoped"]), ([], []))
+        self.assertEqual(typecheck["fixed"], {"CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
+        # Names only: no run-scoped or stand-in value (database password, loopback port) reaches the evidence.
+        encoded = json.dumps([stage.to_dict()["env_keys"] for stage in result.stage_results])
+        calls = [call.args[0] for call in run.call_args_list]
+        probe_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH])].kwargs["env"]
+        for key in ("DATABASE_URL", "ETOUR_BASE_URL", "POSTGRES_PASSWORD"):
+            self.assertNotIn(probe_env[key], encoded)
+
+    def test_demo_flag_stage_runs_only_the_reviewed_stage_with_the_flag(self) -> None:
+        # L5.5.3 F3: the documented demo build reruns the reviewed command with only the demo flag added.
+        policy = build_verification_stage_policy_version(
+            project=self.project, policy_version=VERIFICATION_STAGE_POLICY_VERSION
+        )
+        packet = {**self.packet, "verification_stage_ids": list(policy.stage_ids)}
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner._run_bounded",
+                side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+            ) as run,
+        ):
+            result = VerificationRunner().run_demo_flag_stage(
+                target_path=self.target,
+                work_packet=packet,
+                verification_policy=policy,
+                stage_id="frontend_build",
+                demo_flag_env_key=self.facts.demo_flag_env_key,
+            )
+            with self.assertRaises(HarnessError):
+                VerificationRunner().run_demo_flag_stage(
+                    target_path=self.target,
+                    work_packet=packet,
+                    verification_policy=policy,
+                    stage_id="frontend_build",
+                    demo_flag_env_key="PATH",
+                )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertEqual([item.stage_id for item in result.stage_results], ["frontend_build"])
+        self.assertEqual([call.args[0] for call in run.call_args_list], [["npm", "run", "build:web"]])
+        env = run.call_args_list[0].kwargs["env"]
+        self.assertEqual(env[self.facts.demo_flag_env_key], "1")
+        self.assertNotIn("ETOUR_BASE_URL", env)
+        self.assertEqual(
+            result.stage_results[0].env_keys["harness_constants"], {self.facts.demo_flag_env_key: "1"}
+        )
+
+    def test_repository_e2e_runs_the_repositorys_own_specs_as_ci_does(self) -> None:
+        # L5.5.6: the target's own Playwright specs, without the Harness specs, the stand-in or the demo flag.
+        own = self.target / "tests/e2e/health.spec.ts"
+        own.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        result, run = self.run_suite(self.capture())
+
+        self.assertEqual(result.status, "passed", result.reason)
+        calls = [call.args[0] for call in run.call_args_list]
+        command = ["npm", "run", "test:e2e", "--", "tests/e2e/health.spec.ts"]
+        self.assertIn(command, calls)
+        self.assertLess(calls.index(command), calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH]))
+        env = run.call_args_list[calls.index(command)].kwargs["env"]
+        self.assertNotIn("ETOUR_BASE_URL", env)
+        self.assertNotIn(self.facts.demo_flag_env_key, env)
+        self.assertIn("DATABASE_URL", env)  # same isolated database as the rest of the suite
+        stage = self.stage(result, "repository_e2e")
+        self.assertEqual(stage.env_keys["harness"], [])
+
+    def test_repository_e2e_passes_when_the_repository_has_no_spec_of_its_own(self) -> None:
+        result, run = self.run_suite(self.capture())
+
+        self.assertEqual(result.status, "passed", result.reason)
+        stage = self.stage(result, "repository_e2e")
+        self.assertEqual((stage.status, stage.argv), ("passed", ()))
+        self.assertNotIn(["npm", "run", "test:e2e"], [call.args[0][:3] + call.args[0][4:] for call in run.call_args_list])
+
+    @unittest.skipUnless(os.name == "nt", "Windows MAX_PATH behavior")
+    def test_capture_copies_source_and_destination_beyond_max_path(self) -> None:
+        source = self.target / "test-results" / ("source-" + "x" * 90) / ("nested-" + "y" * 90) / "capture.png"
+        evidence = Path(self.temp_dir.name) / ("evidence-" + "a" * 90) / ("nested-" + "b" * 90)
+        source_io = _windows_io_path(source)
+        try:
+            source_io.parent.mkdir(parents=True, exist_ok=True)
+            source_io.write_bytes(b"long-path-png")
+            self.assertGreater(len(str(source.resolve())), 260)
+            self.assertGreater(len(str((evidence / "BV-0123456789ab__desktop__s00.png").resolve())), 260)
+
+            screenshot, error = _capture_screenshot(
+                {
+                    "view_id": "BV-0123456789ab",
+                    "viewport_id": "desktop",
+                    "step": 0,
+                    "attachment_path": str(source.resolve()),
+                },
+                target_root=self.target,
+                capture=self.capture(evidence_dir=evidence),
+            )
+
+            self.assertEqual(error, "")
+            self.assertIsNotNone(screenshot)
+            assert screenshot is not None
+            self.assertEqual(screenshot["sha256"], hashlib.sha256(b"long-path-png").hexdigest())
+            self.assertTrue(_windows_io_path(evidence / screenshot["file"]).is_file())
+        finally:
+            shutil.rmtree(_windows_io_path(self.target / "test-results"), ignore_errors=True)
+            shutil.rmtree(_windows_io_path(evidence.parent), ignore_errors=True)
+
+    def test_r3_demo_literal_in_production_build_fails_frontend_build(self) -> None:
+        result, run = self.run_suite(self.capture(), build_text='const token="demo-operator-token";')
+
+        build = self.stage(result, "frontend_build")
+        self.assertEqual((build.status, build.failure_kind), ("failed", "implementation"))
+        self.assertIn("demo-operator-token", build.reason)
+        self.assertEqual(build.build_scan["hits"], [{"literal": "demo-operator-token", "files": ["apps/web/dist/assets/index.js"]}])
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn(["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH], calls)
+        self.assertEqual(calls[-1], ["npm", "run", "db:down"])  # cleanup still runs
+
+    def test_r3_without_build_output_is_a_policy_failure_and_no_literals_skip_the_scan(self) -> None:
+        result, _ = self.run_suite(self.capture(build_output_dir="apps/missing/dist"))
+        build = self.stage(result, "frontend_build")
+        self.assertEqual((build.status, build.failure_kind), ("failed", "policy"))
+
+        result, _ = self.run_suite(self.capture(forbidden_build_literals=()))
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertIsNone(self.stage(result, "frontend_build").build_scan)
+
+    def test_capture_report_missing_a_view_or_with_gaps_is_a_policy_failure(self) -> None:
+        for captures in (
+            {"V-0@desktop": [{"step": 0}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 1}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0, "status": "unknown"}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}], "V-0@tablet": [{"step": 0}]},
+        ):
+            with self.subTest(captures=list(captures)):
+                result, _ = self.run_suite(self.capture(), captures=captures)
+                stage = self.stage(result, "browser_capture")
+                self.assertEqual((stage.status, stage.failure_kind), ("failed", "policy"), stage.reason)
+
+    def test_step_failed_capture_is_evidence_and_a_crashed_test_still_keeps_its_captures(self) -> None:
+        captures = {
+            "V-0@desktop": [{"step": 0}, {"step": 1, "status": "step_failed", "error": "locator \x1b[2mnot found\x1b[22m"}],
+            "V-0@mobile": [{"step": 0}],
+        }
+        result, _ = self.run_suite(self.capture(), captures=captures)
+        self.assertEqual(result.status, "passed", result.reason)
+        failed_step = self.stage(result, "browser_capture").capture_results[1]
+        self.assertEqual((failed_step["status"], failed_step["error"]), ("step_failed", "locator not found"))
+        self.assertNotIn("observe", failed_step)
+
+        # A missed observe is a passed step that carries its own outcome; an unknown status is dropped.
+        observed = {"V-0@desktop": [
+            {"step": 0, "observe": {"status": "missed", "error": "Timeout [2m5000ms[22m", "network_held": True}},
+            {"step": 1, "observe": {"status": "maybe"}},
+        ], "V-0@mobile": [{"step": 0}]}
+        result, _ = self.run_suite(self.capture(), captures=observed)
+        steps = self.stage(result, "browser_capture").capture_results
+        self.assertEqual(
+            (steps[0]["status"], steps[0]["observe"]),
+            ("passed", {"status": "missed", "error": "Timeout 5000ms", "network_held": True}),
+        )
+        self.assertNotIn("observe", steps[1])
+
+        result, _ = self.run_suite(self.capture(), captures=captures, failed=("V-0@mobile",))
+        stage = self.stage(result, "browser_capture")
+        self.assertEqual((stage.status, stage.failure_kind), ("failed", "implementation"))
+        self.assertEqual(len(stage.capture_results), 3)
+        self.assertEqual(stage.capture_results[-1]["test_status"], "failed")
+
+    def test_browser_capture_fails_closed_on_unsafe_inputs_and_missing_spec(self) -> None:
+        for capture in (
+            None,
+            self.capture(view_ids=()),
+            self.capture(view_ids=("V-0", "V-0")),
+            self.capture(view_ids=("not-a-view",)),
+            self.capture(viewport_ids=("Desktop",)),
+            self.capture(demo_flag_env_key="NODE_OPTIONS"),
+            self.capture(demo_flag_env_key="DATABASE_URL"),
+            self.capture(demo_flag_env_key="ETOUR_BASE_URL"),  # collides with a stand-in key
+        ):
+            with self.subTest(capture=capture), self.assertRaises(HarnessError) as caught:
+                self.run_suite(capture)
+            self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
+
+        (self.target / BROWSER_CAPTURE_SPEC_PATH).unlink()
+        result, run = self.run_suite(self.capture())
+        self.assertEqual((result.status, result.failure_kind), ("failed", "policy"))
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

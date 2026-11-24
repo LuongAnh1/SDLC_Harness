@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
 
 from sdlc_harness.agents.designer import (
-    GRAPH_VERSION_V2,
+    GRAPH_VERSION,
     RUNTIME_BINDING_VERSION,
     SURFACE_CONTRACT_VERSION,
     UI_EXPERIENCE_CONTRACT_V2,
@@ -17,7 +21,6 @@ from sdlc_harness.agents.designer import (
     completion_findings,
     design_bundle_findings,
     new_vertical_design_graph,
-    resolve_ui_contract_pin,
     validate_vertical_design_graph,
 )
 from sdlc_harness.agents.designer.execution import (
@@ -35,14 +38,12 @@ from sdlc_harness.agents.designer.execution import (
 from sdlc_harness.agents.designer.graph import (
     UI_LAYERED_LAYOUT_V1,
     UI_LAYOUT_CONTRACT_KEY,
+    _new_boundary_contract_findings,
     canonicalize_composition_wiring,
     graph_digest,
 )
 from sdlc_harness.agents.designer.projections import render_design_projections, render_ui_feature_experience
-from sdlc_harness.agents.validator.design_validation import (
-    _holistic_ui_review_instruction,
-    _vertical_design_review_view,
-)
+from sdlc_harness.agents.designer.prompting import designer_prompt_payload
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.agents.designer import UI_CONTRACT_STATE_KEY
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
@@ -51,7 +52,36 @@ from tests._support import GitRepositoryTemplate, populate_typescript_target
 from sdlc_harness.agents.designer.ui_context import build_ui_repo_context, chain_path_to, required_props
 from sdlc_harness.agents.designer.uiux import RUNTIME_SURFACE_BINDING_VERSION
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.profiles import VERIFICATION_STAGE_POLICY_VERSION
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.agents.designer.uiux import UiUxGuidanceProvider as _UiUxProvider
+
+from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstExtractor
+
+
+class _WithTypeScript(unittest.TestCase):
+    def setUp(self) -> None:
+        candidates = [os.environ.get("SDLC_TEST_TYPESCRIPT_NODE_MODULES", "")] + [
+            str(Path(__file__).resolve().parents[2] / name / "node_modules")
+            for name in ("SDLC_Target_Conduit", "SDLC_Target_TypeScript")
+        ]
+        modules = next((x for x in candidates if x and (Path(x) / "typescript/package.json").is_file()), None)
+        if not modules or not shutil.which("node"):
+            self.skipTest("needs node and TypeScript (SDLC_TEST_TYPESCRIPT_NODE_MODULES)")
+
+        def run(argv, **kwargs):
+            env = {**dict(kwargs.pop("env") or {}), "NODE_PATH": modules}
+            return subprocess.run(argv, env=env, **kwargs)
+
+        self.typescript_modules = Path(modules)
+        factory = patch("sdlc_harness.agents.designer.ui_context.TypeScriptAstExtractor",
+                        side_effect=lambda: TypeScriptAstExtractor(run_process=run))
+        factory.start()
+        self.addCleanup(factory.stop)
+
+
+# The UI/UX skill is an external tool; Designer loop tests use its fake provider.
+_FAKE_UIUX = _UiUxProvider(skill_root=None, fake_mode=True)
 
 MAIN = """import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -129,7 +159,60 @@ LANDSCAPE = {
 }
 
 
-class UiRepoContextTest(unittest.TestCase):
+class UiRepoContextTest(_WithTypeScript):
+    def test_callback_props_arrow_components_and_complex_jsx_are_not_lost(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            write_web_shell(target)
+            web = target / "apps/web/src"
+            (web / "Form.tsx").write_text(
+                'import type { FC } from "react";\n'
+                'export interface Fields { onSubmit: (ev: Event) => void; values: Record<string,string>; optional?: string }\n'
+                'export const Form: FC<Fields> = ({ onSubmit, values }) => <form onSubmit={onSubmit} />;\n', encoding="utf-8")
+            (web / "AppShell.tsx").write_text(
+                'import { Form as FieldsForm } from "./Form";\n'
+                'export function AppShell({ onSubmit }: { onSubmit: (ev: Event) => void }) {\n'
+                'return <FieldsForm values={{ title: "sample" } as Record<string,string>} onSubmit={onSubmit} />; }\n'
+                'export const Unknown = (props: MissingType) => <div />;\n'
+                'export const Empty = () => <div />;\n', encoding="utf-8")
+            context = build_ui_repo_context(target_path=target, landscape=LANDSCAPE, project_profile_id="typescript_fullstack_v1")
+        self.assertEqual(required_props(context, SHELL), ["onSubmit"])
+        form = "apps/web/src/Form.tsx#Form"
+        self.assertEqual(set(required_props(context, form)), {"onSubmit", "values"})
+        self.assertEqual(chain_path_to(context, form), [ENTRY, SHELL, form])
+        shell = next(x for x in context["composition_chain"] if x["ref"] == SHELL)
+        self.assertEqual(shell["passes_props"][form], ["onSubmit", "values"])
+        unknown = context["components"]["apps/web/src/AppShell.tsx#Unknown"]
+        self.assertEqual(unknown["props_status"], "unknown")
+        self.assertIsNone(unknown["props"])
+        empty = context["components"]["apps/web/src/AppShell.tsx#Empty"]
+        self.assertEqual(empty["props_status"], "known")
+        self.assertEqual(empty["props"], [])
+
+    def test_bound_compiler_still_reads_the_worktree_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            source = target / "Screen.tsx"
+            source.write_bytes(b'\xef\xbb\xbfexport const Screen = ({ callback }: { callback: () => void }) => <div />;\r\n')
+            facts = TypeScriptAstExtractor().extract_ui_facts(target_path=target, source_paths=["Screen.tsx"],
+                typescript_package_root=self.typescript_modules.parent)
+            import hashlib
+            self.assertEqual(facts["Screen.tsx"]["content_sha256"], "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest())
+        component = facts["Screen.tsx"]["components"][0]
+        self.assertEqual(component["symbol"], "Screen")
+        self.assertEqual(component["props"][0]["name"], "callback")
+
+    def test_unavailable_ast_is_explicit_and_never_verified_empty_props(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            write_web_shell(target)
+            context = build_ui_repo_context(target_path=target, landscape=LANDSCAPE,
+                project_profile_id="typescript_fullstack_v1", ast_extractor=TypeScriptAstExtractor(which=lambda *a, **kw: None))
+        self.assertEqual(context["extraction"]["status"], "unavailable")
+        self.assertTrue(context["uncertainty"])
+        self.assertIsNone(context["entrypoint"])
+        self.assertEqual(context["components"], {})
+
     def test_extracts_entrypoint_chain_props_and_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp)
@@ -160,7 +243,7 @@ class UiRepoContextTest(unittest.TestCase):
         self.assertEqual(context["styles"]["convention"], "none")
         self.assertFalse(context["auth"]["present"])
         self.assertFalse(context["verification"]["dom_capable"])
-        self.assertFalse(context["verification"]["browser_stage_active"])
+        self.assertTrue(context["verification"]["browser_stage_active"])
         self.assertTrue(all(ref.startswith("repo:apps/web/src/") for ref in context["evidence_refs"]))
         # Inline object prop types are parsed too.
         self.assertEqual(required_props(context, "apps/web/src/Banner.tsx#Banner"), ["text"])
@@ -193,37 +276,56 @@ class UiRepoContextTest(unittest.TestCase):
             )
         self.assertIsNone(context)
 
-
-class UiContractPinTest(unittest.TestCase):
-    def test_v2_requires_graph_v2_and_uiux_enforce(self) -> None:
-        self.assertEqual(
-            resolve_ui_contract_pin(
-                ui_contract_version=UI_EXPERIENCE_CONTRACT_V2, graph_v2=True, uiux_mode="enforce", run_id="r"
-            ),
-            UI_EXPERIENCE_CONTRACT_V2,
-        )
-        for graph_v2, mode in ((False, "enforce"), (True, "off")):
-            with self.assertRaises(HarnessError) as raised:
-                resolve_ui_contract_pin(
-                    ui_contract_version=UI_EXPERIENCE_CONTRACT_V2, graph_v2=graph_v2, uiux_mode=mode, run_id="r"
-                )
-            self.assertEqual(raised.exception.error_code, "designer_ui_contract_invalid")
-
-    def test_config_defaults_to_v1(self) -> None:
-        root = Path(__file__).resolve().parents[1]
+    def test_reads_http_clients_per_file_dom_directive_and_pinned_stage_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            default = load_settings(root=root, runtime_root=Path(temp), overrides={})
-            pinned = load_settings(
-                root=root,
-                runtime_root=Path(temp),
-                overrides={"SDLC_DESIGNER_UI_CONTRACT_VERSION": UI_EXPERIENCE_CONTRACT_V2},
+            target = Path(temp)
+            write_web_shell(target)
+            web = target / "apps/web/src"
+            (web / "api.ts").write_text(
+                'import axios from "axios";\n'
+                'const http = axios.create({ baseURL: "/api" });\n'
+                "export async function getArticles() { return (await axios.get(`articles?limit=10`)).data; }\n"
+                'export async function getTags() { return (await http.get("tags")).data; }\n',
+                encoding="utf-8",
             )
-        self.assertEqual(default.designer_ui_contract_version, "ui_experience_contract_v1")
-        self.assertEqual(pinned.designer_ui_contract_version, UI_EXPERIENCE_CONTRACT_V2)
+            # A package default import used with a non-literal argument is not an HTTP client.
+            (web / "format.ts").write_text(
+                'import _ from "lodash";\nexport async function title(value: object) { return _.get(value, "title"); }\n',
+                encoding="utf-8",
+            )
+            (web / "AppShell.test.tsx").write_text(
+                '// @vitest-environment jsdom\nimport { it } from "vitest";\nit("renders", () => {});\n',
+                encoding="utf-8",
+            )
+            legacy = build_ui_repo_context(
+                target_path=target, landscape=LANDSCAPE, project_profile_id="typescript_fullstack_v1"
+            )
+            pinned = build_ui_repo_context(
+                target_path=target,
+                landscape=LANDSCAPE,
+                project_profile_id="typescript_fullstack_v1",
+                verification_policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+            )
+
+        assert legacy is not None and pinned is not None
+        self.assertEqual(
+            [item["ref"] for item in legacy["data_clients"]],
+            ["apps/web/src/api.ts#getArticles", "apps/web/src/api.ts#getTags"],
+        )
+        verification = legacy["verification"]
+        self.assertEqual(verification["unit_environment"], "node")
+        self.assertTrue(verification["dom_capable"])
+        self.assertEqual(verification["dom_test_directive"], "// @vitest-environment jsdom")
+        # No pinned policy means the current suite.
+        self.assertEqual(verification["active_stage_ids"], pinned["verification"]["active_stage_ids"])
+        self.assertTrue(verification["browser_stage_active"])
+        self.assertIn("browser_e2e", pinned["verification"]["active_stage_ids"])
+        self.assertTrue(pinned["verification"]["browser_stage_active"])
 
 
-class _UiGraphFixture(unittest.TestCase):
+class _UiGraphFixture(_WithTypeScript):
     def setUp(self) -> None:
+        super().setUp()
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         write_web_shell(Path(temp.name))
@@ -292,17 +394,18 @@ class _UiGraphFixture(unittest.TestCase):
             },
         }
 
-    def _graph(self, nodes: list[dict[str, object]], *, layered: bool = False) -> dict[str, object]:
+    def _graph(self, nodes: list[dict[str, object]]) -> dict[str, object]:
         graph: dict[str, object] = {
-            "schema_version": GRAPH_VERSION_V2,
+            "schema_version": GRAPH_VERSION,
             "revision": 1,
             "run_id": "run-ui-v2",
             "snapshot_binding": {
                 "requirement_digest": "sha256:req",
                 "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
                 "ui_repo_context": self.context,
-                "requirement_reference_ids": ["AC-1", "DEC-1", "MF-1", "PRE-1"],
-                **({UI_LAYOUT_CONTRACT_KEY: UI_LAYERED_LAYOUT_V1} if layered else {}),
+                "requirement_reference_ids": ["AC-1", "D-1", "D-2", "MF-1", "PRE-1"],
+                "approved_decision_ids": ["D-1"],
+                UI_LAYOUT_CONTRACT_KEY: UI_LAYERED_LAYOUT_V1,
             },
             "partitions": [
                 {
@@ -385,6 +488,16 @@ class _UiGraphFixture(unittest.TestCase):
 
 
 class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
+    def test_unknown_props_block_only_a_target_used_by_this_design(self) -> None:
+        nodes = [*self._wiring_nodes(), self._view()]
+        self.context["components"][VIEW_REF]["props_status"] = "unknown"
+        self.context["components"][VIEW_REF]["props"] = None
+        # An unrelated component and a newly added target are not AS-IS props checks.
+        self.assertNotIn("ui_source_facts_unresolved", self._categories(nodes))
+        nodes[-1]["disposition"] = "modify"
+        nodes[-1]["evidence_refs"] = ["RLA-view"]
+        self.assertIn("ui_source_facts_unresolved", self._categories(nodes))
+
     def test_external_input_with_modified_hops_passes(self) -> None:
         categories = self._categories([*self._wiring_nodes(), self._view()])
         self.assertFalse({c for c in categories if c.startswith("ui_") or c == "composition_hop_unmodeled"}, categories)
@@ -464,6 +577,29 @@ class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
         view = self._view(inputs=[self._items_input(binding="MF-1", requirement_refs=["MF-1"])])
         self.assertNotIn("ui_required_input_unbound", self._categories([*self._wiring_nodes(), view]))
 
+    def test_demo_fixture_requires_an_accepted_d_decision(self) -> None:
+        accepted = self._items_input(
+            source="demo_fixture",
+            binding="D-1",
+            requirement_refs=["D-1"],
+        )
+        accepted_view = self._view(inputs=[accepted], status="fixture_required")
+        self.assertNotIn(
+            "ui_required_input_unbound",
+            self._categories([*self._wiring_nodes(), accepted_view]),
+        )
+
+        rejected = self._items_input(
+            source="demo_fixture",
+            binding="D-2",
+            requirement_refs=["D-2"],
+        )
+        rejected_view = self._view(inputs=[rejected], status="fixture_required")
+        self.assertIn(
+            "ui_required_input_unbound",
+            self._categories([*self._wiring_nodes(), rejected_view]),
+        )
+
     def test_runnable_status_must_follow_inputs(self) -> None:
         categories = self._categories([*self._wiring_nodes(), self._view(status="bound")])
         self.assertIn("ui_runnable_status_inconsistent", categories)
@@ -472,6 +608,28 @@ class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
         self.assertIn("ui_required_input_undeclared", self._categories(self._wiring_nodes(declare_shell_props=False)))
         self.assertNotIn("ui_required_input_undeclared", self._categories(self._wiring_nodes()))
 
+    def test_every_invalid_surface_contract_is_reported_in_one_rejection(self) -> None:
+        # design_v12 designer-0008 repeated one misnesting on three nodes; the gate named only the first node.
+        nodes = self._wiring_nodes()
+        for node in nodes:
+            node["surface_contract"]["states"] = ["other"]
+        with self.assertRaises(HarnessError) as caught:
+            self._graph(nodes)
+        self.assertTrue(caught.exception.message.startswith("2 nodes have invalid surface contracts: "))
+        self.assertIn("Node VDN-1 UI transitions reference undeclared states", caught.exception.message)
+        self.assertIn("Node VDN-2 UI transitions reference undeclared states", caught.exception.message)
+        with self.assertRaises(HarnessError) as single:
+            self._graph(nodes[:1])
+        self.assertTrue(single.exception.message.startswith("Node VDN-1 UI transitions reference undeclared states"))
+
+    def test_undeclared_required_props_are_a_delta_time_finding(self) -> None:
+        # design_v10 designer-0006: ArticleEditor.onSubmit was reported only at completion, one repair round later.
+        empty = self._graph([])
+        undeclared = _new_boundary_contract_findings(empty, self._graph(self._wiring_nodes(declare_shell_props=False)))
+        self.assertIn("ui_required_input_undeclared", {item["category"] for item in undeclared})
+        declared = _new_boundary_contract_findings(empty, self._graph(self._wiring_nodes()))
+        self.assertNotIn("ui_required_input_undeclared", {item["category"] for item in declared})
+
     def test_missing_runtime_surface_is_structurally_invalid_under_v2(self) -> None:
         node = self._view()
         del node["surface_contract"]["runtime_surface"]
@@ -479,16 +637,8 @@ class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
             self._graph([node])
         self.assertIn("runtime_surface", raised.exception.message)
 
-    def test_v1_graph_ignores_runtime_surface_rules(self) -> None:
-        graph = self._graph([self._view()])
-        binding = {key: value for key, value in graph["snapshot_binding"].items() if key != "designer_ui_contract_version"}
-        historical = json.loads(json.dumps({**graph, "snapshot_binding": binding}))
-        historical["artifact_digest"] = graph_digest(historical)
-        categories = {str(item["category"]) for item in design_bundle_findings(historical, landscape=LANDSCAPE)}
-        self.assertFalse({c for c in categories if c.startswith("ui_") or c == "composition_hop_unmodeled"})
 
-
-class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
+class FakeDesignerRuntimeSurfaceTest(_WithTypeScript):
     REQUIREMENT = {
         "use_case_id": "UC-UI",
         "preconditions": [{"id": "PRE-1", "text": "Records come from search."}],
@@ -534,9 +684,10 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
             settings = load_settings(
                 root=root,
                 runtime_root=root / ".runtime",
-                overrides={"SDLC_LLM_MODE": "fake", "SDLC_UIUX_SKILL_MODE": "enforce"},
+                overrides={"SDLC_LLM_MODE": "fake"},
             )
             result = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=RuntimeStore(repo_root=root, runtime_root=root / ".runtime"),
                 llm_client=None,
@@ -546,12 +697,15 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V2,
-                uiux_mode="enforce",
-                uiux_contract_version=UIUX_CONTRACT_VERSION,
             )
+            session = json.loads((root / result.session_path).read_text(encoding="utf-8"))
 
+        # Guidance results are kept as digests only; the UI node cites both successful searches.
+        guidance = [item for items in session["guidance_observations"].values() for item in items]
+        self.assertTrue(guidance)
+        self.assertTrue(all("results" not in item and str(item["results_digest"]).startswith("sha256:") for item in guidance))
         ui_node = next(node for node in result.graph["nodes"] if node["surface"] == "ui")
+        self.assertEqual(len(ui_node["surface_contract"]["experience_contract"]["guidance_refs"]), 2)
         surface = ui_node["surface_contract"]["runtime_surface"]
         self.assertEqual(surface["composition_path"], [ENTRY, SHELL])
         self.assertEqual({item["name"] for item in surface["required_inputs"]}, {"title", "health"})
@@ -572,7 +726,7 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
     def test_model_prompt_scaffolds_runtime_surface_from_ui_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, landscape, binding = self._setup(Path(directory))
-        graph = new_vertical_design_graph(run_id="run-ui-v2", snapshot_binding=binding, contract_version=GRAPH_VERSION_V2)
+        graph = new_vertical_design_graph(run_id="run-ui-v2", snapshot_binding=binding, contract_version=GRAPH_VERSION)
         partition = _active_partition(requirement_model=self.REQUIREMENT, landscape=landscape, graph=graph)
         assert partition is not None
         node = next(op["node"] for op in partition["delta_scaffold"]["operations"] if op["op"] == "add_node")
@@ -580,6 +734,8 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
         self.assertEqual(scaffold["entrypoint"], ENTRY)
         self.assertEqual(scaffold["composition_path"][0], ENTRY)
         self.assertEqual(node["surface_contract"]["experience_contract"]["schema_version"], UI_EXPERIENCE_CONTRACT_V2)
+        # With a composition chain, UI gets no arbitrary top-3 anchor guesses; the chain itself is in the prompt.
+        self.assertEqual(partition["surface_work"][0]["candidate_anchors"], [])
 
         prompt = _designer_prompt(
             requirement_model=self.REQUIREMENT,
@@ -591,9 +747,8 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
             repair_task=None,
             observations_since_delta=0,
             last_invalid_action="",
-            uiux_mode="enforce",
         )
-        payload = json.loads(prompt[prompt.index('{"active_partition"'):])
+        payload = designer_prompt_payload(prompt)
         self.assertEqual(payload["ui_runtime_context"]["entrypoint"], ENTRY)
         self.assertEqual(
             payload["ui_runtime_context"]["dependency_refs"],
@@ -627,7 +782,11 @@ def holistic_experience(screen_id: str, evidence_refs: list[str], **visual: obje
         },
         "visual_contract": {
             "hierarchy": ["Title, list, status."],
-            "layout": ["header: title", "main: record list", "footer: status region"],
+            "layout": [
+                {"region": "header", "layer": "page", "content": "title"},
+                {"region": "main", "layer": "page", "content": "record list"},
+                {"region": "footer", "layer": "page", "content": "status region"},
+            ],
             "typography": ["h1 title."],
             "color_and_tokens": ["Semantic danger color for delete."],
             "focus_appearance": ["2px outline."],
@@ -740,9 +899,9 @@ class HolisticExperienceTest(_UiGraphFixture):
         cancel_exp["component_structure"] = ["Dialog (shared): offers cancel", "RetryAction: re-submits"]
         cancel_exp["runtime_states"]["loading"] = {"presentation": "Dialog busy.", "trigger": "Cancel pressed."}
         cancel_exp["visual_contract"]["layout"] = [
-            "main: record list; selection unchanged",
-            "dialog layer: confirm and cancel actions",
-            "alert region: interruption notice with retry",
+            {"region": "main", "layer": "page", "content": "record list; selection unchanged"},
+            {"region": "dialog layer", "layer": "overlay", "content": "confirm and cancel actions"},
+            {"region": "alert region", "layer": "page", "content": "interruption notice with retry"},
         ]
         feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), cancel, main]))
         assert feature is not None
@@ -782,15 +941,15 @@ class HolisticExperienceTest(_UiGraphFixture):
         ]
         return view
 
-    def test_layered_layout_is_required_only_for_pinned_graphs(self) -> None:
-        legacy = self._view_with_experience()
-        self._graph([*self._wiring_nodes(), legacy])
+    def test_layout_items_must_be_layered(self) -> None:
+        flat = self._view_with_experience()
+        flat["surface_contract"]["experience_contract"]["visual_contract"]["layout"] = ["main: record list"]
         with self.assertRaises(HarnessError) as raised:
-            self._graph([*self._wiring_nodes(), self._view_with_experience()], layered=True)
+            self._graph([*self._wiring_nodes(), flat])
         self.assertIn("{region,layer,content}", raised.exception.message)
         with self.assertRaises(HarnessError):
-            self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "floating"))], layered=True)
-        self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "page"))], layered=True)
+            self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "floating"))])
+        self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "page"))])
 
     def test_screen_nodes_must_agree_on_region_layer_and_style(self) -> None:
         main = self._layered(self._view_with_experience(), ("main", "page"), ("notice", "overlay"))
@@ -800,39 +959,26 @@ class HolisticExperienceTest(_UiGraphFixture):
         )
         other.update({"id": "VDN-4", "scenario_id": "SC-3"})
         nodes = [*self._wiring_nodes(), main, other]
-        findings = design_bundle_findings(self._graph(nodes, layered=True), landscape=LANDSCAPE)
+        findings = design_bundle_findings(self._graph(nodes), landscape=LANDSCAPE)
         layout = [item for item in findings if item["category"] == "ui_screen_layout_inconsistent"]
         self.assertEqual([item["subject_ref"] for item in layout], ["delete-screen:VDN-4:notice"])
         self.assertIn("layer overlay", layout[0]["expected_change"])
         self.assertIn("ui_screen_style_inconsistent", {item["category"] for item in findings})
-        legacy = {str(item["category"]) for item in design_bundle_findings(self._graph(nodes), landscape=LANDSCAPE)}
-        self.assertFalse(legacy & {"ui_screen_layout_inconsistent", "ui_screen_style_inconsistent"})
 
     def test_declared_overlay_layer_drives_the_wireframe(self) -> None:
         view = self._layered(self._view_with_experience(), ("main", "page"), ("retry notice", "overlay"))
-        feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), view], layered=True))
+        feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), view]))
         assert feature is not None
         stacked, overlaid = str(feature["markdown"]).split("### Wireframe (desktop)")[1].split("With overlay open")[:2]
         self.assertNotIn("RETRY NOTICE", stacked)
         self.assertIn("RETRY NOTICE: retry notice content", overlaid)
         self.assertIn("- `overlay` retry notice: retry notice content", str(feature["markdown"]))
 
-    def test_semantic_view_and_guidance_key_are_v2_only(self) -> None:
+    def test_guidance_key_covers_the_whole_ui_feature(self) -> None:
         graph = self._graph([self._view()])
-        self.assertIn("ui_repo_context", _vertical_design_review_view(graph))
-        self.assertIn("ui_journey_coherence", _holistic_ui_review_instruction(graph))
         self.assertEqual(
             _guidance_key(graph=graph, requirement_model={"use_case_id": "UC1"}, partition_key="SC-1|web"),
             "ui-feature|UC1",
-        )
-        historical = json.loads(json.dumps(graph))
-        historical["snapshot_binding"].pop("designer_ui_contract_version")
-        self.assertNotIn("ui_repo_context", _vertical_design_review_view(historical))
-        self.assertEqual(_holistic_ui_review_instruction(historical), "")
-        self.assertIsNone(render_ui_feature_experience(historical))
-        self.assertEqual(
-            _guidance_key(graph=historical, requirement_model={"use_case_id": "UC1"}, partition_key="SC-1|web"),
-            "SC-1|web",
         )
 
 
@@ -1257,6 +1403,24 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         self.assertEqual(normalization["kind"], "closed_unbalanced_brackets")
         self.assertEqual(payload, json.loads(raw))
 
+    def test_operations_closed_with_brace_before_later_keys_is_swapped(self) -> None:
+        action = self._action(json.loads(json.dumps(self.NODE)))
+        delta = action["arguments"]["delta"]
+        # Conduit UC4 H-r1 (designer-0007): `operations` comes before the claims and is closed with '}'.
+        action["arguments"]["delta"] = {
+            key: delta[key]
+            for key in ("schema_version", "base_graph_digest", "partition", "operations", "completion_claims", "unresolved_items")
+        }
+        raw = json.dumps(action, separators=(",", ":"))
+        marker = raw.index(',"completion_claims"')
+        self.assertEqual(raw[marker - 1], "]")
+        broken = raw[: marker - 1] + "}" + raw[marker:]
+        with self.assertRaises(json.JSONDecodeError):
+            _parse_designer_tool_action(broken, require_runtime_binding=True)
+        payload, normalization = _parse_designer_tool_action(broken, require_runtime_binding=True, repair_closers=True)
+        self.assertEqual(normalization["kind"], "swapped_mismatched_closers")
+        self.assertEqual(payload, json.loads(raw))
+
     def test_stray_closers_are_removed_where_the_parser_stops(self) -> None:
         action = self._action(json.loads(json.dumps(self.NODE)))
         action["arguments"]["delta"]["operations"].insert(0, {"op": "set_partition_coverage", "coverage": {"ui": "covered"}})
@@ -1270,6 +1434,38 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         self.assertEqual(normalization["kind"], "removed_redundant_closers")
         self.assertEqual(payload, json.loads(raw))
 
+    def test_operations_left_open_before_the_next_item_are_closed_where_parsing_stops(self) -> None:
+        # Conduit UC4 design_v13 designer-0008: each add_node operation ended one '}' short.
+        action = self._action(json.loads(json.dumps(self.NODE)))
+        second = json.loads(json.dumps(self.NODE))
+        second["temp_ref"] = "tmp:SC-1:ui-2"
+        action["arguments"]["delta"]["operations"].append({"op": "add_node", "node": second})
+        action["arguments"]["delta"] = {
+            key: action["arguments"]["delta"][key]
+            for key in ("schema_version", "base_graph_digest", "partition", "operations", "completion_claims", "unresolved_items")
+        }
+        raw = json.dumps(action, separators=(",", ":"))
+        broken = raw.replace('}}},{"op"', '}},\n{"op"', 1).replace('}}}],"completion_claims"', '}}],"completion_claims"', 1)
+        self.assertEqual(broken.count("}"), raw.count("}") - 2)
+        with self.assertRaises(json.JSONDecodeError):
+            _parse_designer_tool_action(broken, require_runtime_binding=True)
+        payload, normalization = _parse_designer_tool_action(broken, require_runtime_binding=True, repair_closers=True)
+        self.assertEqual(normalization["kind"], "closed_open_array_items")
+        self.assertEqual(len(normalization["inserted_closer_positions"]), 2)
+        self.assertEqual(payload, json.loads(raw))
+
+    def test_trailing_comma_before_a_closer_is_dropped_where_parsing_stops(self) -> None:
+        # Conduit UC4 design_v14 designer-0008: `},` after the last operation, then the `]` of operations.
+        raw = json.dumps(self._action(json.loads(json.dumps(self.NODE))), separators=(",", ":"))
+        marker = raw.index('}]')
+        broken = raw[: marker + 1] + ",\n\n" + raw[marker + 1:]
+        with self.assertRaises(json.JSONDecodeError):
+            _parse_designer_tool_action(broken, require_runtime_binding=True)
+        payload, normalization = _parse_designer_tool_action(broken, require_runtime_binding=True, repair_closers=True)
+        self.assertEqual(normalization["kind"], "dropped_trailing_commas")
+        self.assertEqual(normalization["removed_comma_positions"], [marker + 1])
+        self.assertEqual(payload, json.loads(raw))
+
     def test_runtime_surface_under_experience_is_relocated(self) -> None:
         node = json.loads(json.dumps(self.NODE))
         node["surface_contract"]["experience_contract"]["runtime_surface"] = {"schema_version": RUNTIME_SURFACE_BINDING_VERSION}
@@ -1279,11 +1475,41 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         self.assertNotIn("runtime_surface", contract["experience_contract"])
         self.assertEqual(normalization["relocated_runtime_surface"], ["tmp:SC-1:ui"])
 
+    def test_experience_fields_under_surface_contract_are_relocated(self) -> None:
+        # design_v12 designer-0008: experience_contract closed before visual_contract on every UI node.
+        node = json.loads(json.dumps(self.NODE))
+        contract = node["surface_contract"]
+        contract["visual_contract"] = {"hierarchy": ["form"]}
+        contract["experience_contract"].pop("visual_contract", None)
+        payload, normalization = _parse_designer_tool_action(json.dumps(self._action(node)), require_runtime_binding=True)
+        contract = payload["arguments"]["delta"]["operations"][0]["node"]["surface_contract"]
+        self.assertNotIn("visual_contract", contract)
+        self.assertEqual(contract["experience_contract"]["visual_contract"], {"hierarchy": ["form"]})
+        self.assertEqual(normalization["relocated_experience_fields"], ["tmp:SC-1:ui.visual_contract"])
+        # A field present in both places is left for the gate: the Harness never chooses between two values.
+        node["surface_contract"]["experience_contract"]["visual_contract"] = {"hierarchy": ["other"]}
+        payload, normalization = _parse_designer_tool_action(json.dumps(self._action(node)), require_runtime_binding=True)
+        self.assertIn("visual_contract", payload["arguments"]["delta"]["operations"][0]["node"]["surface_contract"])
+        self.assertNotIn("relocated_experience_fields", normalization)
+
     def test_unrepairable_json_names_the_misclosed_array(self) -> None:
         raw = '{"action":"design.propose_delta","arguments":{"delta":{"operations":[{"op":"add_node"}},"completion_claims":[]}}}'
         with self.assertRaises(json.JSONDecodeError):
             _parse_designer_tool_action(raw, require_runtime_binding=True)
-        self.assertIn("'operations' array was closed", _json_structure_hint(raw))
+        self.assertIn("innermost container still open there is the 'operations' array", _json_structure_hint(raw))
+        # Real DeepSeek slips: closers swapped at the end of the operations, or a node closed one level short
+        # before the next operation; both leave the add_node operation open where parsing stops.
+        node = '{"op":"add_node","node":{"surface_contract":{"refs":["a"]}}'
+        swapped = '{"action":"design.propose_delta","arguments":{"delta":{"operations":[' + node + ']},"completion_claims":[]}}}'
+        short = (
+            '{"action":"design.propose_delta","arguments":{"delta":{"operations":[' + node
+            + ',{"op":"add_edge","edge":{}}],"completion_claims":[]}}}'
+        )
+        for broken_raw in (swapped, short):
+            hint = _json_structure_hint(broken_raw)
+            self.assertIn("Parsing stopped at character", hint)
+            self.assertIn(f"the add_node operation object opened at character {broken_raw.index(node)}", hint)
+        self.assertEqual(_json_structure_hint('{"action":"x","arguments":{}}'), "")
 
 
 def _populate_with_web_shell(target: Path) -> None:
@@ -1291,7 +1517,7 @@ def _populate_with_web_shell(target: Path) -> None:
     write_web_shell(target, with_view=False)
 
 
-class UiContractWorkflowPinTest(unittest.TestCase):
+class UiContractWorkflowPinTest(_WithTypeScript):
     @classmethod
     def setUpClass(cls) -> None:
         cls.template = GitRepositoryTemplate(_populate_with_web_shell)
@@ -1309,10 +1535,6 @@ class UiContractWorkflowPinTest(unittest.TestCase):
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
                 "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                "SDLC_VERTICAL_TRACE_MODE": "shadow",
-                "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION_V2,
-                "SDLC_UIUX_SKILL_MODE": "enforce",
-                "SDLC_DESIGNER_UI_CONTRACT_VERSION": UI_EXPERIENCE_CONTRACT_V2,
                 "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                 "SDLC_TARGET_REPO_PATH": str(target.canonical),
                 "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
@@ -1343,33 +1565,6 @@ class UiContractWorkflowPinTest(unittest.TestCase):
 
             revalidated = PhaseTwoWorkflow(settings).revalidate_design(run_id=run_id)
             self.assertEqual(revalidated["status"], "waiting_design_approval", revalidated)
-
-    def test_run_pinned_before_layered_layout_keeps_legacy_binding(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            settings = self._settings(Path(temp))
-            run_id = str(
-                PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")["run_id"]
-            )
-            store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
-            state = store.read_state(run_id)
-            state.pop(UI_LAYOUT_CONTRACT_KEY)
-            store.write_state(state)
-
-            designed = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=run_id)
-            self.assertEqual(designed["status"], "waiting_design_approval", designed)
-            graph = json.loads(
-                (settings.repo_root / str(designed["latest_artifacts"]["vertical_design_graph"])).read_text(encoding="utf-8")
-            )
-            self.assertNotIn(UI_LAYOUT_CONTRACT_KEY, graph["snapshot_binding"])
-            revalidated = PhaseTwoWorkflow(settings).revalidate_design(run_id=run_id)
-            self.assertEqual(revalidated["status"], "waiting_design_approval", revalidated)
-
-    def test_v2_without_uiux_enforce_fails_closed_at_run_creation(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            settings = self._settings(Path(temp), SDLC_UIUX_SKILL_MODE="off")
-            with self.assertRaises(HarnessError) as raised:
-                PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
-        self.assertEqual(raised.exception.error_code, "designer_ui_contract_invalid")
 
 
 if __name__ == "__main__":

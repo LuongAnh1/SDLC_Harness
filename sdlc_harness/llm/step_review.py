@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,7 @@ class ReviewableLlmClient:
         error_prefix: str = "implementation_plan",
         label: str = "Implementation Plan",
         start_ordinal: int = 0,
+        carry_approved_output_notes: bool = True,
     ):
         self.base = base
         self.settings = getattr(base, "settings", None)
@@ -64,6 +66,7 @@ class ReviewableLlmClient:
         self.call_prefix = call_prefix
         self.error_prefix = error_prefix
         self.label = label
+        self.carry_approved_output_notes = carry_approved_output_notes
         self.cursor = max(0, start_ordinal)
         self.last_replay_kind = ""
         self.root = store.run_dir(run_id) / execution_dir
@@ -79,6 +82,7 @@ class ReviewableLlmClient:
         prompt: str,
         **request_options: object,
     ) -> LlmCompletion:
+        request_options = _normalized_request_options(request_options)
         result = self._complete(
             system=system,
             prompt=prompt,
@@ -130,29 +134,72 @@ class ReviewableLlmClient:
         self.last_replay_kind = ""
         self.cursor += 1
         ordinal = self.cursor
-        prompt_hash = _prompt_hash(system=system, prompt=prompt)
         session = self._read_session()
         calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
         attempts = [item for item in calls if int(item.get("ordinal") or 0) == ordinal]
         latest = attempts[-1] if attempts else None
+        target_call = f"{self.call_prefix}-{ordinal:04d}"
+        guidance_rows = [
+            item
+            for item in calls
+            if self.carry_approved_output_notes
+            and item.get("status") == "approved"
+            and item.get("review_note_delivery") == "next_provider_call"
+            and (
+                item.get("review_note_delivered_to") == target_call
+                or (latest is None and not item.get("review_note_delivered_to"))
+            )
+            and str(item.get("review_note") or "").strip()
+        ]
+        if guidance_rows:
+            prompt = (
+                "Operator guidance attached to approved prior responses. Preserve the approved actions and "
+                "apply this guidance to the current decision:\n- "
+                + "\n- ".join(str(item["review_note"]).strip() for item in guidance_rows)
+                + f"\n\n{prompt}"
+            )
+            if latest is None:
+                for item in guidance_rows:
+                    item["review_note_delivered_to"] = target_call
+                    _write_json(self.root / f"exchange_{item['call_id']}.json", item)
+                self._write_session({**session, "calls": calls})
+        prompt_hash = _prompt_hash(
+            system=system,
+            prompt=prompt,
+            image_sha256=_image_sha256(request_options),
+        )
+
+        # G1.5: an exchange is bound to its input. When the input changed (a Harness fix, a newer upstream
+        # artifact), the stored exchange is never replayed or approved: it is superseded and the call is asked
+        # again under the same review rules, so a stale output can never answer a new input. A rejection keeps its
+        # own path, which already rebuilds the call from the current prompt and carries the owner's note.
+        if (
+            latest
+            and str(latest.get("status") or "") in _INPUT_BOUND_STATUSES
+            and _resume_prompt_hash(latest, calls) != prompt_hash
+            and not self._rejects(latest)
+        ):
+            supersedes = _supersede_for_input_change(latest, calls=calls, prompt=prompt, prompt_hash=prompt_hash)
+            _write_json(self.root / f"exchange_{latest['call_id']}.json", latest)
+            self._write_session({**session, "calls": calls})
+            return self._prepare_exchange(
+                session=session,
+                calls=calls,
+                ordinal=ordinal,
+                attempt=len(attempts) + 1,
+                system=system,
+                prompt=prompt,
+                prompt_hash=prompt_hash,
+                with_metadata=with_metadata,
+                request_options=request_options,
+                supersedes=supersedes,
+            )
 
         if latest and str(latest.get("status") or "") in {"approved", "completed"}:
-            if _resume_prompt_hash(latest, calls) != prompt_hash:
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    f"Approved exchange {latest.get('call_id')} no longer matches the {self.label} prompt.",
-                    run_id=self.run_id,
-                )
             self.last_replay_kind = "approved"
             return _replay_completion(latest, with_metadata=with_metadata)
 
         if latest and str(latest.get("status") or "") == "input_approved":
-            if _resume_prompt_hash(latest, calls) != prompt_hash:
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    f"Approved input {latest.get('input_review_call_id')} no longer matches the {self.label} prompt.",
-                    run_id=self.run_id,
-                )
             return self._call_provider(
                 session=session,
                 calls=calls,
@@ -218,30 +265,24 @@ class ReviewableLlmClient:
         if str(self.review.get("call_id") or "") != review_call_id or decision not in {"approve", "reject"}:
             self._raise_pending(pending)
         if decision == "approve":
-            if _resume_prompt_hash(pending, calls) != prompt_hash:
-                stored_prompt = str(pending.get("prompt") or "")
-                first_difference = next(
-                    (
-                        index
-                        for index, (stored, current) in enumerate(zip(stored_prompt, prompt))
-                        if stored != current
-                    ),
-                    min(len(stored_prompt), len(prompt)),
-                )
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    (
-                        f"Pending input {review_call_id} no longer matches the {self.label} prompt "
-                        f"(stored={len(stored_prompt)}, current={len(prompt)}, first_difference={first_difference})."
-                    ),
-                    run_id=self.run_id,
-                )
+            note = str(self.review.get("note") or "").strip()
             pending["status"] = "input_approved"
             pending["input_review"] = {
                 "decision": "approve",
-                "note": str(self.review.get("note") or "").strip(),
+                "note": note,
+                "note_delivery": "provider_prompt" if note else "none",
                 "reviewed_at": utc_now_iso(),
             }
+            if note:
+                pending["prompt"] = (
+                    "Operator approved this input with guidance. Apply the guidance without expanding the approved "
+                    f"scope: {note}\n\n{prompt}"
+                )
+                pending["prompt_hash"] = _prompt_hash(
+                    system=system,
+                    prompt=str(pending["prompt"]),
+                    image_sha256=_image_sha256(request_options),
+                )
             self._write_session({**session, "calls": calls})
             _write_json(self.root / f"exchange_{pending['call_id']}.json", pending)
             return self._call_provider(
@@ -284,7 +325,11 @@ class ReviewableLlmClient:
             attempt=int(pending.get("attempt") or 1) + 1,
             system=system,
             prompt=amended,
-            prompt_hash=_prompt_hash(system=system, prompt=amended),
+            prompt_hash=_prompt_hash(
+                system=system,
+                prompt=amended,
+                image_sha256=_image_sha256(request_options),
+            ),
             resume_prompt_hash=prompt_hash,
             with_metadata=with_metadata,
             request_options=request_options,
@@ -307,25 +352,13 @@ class ReviewableLlmClient:
         if str(self.review.get("call_id") or "") != call_id or decision not in {"approve", "reject"}:
             self._raise_pending(pending)
         if decision == "approve":
-            if _resume_prompt_hash(pending, calls) != prompt_hash:
-                stored_prompt = str(pending.get("prompt") or "")
-                first_difference = next(
-                    (
-                        index
-                        for index, (stored, current) in enumerate(zip(stored_prompt, prompt))
-                        if stored != current
-                    ),
-                    min(len(stored_prompt), len(prompt)),
-                )
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    (
-                        f"Pending exchange {call_id} no longer matches the {self.label} prompt "
-                        f"(stored={len(stored_prompt)}, current={len(prompt)}, first_difference={first_difference})."
-                    ),
-                    run_id=self.run_id,
-                )
             pending["status"] = "approved"
+            note = str(self.review.get("note") or "").strip()
+            if note:
+                pending["review_note"] = note
+                pending["review_note_delivery"] = (
+                    "next_provider_call" if self.carry_approved_output_notes else "audit_only"
+                )
             pending["reviewed_at"] = utc_now_iso()
             self._write_session({**session, "calls": calls})
             _write_json(self.root / f"exchange_{call_id}.json", pending)
@@ -357,7 +390,11 @@ class ReviewableLlmClient:
             attempt=int(pending.get("attempt") or 1) + 1,
             system=system,
             prompt=amended,
-            prompt_hash=_prompt_hash(system=system, prompt=amended),
+            prompt_hash=_prompt_hash(
+                system=system,
+                prompt=amended,
+                image_sha256=_image_sha256(request_options),
+            ),
             resume_prompt_hash=prompt_hash,
             with_metadata=with_metadata,
             request_options=request_options,
@@ -376,10 +413,11 @@ class ReviewableLlmClient:
         resume_prompt_hash: str = "",
         with_metadata: bool = False,
         request_options: dict[str, object] | None = None,
+        supersedes: dict[str, object] | None = None,
     ) -> str | LlmCompletion:
         options = dict(request_options or {})
         call_id = f"{self.call_prefix}-{ordinal:04d}-a{attempt:02d}"
-        exchange = {
+        exchange: dict[str, object] = {
             "call_id": call_id,
             "ordinal": ordinal,
             "attempt": attempt,
@@ -392,9 +430,12 @@ class ReviewableLlmClient:
             "raw_completion": "",
             "parsed_output": None,
             "request_options": options,
+            "images": list(options.get("images") or []),
             "finish_reason": "",
             "usage": {},
         }
+        if supersedes:
+            exchange["supersedes"] = supersedes
         if self.review_input:
             exchange["input_review_call_id"] = f"{call_id}-input"
             calls.append(exchange)
@@ -430,7 +471,8 @@ class ReviewableLlmClient:
         system = str(exchange.get("system") or "")
         prompt = str(exchange.get("prompt") or "")
         self.last_replay_kind = "provider"
-        if with_metadata:
+        # A plain-text base client has no metadata; it then answers like `complete` (no finish_reason).
+        if with_metadata and callable(getattr(self.base, "complete_with_metadata", None)):
             completion = self.base.complete_with_metadata(system=system, prompt=prompt, **options)
             raw = str(completion.content or "")
             reasoning_content = str(completion.reasoning_content or "")
@@ -469,6 +511,17 @@ class ReviewableLlmClient:
             review_stage="output",
         )
 
+    def _rejects(self, exchange: dict[str, object]) -> bool:
+        """True when this call's review decision rejects `exchange`'s pending input or output."""
+
+        status = str(exchange.get("status") or "")
+        reviewed = exchange.get("input_review_call_id") if status == "input_pending" else exchange.get("call_id")
+        return (
+            status in {"input_pending", "pending"}
+            and str(self.review.get("decision") or "") == "reject"
+            and str(self.review.get("call_id") or "") == str(reviewed or "")
+        )
+
     def _raise_pending(self, pending: dict[str, object]) -> None:
         review_stage = "input" if str(pending.get("status") or "") == "input_pending" else "output"
         exchange_call_id = str(pending.get("call_id") or "")
@@ -478,6 +531,7 @@ class ReviewableLlmClient:
             else exchange_call_id
         )
         exchange_path = self.root / f"exchange_{exchange_call_id}.json"
+        _write_json(exchange_path, pending)
         raise LlmStepReviewRequired(
             run_id=self.run_id,
             call_id=call_id,
@@ -488,9 +542,10 @@ class ReviewableLlmClient:
         )
 
     def _read_session(self) -> dict[str, object]:
-        if not self.session_path.exists():
+        session_path = _filesystem_path(self.session_path)
+        if not session_path.exists():
             return {"schema_version": f"{self.error_prefix}_step_review_v1", "calls": []}
-        value = json.loads(self.session_path.read_text(encoding="utf-8"))
+        value = json.loads(session_path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise HarnessError(
                 f"{self.error_prefix}_step_review_corrupted",
@@ -504,8 +559,84 @@ class ReviewableLlmClient:
         _write_json(self.session_path, session)
 
 
-def _prompt_hash(*, system: str, prompt: str) -> str:
-    return "sha256:" + hashlib.sha256(f"{system}\0{prompt}".encode("utf-8")).hexdigest()
+# Statuses whose stored input still decides what happens next (replay, provider call or a pending review).
+_INPUT_BOUND_STATUSES = frozenset({"approved", "completed", "input_approved", "input_pending", "pending"})
+
+
+def _supersede_for_input_change(
+    exchange: dict[str, object],
+    *,
+    calls: list[dict[str, object]],
+    prompt: str,
+    prompt_hash: str,
+) -> dict[str, object]:
+    """Mark `exchange` superseded by a changed input; return what the replacing exchange records about it."""
+
+    stored = str(exchange.get("prompt") or "")
+    first_difference = next(
+        (index for index, (before, after) in enumerate(zip(stored, prompt)) if before != after),
+        min(len(stored), len(prompt)),
+    )
+    previous_status = str(exchange.get("status") or "")
+    previous_hash = _resume_prompt_hash(exchange, calls)
+    exchange.update(
+        {
+            "status": "superseded",
+            "superseded_from_status": previous_status,
+            "superseded_at": utc_now_iso(),
+            "superseded_reason": "input_changed",
+            "superseded_by_prompt_hash": prompt_hash,
+        }
+    )
+    return {
+        "call_id": str(exchange.get("call_id") or ""),
+        "status": previous_status,
+        "reason": "input_changed",
+        "prompt_hash": previous_hash,
+        "previous_length": len(stored),
+        "length": len(prompt),
+        "first_difference": first_difference,
+    }
+
+
+def _prompt_hash(*, system: str, prompt: str, image_sha256: tuple[str, ...] = ()) -> str:
+    payload = f"{system}\0{prompt}"
+    if image_sha256:
+        payload += "\0images\0" + "\0".join(image_sha256)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized_request_options(options: dict[str, object]) -> dict[str, object]:
+    normalized = dict(options)
+    raw_images = normalized.get("images")
+    if raw_images in (None, (), []):
+        normalized.pop("images", None)
+        return normalized
+    if not isinstance(raw_images, (list, tuple)):
+        raise HarnessError("llm_image_invalid", "LLM images must be a list of image references.")
+    images: list[dict[str, object]] = []
+    for index, raw in enumerate(raw_images, start=1):
+        if not isinstance(raw, dict):
+            raise HarnessError("llm_image_invalid", f"Image {index} must be an object.")
+        label = str(raw.get("label") or "").strip()
+        path = str(raw.get("path") or "").strip()
+        sha256 = str(raw.get("sha256") or "").strip().lower()
+        if not label or not path or len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+            raise HarnessError("llm_image_invalid", f"Image {index} needs label, path and a SHA-256 digest.")
+        try:
+            size = _filesystem_path(Path(path)).stat().st_size
+        except OSError as exc:
+            raise HarnessError("llm_image_invalid", f"Image {label!r} cannot be inspected: {exc}") from exc
+        images.append({"label": label, "path": path, "sha256": sha256, "bytes": size})
+    normalized["images"] = images
+    return normalized
+
+
+def _image_sha256(options: dict[str, object]) -> tuple[str, ...]:
+    images = options.get("images")
+    if not isinstance(images, (list, tuple)):
+        return ()
+    return tuple(str(item.get("sha256") or "") for item in images if isinstance(item, dict))
 
 
 def _resume_prompt_hash(
@@ -559,7 +690,19 @@ def _replay_completion(exchange: dict[str, object], *, with_metadata: bool) -> s
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _filesystem_path(path.parent).mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    filesystem_temporary = _filesystem_path(temporary)
+    filesystem_temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    filesystem_temporary.replace(_filesystem_path(path))
+
+
+def _filesystem_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)

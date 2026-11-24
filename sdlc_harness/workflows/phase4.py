@@ -37,8 +37,13 @@ from ..agents.developer import (
     developer_transport_retry_allowed,
     developer_execution_retry_allowed,
 )
-from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
+from ..agents.developer.closure_planner import RuntimeClosurePlanner
+from ..agents.developer.polish_planner import UiPolishPlanner
+from ..agents.tester.journey_planner import BrowserJourneyPlanner
+from ..agents.validator.closure_review import RuntimeClosureValidator
+from ..agents.validator.browser_review import BrowserQaValidator, UiPolishValidator
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
+from ..agents.validator.typescript_ast import TypeScriptAstExtractor
 from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
     write_phase4_developer_work_packet,
@@ -47,18 +52,18 @@ from ..artifacts.writers import (
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
+from ..profiles.runtime_config import unsupported_runtime_config_changes
 from ..profiles import (
     CodeTracePolicy,
     PlanningPathPolicy,
-    QaTestPolicy,
     VerificationStagePolicy,
     code_trace_policy_from_snapshot,
     planning_path_policy_from_snapshot,
-    qa_test_policy_from_snapshot,
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
 from ..repo_context import CodeGraphContextProvider
+from ..storage.artifact_index import artifact_scope, record_read
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync.github import (
     GitHubCodeReviewApprover,
@@ -67,6 +72,16 @@ from ..sync.github import (
 from ..verification import VerificationResult, VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
 from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
+from .graph import (
+    LLM_CALL_BUDGET,
+    PHASE_FOUR,
+    REPAIR_BUDGETS,
+    REVIEW_BLOCKER_ROUTES,
+    VERIFICATION_ROUTES,
+    continue_handler,
+    node_for,
+)
+from ..core.coerce import dict_items as _dict_items, string_items as _string_items
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -85,8 +100,6 @@ ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = [
     "cancel_run",
 ]
 ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
-ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_QA_GENERATION_RETRY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
@@ -99,6 +112,7 @@ IMPLEMENTATION_AUTOMATION_STATUSES = {
 }
 
 REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
+    "code_trace_test_out_of_scope",
     "implementation_repair_limit_exceeded",
     "verification_environment_failed",
     "test_failed",
@@ -107,21 +121,12 @@ REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "implementation_traceability_llm_failed",
     "implementation_validation_inconclusive",
 }
-RETRYABLE_QA_GENERATION_ERROR_CODES = {
-    "qa_tester_llm_failed",
-    "qa_requirement_coverage_invalid",
-}
 CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "requirement_packet": 12000,
     "design_artifact": 20000,
     "implementation_plan": 20000,
 }
 
-MAX_QA_REQUIREMENT_CHARS = 6000
-MAX_QA_VERIFICATION_CHARS = 4000
-MAX_QA_CODE_FILE_CHARS = 5000
-MAX_QA_CODE_TOTAL_CHARS = 24000
-MAX_QA_TRACE_SAMPLE_EDGES = 20
 MAX_VERIFICATION_DIAGNOSTIC_CHARS = 6000
 
 
@@ -133,12 +138,41 @@ class _PhaseFourCore:
         settings: Settings,
         *,
         developer_step_review: dict[str, object] | None = None,
+        code_validation_step_review: dict[str, object] | None = None,
+        runtime_closure_step_review: dict[str, object] | None = None,
+        browser_stage_step_review: dict[str, object] | None = None,
     ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
+        validation_review_defaults = {
+            "enabled": settings.implementation_validation_step_review_enabled,
+            "review_input": settings.implementation_validation_step_review_input_enabled,
+            "review_output": settings.implementation_validation_step_review_output_enabled,
+        }
+        self.code_validation_step_review = {
+            **validation_review_defaults,
+            **dict(code_validation_step_review or {}),
+        }
+        # Closure and browser stages reuse the Phase 4 validation review settings; no separate settings.
+        self.runtime_closure_step_review = {
+            **validation_review_defaults,
+            **dict(runtime_closure_step_review or {}),
+        }
+        self.browser_stage_step_review = {
+            **validation_review_defaults,
+            **dict(browser_stage_step_review or {}),
+        }
+        self.closure_planner = RuntimeClosurePlanner(self.llm_client)
+        self.journey_planner = BrowserJourneyPlanner(self.llm_client)
+        self.polish_planner = UiPolishPlanner(self.llm_client)
+        self.polish_validator = UiPolishValidator(self.llm_client)
+        self.browser_qa_validator = BrowserQaValidator(self.llm_client)
+        self.closure_validator = RuntimeClosureValidator(self.llm_client)
         self.verification_runner = VerificationRunner()
+        # AST literals/module references for Browser Readiness (demo literals, R5).
+        self.module_facts_extractor = TypeScriptAstExtractor()
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
             store=self.store,
@@ -149,13 +183,72 @@ class _PhaseFourCore:
         )
         self.code_trace_validator = CodeTraceValidator(
             self.llm_client,
-            validation_trials=settings.implementation_validation_trials,
             llm_call_budget=settings.implementation_validation_call_budget,
         )
-        self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
         self.github_approver = GitHubCodeReviewApprover()
         self.workspace_manager = RunWorkspaceManager(settings)
+
+    def _pause_for_code_validation_step_review(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        progress: dict[str, object],
+    ) -> dict[str, object]:
+        resume_status = str(state.get("status") or "")
+        resume_phase = str(state.get("current_phase") or "")
+        if resume_status in {"implementation_executing", "implementation_paused"}:
+            # Developer/repair already finished before Code Validator requested review.
+            # Resume from the validated snapshot, never start another Developer session.
+            resume_status = "implementation_tested"
+            resume_phase = "implementation_testing"
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "implementation_validation_step_review_required",
+                "pending_step_review": progress,
+                "implementation_validation_step_review": dict(self.code_validation_step_review),
+                "implementation_validation_resume": {
+                    "status": resume_status,
+                    "current_phase": resume_phase,
+                },
+                "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                "last_error": None,
+                "summary_for_user": (
+                    f"Code Validator đang chờ duyệt {progress.get('review_stage')} "
+                    f"{progress.get('call_id')} cho run {run_id}."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def continue_code_validation_step_review(self, *, run_id: str) -> dict[str, object]:
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") != "implementation_validation_step_review_required":
+            raise HarnessError(
+                "implementation_validation_step_review_not_pending",
+                f"Run has no pending Code Validator step review: {run_id}",
+                run_id=run_id,
+            )
+        pinned = _dict_value(state.get("implementation_validation_step_review"))
+        decision = {
+            key: self.code_validation_step_review[key]
+            for key in ("call_id", "decision", "note")
+            if self.code_validation_step_review.get(key) is not None
+        }
+        self.code_validation_step_review = {**pinned, **decision, "enabled": True}
+        resume = _dict_value(state.get("implementation_validation_resume"))
+        state.update(
+            {
+                "status": resume.get("status") or "implementation_tested",
+                "current_phase": resume.get("current_phase") or "implementation_testing",
+                "pending_step_review": None,
+            }
+        )
+        self.store.write_state(state)
+        return self.continue_until_implementation_checkpoint(run_id=run_id)
 
 
     def approve_implementation_plan_checkpoint(
@@ -219,6 +312,14 @@ class _PhaseFourCore:
             review=review,
             run_id=run_id,
         )
+        unsupported_config = unsupported_runtime_config_changes(structured_plan)
+        if unsupported_config:
+            raise HarnessError(
+                "runtime_config_execution_unsupported",
+                "Phase 4 cannot materialize runtime configuration kinds yet: "
+                + ", ".join(sorted({str(item.get("kind")) for item in unsupported_config})),
+                run_id=run_id,
+            )
         if review.get("ok") is not True:
             raise HarnessError(
                 "implementation_plan_review_not_passed",
@@ -264,7 +365,12 @@ class _PhaseFourCore:
             version=1,
         )
 
-        canonical_requirements, requirement_contract, requirement_coverage = self._require_v2_phase4_input(
+        (
+            canonical_requirements,
+            requirement_contract,
+            requirement_coverage,
+            approved_runtime_decisions,
+        ) = self._require_v2_phase4_input(
             state=state,
             artifact_paths=artifact_paths,
             structured_plan=structured_plan,
@@ -298,6 +404,7 @@ class _PhaseFourCore:
                 canonical_requirements=canonical_requirements,
                 requirement_contract=requirement_contract,
                 requirement_coverage=requirement_coverage,
+                approved_runtime_decisions=approved_runtime_decisions,
                 effective_design_contract={
                     **effective_design_contract,
                     "artifact_path": effective_design_contract_path,
@@ -370,7 +477,12 @@ class _PhaseFourCore:
         structured_plan: dict[str, object],
         review: dict[str, object],
         run_id: str,
-    ) -> tuple[list[dict[str, object]], dict[str, object], list[dict[str, object]]]:
+    ) -> tuple[
+        list[dict[str, object]],
+        dict[str, object],
+        list[dict[str, object]],
+        list[dict[str, object]],
+    ]:
         """Validate the frozen V2 contract and Phase 3 coverage before any Phase 4 mutation."""
 
         try:
@@ -428,7 +540,14 @@ class _PhaseFourCore:
                 trace=trace,
                 run_id=run_id,
             )
-            return canonical, contract, coverage
+            approved_runtime_decisions = [
+                dict(item)
+                for item in frozen.canonical_model.to_dict().get("decisions", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "").startswith("D-")
+                and str(item.get("status") or "").strip().lower() == "accepted"
+            ]
+            return canonical, contract, coverage, approved_runtime_decisions
         except HarnessError as exc:
             raise HarnessError(
                 "requirement_v2_phase4_input_invalid",
@@ -460,10 +579,7 @@ class _PhaseFourCore:
             run_id=run_id,
         )
 
-    def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
-        """Dispatch một transition khi caller đang giữ per-run workspace lock."""
-
-        state = self.store.read_state(run_id)
+    def _require_frozen_llm_mode(self, state: dict[str, object], *, run_id: str) -> None:
         frozen_llm = _dict_value(state.get("llm"))
         frozen_llm_mode = str(frozen_llm.get("mode") or "").strip().lower()
         current_llm_mode = str(self.settings.llm_mode or "").strip().lower()
@@ -476,73 +592,192 @@ class _PhaseFourCore:
                 ),
                 run_id=run_id,
             )
-        status = str(state.get("status"))
-        if status == "implementation_ready":
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status in {"implementation_executing", "implementation_paused"}:
-            execution = _dict_value(state.get("developer_execution"))
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "blocked" and self._qa_generation_retry_allowed(state):
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "blocked" and developer_execution_retry_allowed(state):
-            execution = _dict_value(state.get("developer_execution"))
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "developer_act":
-                return self._continue_developer_act(state=state, run_id=run_id)
-            return self._continue_implementation_repair(state=state, run_id=run_id)
-        if status == "blocked" and developer_transport_retry_allowed(state):
-            execution = _dict_value(state.get("developer_execution"))
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "implementation_repair":
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "implementation_written":
-            return self._continue_verification(state=state, run_id=run_id)
-        if status == "implementation_tested":
-            return self._continue_code_trace(state=state, run_id=run_id)
-        if status == "implementation_traced":
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "implementation_repair_needed":
-            return self._continue_implementation_repair(state=state, run_id=run_id)
-        if status == "qa_repair_needed":
-            return self._continue_qa_repair(state=state, run_id=run_id)
-        if status in {"qa_tested", "code_review_publish_failed"}:
-            return self._continue_code_review_publish(state=state, run_id=run_id)
-        if status == "code_review_published":
-            return self._continue_code_review_sync(state=state, run_id=run_id)
+
+    # ------------------------------------------------------------------ graph predicates (workflows/graph.py)
+
+    @staticmethod
+    def _execution_mode(state: dict[str, object]) -> str:
+        return str(_dict_value(state.get("developer_execution")).get("mode") or "")
+
+    def _runtime_closure_repair_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "runtime_closure_repair"
+
+    def _implementation_repair_mode(self, state: dict[str, object]) -> bool:
+        return (
+            self._execution_mode(state) == "implementation_repair"
+            or str(state.get("current_phase")) == "implementation_repair"
+        )
+
+    def _implementation_repair_execution_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "implementation_repair"
+
+    def _developer_act_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "developer_act"
+
+    def _developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return developer_execution_retry_allowed(state)
+
+    def _developer_transport_retry_allowed(self, state: dict[str, object]) -> bool:
+        return developer_transport_retry_allowed(state)
+
+    def _closure_developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return self._runtime_closure_execution_active(state) and (
+            self._developer_retry_allowed(state) or self._developer_transport_retry_allowed(state)
+        )
+
+    def _browser_developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return self._browser_execution_active(state) and (
+            self._developer_retry_allowed(state) or self._developer_transport_retry_allowed(state)
+        )
+
+    # ------------------------------------------------------------------ repair budgets (graph.REPAIR_BUDGETS)
+
+    def _repair_limit(self, state: dict[str, object], budget_id: str) -> int:
+        """The owner's per-run limit when `adjust_budget` set one, else the configured default."""
+
+        override = _dict_value(_dict_value(state.get("repair_budgets")).get(budget_id))
+        if "limit" in override:
+            return max(0, _int_value(override.get("limit")))
+        return max(0, int(getattr(self.settings, REPAIR_BUDGETS[budget_id].setting)))
+
+    @staticmethod
+    def _repair_used(state: dict[str, object], budget_id: str) -> int:
+        value: object = state
+        for key in REPAIR_BUDGETS[budget_id].counter:
+            value = _dict_value(value).get(key)
+        return _int_value(value)
+
+    def _spent_budget_has_room(self, state: dict[str, object]) -> bool:
+        """True when the run is blocked by a spent repair budget that the owner has since raised."""
+
+        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
+        return any(
+            budget.error_code == error_code and self._repair_used(state, budget_id) < self._repair_limit(state, budget_id)
+            for budget_id, budget in REPAIR_BUDGETS.items()
+        )
+
+    # ------------------------------------------------------------------ failure routing (graph, G1.6b)
+
+    def _verification_repair(self, source: str):
+        """The lane repair route an `implementation` failure of this verification goes to."""
+
+        return getattr(self, VERIFICATION_ROUTES[source].repair)
+
+    @staticmethod
+    def _verification_blocker(
+        source: str, classification: dict[str, object], reason: str, *, run_id: str
+    ) -> HarnessError:
+        """The block for a failure that is not the code's: retryable for the environment, final otherwise."""
+
+        route = VERIFICATION_ROUTES[source]
+        return HarnessError(
+            route.environment_error if classification.get("kind") == "environment" else route.policy_error,
+            f"{classification.get('stage_id') or 'verification'}: {reason}",
+            run_id=run_id,
+        )
+
+    def _route_review_blockers(
+        self,
+        review: str,
+        blockers: list[dict[str, object]],
+        **arguments: object,
+    ) -> dict[str, object] | None:
+        """Route the first category with blocking findings (graph.REVIEW_BLOCKER_ROUTES order); None when clean."""
+
+        for category, route in REVIEW_BLOCKER_ROUTES[review]:
+            problems = [item for item in blockers if item.get("category") == category]
+            if problems:
+                return getattr(self, route)(problems=problems, source=review, **arguments)
+        return None
+
+    def adjust_budget(self, *, run_id: str, budget_id: str, limit: int, reason: str) -> dict[str, object]:
+        """Owner action (G1.6): set one repair budget's limit for this run; replaces hand-edited limit recoveries."""
+
+        if budget_id not in REPAIR_BUDGETS and budget_id != LLM_CALL_BUDGET:
+            raise HarnessError(
+                "budget_not_supported",
+                f"Unknown budget {budget_id!r}; supported: {sorted([*REPAIR_BUDGETS, LLM_CALL_BUDGET])}.",
+                run_id=run_id,
+            )
+        if not str(reason or "").strip():
+            raise HarnessError("budget_reason_required", "A budget change needs the owner's reason.", run_id=run_id)
+        if int(limit) < 0:
+            raise HarnessError("budget_limit_invalid", "A repair budget limit cannot be negative.", run_id=run_id)
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            self._require_frozen_llm_mode(state, run_id=run_id)
+            if budget_id == LLM_CALL_BUDGET:
+                calls = self._llm_call_budget(state, run_id=run_id)
+                previous, used = int(calls["ceiling"]), int(calls["used"])
+            else:
+                previous, used = self._repair_limit(state, budget_id), self._repair_used(state, budget_id)
+            adjusted_at = utc_now_iso()
+            state["repair_budgets"] = {
+                **_dict_value(state.get("repair_budgets")),
+                budget_id: {"limit": int(limit), "reason": reason, "adjusted_at": adjusted_at},
+            }
+            state.setdefault("recoveries", []).append(
+                {
+                    "code": "adjust_budget",
+                    "budget_id": budget_id,
+                    "previous_limit": previous,
+                    "limit": int(limit),
+                    "used": used,
+                    "reason": reason,
+                    "recovered_at": adjusted_at,
+                }
+            )
+            update: dict[str, object] = {"updated_at": adjusted_at}
+            if str(state.get("status") or "") == "blocked" and self._spent_budget_has_room(state):
+                update.update(
+                    {
+                        "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                        "summary_for_user": (
+                            f"Anh đã nâng ngân sách {budget_id} lên {int(limit)} (đã dùng {used}); "
+                            "continue_run sẽ chạy lại bước đã dừng."
+                        ),
+                    }
+                )
+            state.update(update)
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+    def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
+        """Dispatch một transition khi caller đang giữ per-run workspace lock."""
+
+        state = self.store.read_state(run_id)
+        self._require_frozen_llm_mode(state, run_id=run_id)
+        node = node_for(str(state.get("status") or ""))
+        # The route table lives in workflows/graph.py; other phases continue through the application service.
+        handler = continue_handler(self, state) if node is not None and node.workflow == PHASE_FOUR else ""
+        if handler:
+            return self._dispatch(handler, state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
             run_id=run_id,
         )
 
+    def _dispatch(self, handler: str, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Run one graph handler; artifacts it indexes record this node, its reads and the worktree (G1.3)."""
 
+        worktree: list[Path] = []
 
+        def fingerprint() -> dict[str, object]:
+            from .phase4_browser import _worktree_fingerprint  # phase4_browser imports this module
 
+            if not worktree:
+                worktree.append(Path(self.workspace_manager.resolve(run_id).worktree_path))
+            return _worktree_fingerprint(worktree[0])
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        with artifact_scope(
+            run_id,
+            node=str(state.get("status") or ""),
+            handler=handler,
+            repo_root=self.store.repo_root,
+            fingerprint=fingerprint,
+        ):
+            return getattr(self, handler)(state=state, run_id=run_id)
 
 
     def _require_code_review_checkpoint(
@@ -623,6 +858,7 @@ class _PhaseFourCore:
                 f"Approved Phase 4 input artifact does not exist: {relative_path}",
                 run_id=run_id,
             )
+        record_read(path)
         return path
 
     def _workspace_target_info(
@@ -669,7 +905,7 @@ class _PhaseFourCore:
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
-        if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+        if self._runtime_closure_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if developer_execution_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
@@ -689,6 +925,7 @@ class _PhaseFourCore:
             "status": state.get("status"),
             "latest_artifacts": state.get("latest_artifacts", {}),
             "pending_checkpoint": state.get("pending_checkpoint"),
+            "pending_step_review": state.get("pending_step_review"),
             "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
@@ -699,32 +936,12 @@ class _PhaseFourCore:
                 "implementation_repair_total_iterations",
                 state.get("implementation_repair_iterations", 0),
             ),
-            "qa_repair_iterations": state.get("qa_repair_iterations", 0),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             "developer_execution": state.get("developer_execution", {}),
         }
-
-    @staticmethod
-    def _qa_generation_retry_allowed(state: dict[str, object]) -> bool:
-        """Retry malformed QA generation without rerunning Developer or Validator."""
-
-        if str(state.get("status") or "") != "blocked":
-            return False
-        if str(state.get("current_phase") or "") != "qa_testing":
-            return False
-        last_error = _dict_value(state.get("last_error"))
-        error_code = str(last_error.get("error_code") or "")
-        if error_code in RETRYABLE_QA_GENERATION_ERROR_CODES:
-            return True
-        message = str(last_error.get("message") or "")
-        return (
-            error_code == "developer_act_unsafe_path"
-            and message.startswith("Unsafe or unsupported Developer.act path:")
-            and bool(_dict_value(state.get("profile_snapshot")))
-        )
 
 class _TargetRepoInfo:
     def __init__(self, *, path: Path, remote: str, current_branch: str, source_files: list[str]):
@@ -810,551 +1027,13 @@ def _positive_int_or_none(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _qa_review_context(
-    *,
-    store: RuntimeStore,
-    state: dict[str, object],
-    artifact_paths: dict[str, str],
-    run_id: str,
-    target_repo: str,
-    branch: str,
-    work_packet: dict[str, object],
-    planning_policy: PlanningPathPolicy,
-) -> dict[str, object]:
-    """Đóng gói context QA ngắn, có metadata truncation để tránh prompt quá dài."""
-
-    requirement_path = _required_phase4_artifact(artifact_paths, "requirement_packet", run_id=run_id)
-    verification_path = _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
-    trace_path = _required_phase4_artifact(artifact_paths, "requirement_design_code_trace", run_id=run_id)
-    design_path = _required_phase4_artifact(artifact_paths, "design_artifact", run_id=run_id)
-    implementation_plan_path = _required_phase4_artifact(artifact_paths, "implementation_plan", run_id=run_id)
-    requirement = _bounded_artifact_section(
-        store=store,
-        relative_path=requirement_path,
-        label="Accepted requirement/use-case packet",
-        limit=MAX_QA_REQUIREMENT_CHARS,
-    )
-    verification = _bounded_artifact_section(
-        store=store,
-        relative_path=verification_path,
-        label="Verification Runner report",
-        limit=MAX_QA_VERIFICATION_CHARS,
-    )
-    trace_report = _read_json_artifact(store.repo_root / trace_path, run_id=run_id)
-    code_under_test = _qa_code_under_test(
-        target_repo=Path(target_repo),
-        work_packet=work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    )
-    traceability = _qa_traceability_summary(trace_report=trace_report, trace_path=trace_path)
-    requirement_contract = _dict_value(work_packet.get("requirement_contract"))
-    v2 = requirement_contract.get("version") == "v2"
-    canonical_requirements = _dict_items(work_packet.get("canonical_requirements")) if v2 else []
-    accepted_requirement: dict[str, object] = requirement
-    if v2:
-        accepted_requirement = {
-            "label": "Canonical Requirement V2 stable-ID set",
-            "requirement_contract": requirement_contract,
-            "requirements": canonical_requirements,
-            "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")),
-            "requirement_packet_reference": requirement,
-        }
-    chars_sent = (
-        int(requirement.get("chars_sent") or 0)
-        + int(verification.get("chars_sent") or 0)
-        + int(code_under_test.get("chars_sent") or 0)
-    )
-    chars_total = (
-        int(requirement.get("chars_total") or 0)
-        + int(verification.get("chars_total") or 0)
-        + int(code_under_test.get("chars_total") or 0)
-    )
-    return {
-        "task": "qa_acceptance_review_v1",
-        "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
-        "run_id": run_id,
-        "source_ref": state.get("source_ref"),
-        "issue_key": work_packet.get("issue_key"),
-        "target_repo": target_repo,
-        "branch": branch,
-        "work_packet_summary": {
-            "implementation_steps": work_packet.get("implementation_steps"),
-            "proposed_files": work_packet.get("proposed_files"),
-            "test_intents": work_packet.get("test_intents"),
-        },
-        "accepted_requirement": accepted_requirement,
-        "requirement_contract": requirement_contract,
-        "canonical_requirements": canonical_requirements,
-        "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")) if v2 else [],
-        "code_under_test": code_under_test,
-        "verification": verification,
-        "traceability": traceability,
-        "artifact_references": {
-            "design_artifact": design_path,
-            "implementation_plan": implementation_plan_path,
-            "requirement_design_code_trace": trace_path,
-        },
-        "context_budget": {
-            "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
-            "section_count": 3,
-            "code_file_count": len(_dict_items(code_under_test.get("files"))),
-            "chars_sent": chars_sent,
-            "chars_total": chars_total,
-            "any_truncated": (
-                bool(requirement.get("content_truncated"))
-                or bool(verification.get("content_truncated"))
-                or bool(code_under_test.get("any_truncated"))
-            ),
-            "requirement_limit_chars": MAX_QA_REQUIREMENT_CHARS,
-            "verification_limit_chars": MAX_QA_VERIFICATION_CHARS,
-            "code_file_limit_chars": MAX_QA_CODE_FILE_CHARS,
-            "code_total_limit_chars": MAX_QA_CODE_TOTAL_CHARS,
-            "omitted_full_artifacts": ["design_artifact", "implementation_plan", "requirement_design_code_trace"],
-        },
-        "guardrails": [
-            "QA/Tester generates acceptance/system tests from current code and test evidence.",
-            "Full design, implementation plan, and trace report are references only; use summaries unless a future slice fetches them.",
-            "QA/Tester must not request requirement/design edits in this slice.",
-            "QA-generated test fail/skipped enters the bounded Developer QA repair loop.",
-        ],
-    }
-
-
-def _bounded_artifact_section(
-    *,
-    store: RuntimeStore,
-    relative_path: str,
-    label: str,
-    limit: int,
-) -> dict[str, object]:
-    path = (store.repo_root / relative_path).resolve()
-    if not path.exists():
-        raise HarnessError(
-            "approved_implementation_plan_not_found",
-            f"QA input artifact does not exist: {relative_path}",
-        )
-    text = path.read_text(encoding="utf-8", errors="replace")
-    excerpt = text[:limit]
-    return {
-        "label": label,
-        "path": relative_path,
-        "content": excerpt,
-        "content_truncated": len(excerpt) < len(text),
-        "chars_total": len(text),
-        "chars_sent": len(excerpt),
-    }
-
-
-def _qa_code_under_test(
-    *,
-    target_repo: Path,
-    work_packet: dict[str, object],
-    run_id: str,
-    planning_policy: PlanningPathPolicy,
-) -> dict[str, object]:
-    """Lay source/test code hien tai tu target repo, khong dung snapshot cu trong packet."""
-
-    files: list[dict[str, object]] = []
-    chars_sent = 0
-    chars_total = 0
-    for rel_path in _qa_code_paths(
-        work_packet=work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    ):
-        target_file = (target_repo / rel_path).resolve()
-        try:
-            target_file.relative_to(target_repo.resolve())
-        except ValueError as exc:
-            raise HarnessError(
-                "developer_act_unsafe_path",
-                f"QA code path escapes target repo: {rel_path}",
-                run_id=run_id,
-            ) from exc
-        if not target_file.exists():
-            files.append(
-                {
-                    "path": rel_path,
-                    "role": _qa_code_role(rel_path),
-                    "exists": False,
-                    "content": "",
-                    "content_truncated": False,
-                    "chars_total": 0,
-                    "chars_sent": 0,
-                }
-            )
-            continue
-        text = target_file.read_text(encoding="utf-8", errors="replace")
-        chars_total += len(text)
-        remaining_total = max(MAX_QA_CODE_TOTAL_CHARS - chars_sent, 0)
-        excerpt_limit = min(MAX_QA_CODE_FILE_CHARS, remaining_total)
-        excerpt = text[:excerpt_limit]
-        chars_sent += len(excerpt)
-        files.append(
-            {
-                "path": rel_path,
-                "role": _qa_code_role(rel_path),
-                "exists": True,
-                "content": excerpt,
-                "content_truncated": len(excerpt) < len(text),
-                "chars_total": len(text),
-                "chars_sent": len(excerpt),
-            }
-        )
-    return {
-        "source": "target_repo_allowed_paths",
-        "files": files,
-        "file_count": len(files),
-        "chars_sent": chars_sent,
-        "chars_total": chars_total,
-        "any_truncated": any(bool(item.get("content_truncated")) for item in files),
-    }
-
-
-def _qa_code_paths(
-    *,
-    work_packet: dict[str, object],
-    run_id: str,
-    planning_policy: PlanningPathPolicy,
-) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for rel_path in _allowed_paths(
-        work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    ):
-        if rel_path not in seen:
-            paths.append(rel_path)
-            seen.add(rel_path)
-    if paths:
-        return paths
-    for item in _dict_items(work_packet.get("proposed_files")) + _dict_items(work_packet.get("current_files")):
-        rel_path = _normalize_code_path(
-            str(item.get("path") or ""),
-            run_id=run_id,
-            planning_policy=planning_policy,
-        )
-        if rel_path not in seen:
-            paths.append(rel_path)
-            seen.add(rel_path)
-    return paths
-
-
-def _qa_code_role(rel_path: str) -> str:
-    return (
-        "test"
-        if rel_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
-        else "production"
-    )
-
-
-def _qa_traceability_summary(*, trace_report: dict[str, object], trace_path: str) -> dict[str, object]:
-    edges = _dict_items(trace_report.get("graph_edges"))
-    missing_links = _dict_items(trace_report.get("missing_links"))
-    risks = _string_items(trace_report.get("risks"))
-    llm_review = _dict_value(trace_report.get("llm_review"))
-    review_context = _dict_value(llm_review.get("review_context"))
-    return {
-        "path": trace_path,
-        "ok": bool(trace_report.get("ok")),
-        "confidence": trace_report.get("confidence"),
-        "summary": trace_report.get("summary"),
-        "graph_edge_count": len(edges),
-        "sample_graph_edges": edges[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "missing_link_count": len(missing_links),
-        "sample_missing_links": missing_links[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "risks": risks[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "review_context": {
-            "code_snippet_count": review_context.get("code_snippet_count"),
-            "code_snippets_total_chars": review_context.get("code_snippets_total_chars"),
-            "code_snippets_truncated": review_context.get("code_snippets_truncated"),
-        },
-    }
-
-
-def _apply_qa_generated_tests(
-    *,
-    generated: QaGeneratedTestSuite,
-    target_path: Path,
-    run_id: str,
-    qa_policy: QaTestPolicy,
-    prior_qa_paths: set[str] | None = None,
-) -> list[dict[str, object]]:
-    """Apply QA-generated files trong path policy của run."""
-
-    applied: list[dict[str, object]] = []
-    target_root = target_path.resolve()
-    prior_paths = prior_qa_paths or set()
-    seen_paths: set[str] = set()
-    for item in generated.test_files:
-        rel_path = _normalize_qa_test_path(
-            str(item.get("path") or ""),
-            run_id=run_id,
-            qa_policy=qa_policy,
-        )
-        if rel_path in seen_paths:
-            raise HarnessError(
-                "qa_test_path_duplicate",
-                f"QA generated the same test path more than once: {rel_path}",
-                run_id=run_id,
-            )
-        seen_paths.add(rel_path)
-        target_file = (target_root / rel_path).resolve()
-        try:
-            target_file.relative_to(target_root)
-        except ValueError as exc:
-            raise HarnessError(
-                "qa_test_unsafe_path",
-                f"QA-generated test path escapes target repo: {rel_path}",
-                run_id=run_id,
-            ) from exc
-        if target_file.exists() and rel_path not in prior_paths:
-            raise HarnessError(
-                "qa_test_existing_file_conflict",
-                f"QA cannot overwrite a test file it does not own for this run: {rel_path}",
-                run_id=run_id,
-            )
-        content = str(item.get("content") or "").strip()
-        if not content:
-            raise HarnessError(
-                "qa_test_empty_content",
-                f"QA-generated test file has empty content: {rel_path}",
-                run_id=run_id,
-            )
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        target_file.write_text(content.rstrip() + "\n", encoding="utf-8")
-        applied.append(
-            {
-                "path": rel_path,
-                "operation": "create_or_update",
-                "scenarios": _string_items(item.get("scenarios")),
-            }
-        )
-    if not applied:
-        raise HarnessError("qa_test_files_missing", "QA did not generate any test file.", run_id=run_id)
-    return applied
-
-
-def _normalize_qa_test_path(
-    raw_path: str,
-    *,
-    run_id: str,
-    qa_policy: QaTestPolicy,
-) -> str:
-    rel_path = qa_policy.normalize_test_path(raw_path)
-    if not rel_path:
-        raise HarnessError(
-            "qa_test_out_of_scope",
-            f"QA-generated test is outside the immutable project policy: {raw_path}",
-            run_id=run_id,
-        )
-    return rel_path
-
-
-def _qa_repair_dirty_paths(
-    *,
-    store: RuntimeStore,
-    artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy,
-    run_id: str,
-) -> set[str]:
-    """Đọc tập QA-owned path làm dirty baseline, không mở rộng quyền ghi Developer."""
-
-    return _previous_qa_owned_paths(
-        store=store,
-        artifact_paths=artifact_paths,
-        qa_policy=qa_policy,
-        run_id=run_id,
-    )
-
-
-def _previous_qa_owned_paths(
-    *,
-    store: RuntimeStore,
-    artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy,
-    run_id: str,
-) -> set[str]:
-    artifact_ref = str(artifact_paths.get("qa_generated_tests") or "")
-    if not artifact_ref:
-        return set()
-    artifact_path = Path(artifact_ref)
-    if not artifact_path.is_absolute():
-        artifact_path = store.repo_root / artifact_path
-    if not artifact_path.is_file():
-        return set()
-    payload = _read_json_artifact(artifact_path, run_id=run_id)
-    generation_profile = _dict_value(payload.get("generation_profile"))
-    if generation_profile != qa_policy.metadata():
-        raise HarnessError(
-            "qa_test_policy_invalid",
-            "Prior QA-generated tests do not match the immutable QA policy.",
-            run_id=run_id,
-        )
-    owned: set[str] = set()
-    for item in _dict_items(payload.get("test_files")):
-        path = qa_policy.normalize_test_path(item.get("path"))
-        if not path:
-            raise HarnessError(
-                "qa_test_policy_invalid",
-                "Prior QA-generated test artifact contains an out-of-policy path.",
-                run_id=run_id,
-            )
-        owned.add(path)
-    return owned
-
-
-def _qa_result_from_generated_execution(
-    *,
-    generated: QaGeneratedTestSuite,
-    execution: object,
-    execution_path: str,
-    generated_path: str,
-    applied_tests: list[dict[str, object]],
-    qa_policy: QaTestPolicy,
-) -> QaTestResult:
-    status = _qa_status_from_verification(str(getattr(execution, "status", "")))
-    reason = str(getattr(execution, "reason", "") or "")
-    expected_test_files = tuple(str(item.get("path") or "") for item in applied_tests)
-    selected_test_files = tuple(getattr(execution, "selected_test_files", ()) or ())
-    verified_test_files = tuple(getattr(execution, "verified_test_files", ()) or ())
-    if (
-        selected_test_files != expected_test_files
-        or verified_test_files != expected_test_files
-    ):
-        status = "fail"
-        reason = (
-            "QA execution evidence does not prove every generated Vitest file ran; "
-            f"expected={list(expected_test_files)}, selected={list(selected_test_files)}, "
-            f"verified={list(verified_test_files)}."
-        )
-    scenarios: list[dict[str, object]] = []
-    for item in generated.scenarios:
-        scenarios.append(
-            {
-                "name": str(item.get("name") or ""),
-                "result": status,
-                "evidence": reason or str(item.get("expected_result") or ""),
-                "risk": str(item.get("risk") or ""),
-                "requirement_ids": _string_items(item.get("requirement_ids")),
-            }
-        )
-    if not scenarios:
-        scenarios = [
-            {
-                "name": "QA-generated acceptance tests",
-                "result": status,
-                "evidence": reason,
-                "risk": "",
-                "requirement_ids": [],
-            }
-        ]
-    if status == "pass":
-        summary = f"QA-generated acceptance tests passed: {reason}"
-    elif status == "skipped":
-        summary = f"QA-generated acceptance tests were skipped: {reason}"
-    else:
-        summary = f"QA-generated acceptance tests failed: {reason}"
-    evidence = [
-        f"Generated tests artifact: {generated_path}",
-        f"QA execution artifact: {execution_path}",
-        f"Applied QA test files: {len(applied_tests)}",
-        f"Verification Runner status: {getattr(execution, 'status', '')}",
-        f"Selected QA test files: {list(selected_test_files)}",
-        f"Verified QA test files: {list(verified_test_files)}",
-    ]
-    risks = list(generated.risks)
-    if status != "pass":
-        risks.append("QA-generated acceptance test execution did not pass.")
-    review_context = {
-        **(generated.generation_context or {}),
-        "generated_test_file_count": len(generated.test_files),
-        "applied_test_file_count": len(applied_tests),
-        "execution_status": getattr(execution, "status", ""),
-        "selected_test_files": list(selected_test_files),
-        "verified_test_files": list(verified_test_files),
-    }
-    return QaTestResult(
-        status=status,
-        summary=summary,
-        scenarios=scenarios,
-        evidence=evidence,
-        risks=risks,
-        raw_response=generated.raw_response,
-        review_context=review_context,
-        requirement_contract=generated.requirement_contract,
-    )
-
-
-def _qa_status_from_verification(status: str) -> str:
-    if status == "passed":
-        return "pass"
-    if status == "skipped":
-        return "skipped"
-    return "fail"
-
-def _qa_repair_feedback(
-    *,
-    run_id: str,
-    state: dict[str, object],
-    work_packet: dict[str, object],
-    qa_result: QaTestResult,
-    qa_run: dict[str, object],
-    target_repo: str,
-    branch: str,
-    feedback_version: int,
-    repair_iteration: int,
-) -> dict[str, object]:
-    """Build machine-readable QA feedback for Developer.repair."""
-
-    output_contract = _dict_value(work_packet.get("output_contract"))
-    failing_scenarios = [
-        item for item in qa_result.scenarios if str(item.get("result") or "").strip().lower() != "pass"
-    ]
-    if not failing_scenarios:
-        failing_scenarios = list(qa_result.scenarios)
-    return {
-        "version": f"qa_repair_feedback_v{feedback_version}",
-        "run_id": run_id,
-        "source_ref": state.get("source_ref"),
-        "issue_key": work_packet.get("issue_key"),
-        "status": "qa_repair_needed",
-        "repair_iteration": repair_iteration,
-        "repair_scope": "code_or_test",
-        "severity": "repair_required",
-        "summary": qa_result.summary,
-        "required_action": (
-            "Developer must repair code/test behavior within allowed_paths so the QA-generated "
-            "acceptance tests pass. Requirement, approved design, implementation plan, branch, "
-            "and tool-sync records must not be edited in this slice."
-        ),
-        "target_repo": target_repo,
-        "branch": branch,
-        "qa_artifacts": {
-            "qa_generated_tests": qa_run.get("generated_path"),
-            "qa_test_execution": qa_run.get("execution_path"),
-            "qa_test_report": qa_run.get("report_path"),
-        },
-        "failing_scenarios": failing_scenarios,
-        "evidence": qa_result.evidence,
-        "risks": qa_result.risks,
-        "applied_tests": qa_run.get("applied_tests", []),
-        "developer_constraints": {
-            "allowed_paths": output_contract.get("allowed_paths", []),
-            "changed_files_only": output_contract.get("changed_files_only"),
-            "format": output_contract.get("format"),
-        },
-    }
-
-
 def _code_review_publication_paths(
     *,
     work_packet: dict[str, object],
     qa_generated: dict[str, object],
     run_id: str,
     planning_policy: PlanningPathPolicy,
+    extra_paths: list[str] | None = None,
 ) -> list[str]:
     """Lập manifest file từ evidence của Developer, QA và Verification Runner."""
 
@@ -1366,6 +1045,8 @@ def _code_review_publication_paths(
             planning_policy=planning_policy,
         )
     }
+    # Runtime closure outputs (closure packet paths, D11 extensions, Harness probe spec; D13).
+    paths.update(_normalize_publication_path(path, run_id=run_id) for path in extra_paths or [])
     for test_file in _dict_items(qa_generated.get("test_files")):
         paths.add(_normalize_publication_path(str(test_file.get("path") or ""), run_id=run_id))
     for value in _nested_strings(work_packet):
@@ -1561,6 +1242,25 @@ def _require_exact_v2_coverage(
                 f"Requirement coverage design targets do not match approved trace for {requirement_id}.",
                 run_id=run_id,
             )
+        # Same row kinds as Code Trace: `existing_code` rows point at reused code (Code Trace checks it still
+        # exists), `precondition` rows carry no code; only rows a work unit implements need design, code and tests.
+        coverage_kind = str(item.get("coverage_kind") or "")
+        if coverage_kind == "precondition":
+            continue
+        if coverage_kind == "existing_code":
+            if not _string_items(item.get("existing_code_targets")):
+                raise HarnessError(
+                    "requirement_v2_phase4_input_invalid",
+                    f"Requirement {requirement_id} reuses existing code but names no existing code target.",
+                    run_id=run_id,
+                )
+            continue
+        if coverage_kind:
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement {requirement_id} has an unknown coverage kind `{coverage_kind}`.",
+                run_id=run_id,
+            )
         if not _string_items(item.get("design_element_ids")):
             raise HarnessError(
                 "requirement_v2_phase4_input_invalid",
@@ -1666,23 +1366,6 @@ def _verification_policy_for_state(
     return verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
 
 
-def _qa_policy_for_state(
-    state: dict[str, object],
-    *,
-    run_id: str,
-) -> QaTestPolicy:
-    """Resolve QA test policy chỉ từ run snapshot bất biến."""
-
-    snapshot = read_profile_snapshot(state, run_id=run_id)
-    if snapshot is None:
-        raise HarnessError(
-            "legacy_execution_profile_retired",
-            "Phase 4 QA requires an immutable project profile snapshot.",
-            run_id=run_id,
-        )
-    return qa_test_policy_from_snapshot(snapshot, run_id=run_id)
-
-
 def _code_trace_policy_for_state(
     state: dict[str, object],
     *,
@@ -1698,18 +1381,6 @@ def _code_trace_policy_for_state(
             run_id=run_id,
         )
     return code_trace_policy_from_snapshot(snapshot, run_id=run_id)
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _int_value(value: object, *, default: int = 0) -> int:
@@ -1752,6 +1423,23 @@ def _next_phase4_artifact_version(store: RuntimeStore, run_id: str) -> int:
     return max_version + 1
 
 
+def _code_trace_artifact_version(store: RuntimeStore, run_id: str, test_report_path: str) -> int:
+    """The version of the test report a code trace checks, or the next free version once that one is taken."""
+
+    match = re.search(r"test_report_v(\d+)\.md$", test_report_path.replace("\\", "/"))
+    version = int(match.group(1)) if match else 0
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    taken = version < 1 or any(
+        (artifact_dir / f"{prefix}_v{version}.json").exists()
+        for prefix in (
+            "requirement_design_code_trace",
+            "implementation_validation_ledger",
+            "implementation_repair_feedback",
+        )
+    )
+    return _next_phase4_artifact_version(store, run_id) if taken else version
+
+
 def _verification_attempt_count(store: RuntimeStore, run_id: str) -> int:
     """Count persisted official Verification Runner reports, independent of artifact gaps."""
 
@@ -1773,8 +1461,6 @@ def _next_qa_artifact_version(store: RuntimeStore, run_id: str) -> int:
         "qa_generated_tests_",
         "qa_test_execution_",
         "qa_test_report_",
-        "qa_tester_raw_response_",
-        "qa_repair_feedback_",
     )
     max_version = 0
     if not artifact_dir.exists():
@@ -1806,6 +1492,7 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
     repairable_types = {
         "missing_source_file",
         "missing_test_file",
+        "missing_code_symbol",
         "llm_semantic_gap",
         "contract_signature_mismatch",
     }
@@ -1832,6 +1519,8 @@ def _nonrepairable_code_trace_error_code(trace_result: object) -> str:
             continue
         link_type = str(item.get("type") or "").strip()
         owner = str(item.get("owner") or "").strip().lower()
+        if link_type == "frozen_contract_conflict" or owner == "system":
+            return "implementation_scope_conflict"
         if link_type == "open_requirement_question" or owner == "human":
             return "requirement_decision_needed"
         if link_type in {"trace_mapping_issue", "evidence_incomplete"}:
@@ -2009,11 +1698,22 @@ def _validator_repair_objective(missing_links: list[object]) -> dict[str, object
             key: raw.get(key)
             for key in (
                 "canonical_key",
+                "finding_id",
+                "task_id",
                 "type",
                 "message",
+                "issue",
+                "expected_change",
+                "scenario_ids",
+                "claim_ids",
+                "unit_ids",
                 "requirement_ref",
+                "requirement_refs",
                 "design_element_id",
+                "design_refs",
                 "code_ref",
+                "code_refs",
+                "test_refs",
                 "evidence_ref",
                 "evidence_quote",
                 "expected_signature",
@@ -2105,11 +1805,10 @@ def _implementation_repair_feedback(
         "severity": "repair_required",
         "summary": developer_summary,
         "required_action": (
-            "Verification has passed. Developer must choose and implement one coherent bounded slice of the missing "
-            "files, symbols, behaviors, tests, or trace links reported by Validator, using only allowed_paths and "
-            "the current worktree. Other missing links may remain for a later iteration. The harness will rerun "
-            "Verification and then Validator against the accumulated worktree. Do not edit the requirement or "
-            "approved design."
+            "Verification has passed. Developer must repair every blocking finding in this feedback as one "
+            "dependency-aware change, including all affected callers, implementations, and tests, using only "
+            "allowed_paths and the current worktree. The harness will rerun Verification and only the invalidated "
+            "Scenario + Boundary validation tasks. Do not edit the requirement or approved design."
         ),
         "target_repo": target_repo,
         "branch": branch,
@@ -2123,7 +1822,7 @@ def _implementation_repair_feedback(
             "previous_feedback_source": "",
         },
         "snapshot_fingerprint": getattr(trace_result, "snapshot_fingerprint", ""),
-        "semantic_consensus": getattr(trace_result, "semantic_consensus", {}),
+        "validation_aggregation": getattr(trace_result, "aggregation", {}),
         "missing_links": missing_links,
         "llm_review": {
             "ok": llm_review.get("ok"),
@@ -2139,20 +1838,34 @@ def _implementation_repair_feedback(
     }
 
 
-
-
-
+from .phase4_automation import PhaseFourAutomation
+from .phase4_browser import PhaseFourBrowserStagesCycle
+from .phase4_browser_journey import PhaseFourBrowserJourneyCycle
+from .phase4_browser_polish import PhaseFourUiPolishCycle
+from .phase4_browser_qa import PhaseFourBrowserQaCycle
+from .phase4_browser_readiness import PhaseFourBrowserReadinessCycle
+from .phase4_closure import PhaseFourRuntimeClosureCycle
+from .phase4_documentation import PhaseFourDocumentationCycle
+from .phase4_final_verification import PhaseFourFinalVerificationCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
-from .phase4_qa import PhaseFourQaCycle
+from .phase4_rewind import PhaseFourRewind
 
 
 class PhaseFourWorkflow(
+    PhaseFourAutomation,
+    PhaseFourRewind,
     PhaseFourPublicationCycle,
-    PhaseFourQaCycle,
+    PhaseFourFinalVerificationCycle,
+    PhaseFourDocumentationCycle,
+    PhaseFourBrowserQaCycle,
+    PhaseFourUiPolishCycle,
+    PhaseFourBrowserJourneyCycle,
+    PhaseFourBrowserReadinessCycle,
+    PhaseFourBrowserStagesCycle,
+    PhaseFourRuntimeClosureCycle,
     PhaseFourImplementationCycle,
     _PhaseFourCore,
 ):
-    """Stable public facade composed from the three Phase 4 behavior cycles."""
-
+    """Stable public facade composed from the Phase 4 behavior cycles."""
 

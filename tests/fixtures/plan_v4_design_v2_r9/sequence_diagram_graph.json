@@ -1,0 +1,483 @@
+{
+  "version": "sequence_diagram_graph_v25",
+  "sequenceDiagrams": [
+    {
+      "id": "sequence_sc_1",
+      "nodes": [
+        {
+          "id": "VDN-17b0bc2770432ef2",
+          "type": "actor",
+          "label": "Root forwards runtime inputs"
+        },
+        {
+          "id": "VDN-9c276a1d75ac9f49",
+          "type": "participant",
+          "label": "DELETE CulturalHeritage request boundary"
+        },
+        {
+          "id": "VDN-b31b85277d1d8727",
+          "type": "actor",
+          "label": "AppShell forwards runtime inputs"
+        },
+        {
+          "id": "VDN-c08451c6db1f6af4",
+          "type": "participant",
+          "label": "Confirmation-gated CulturalHeritage elimination rule"
+        },
+        {
+          "id": "VDN-e05e8071615706e0",
+          "type": "actor",
+          "label": "CulturalHeritage deletion screen with confirmation dialog and success notice"
+        },
+        {
+          "id": "VDN-f972f22cbbcf1e2f",
+          "type": "database",
+          "label": "CulturalHeritage record deletion persistence"
+        }
+      ],
+      "messages": [
+        {
+          "id": "sequence_sc_1:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-17b0bc2770432ef2",
+          "to": "VDN-b31b85277d1d8727",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "rootForwardsRuntimeInputsToAppShell()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-b31b85277d1d8727",
+          "to": "VDN-e05e8071615706e0",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "appshellRendersCulturalHeritageScreenWithTheAvailableCulturalHeritageRecordsForSelectionAndElimination()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0003",
+          "order": 3,
+          "eventType": "message",
+          "from": "VDN-e05e8071615706e0",
+          "to": "VDN-9c276a1d75ac9f49",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theOperatorSConfirmedEliminationIsSubmittedToTheDELETECulturalHeritageRequestBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0004",
+          "order": 4,
+          "eventType": "message",
+          "from": "VDN-9c276a1d75ac9f49",
+          "to": "VDN-c08451c6db1f6af4",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theDeletionRouteInvokesTheConfirmationGatedEliminationRuleWithTheCulturalHeritageIdAndTheOperatorConfirmation()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0005",
+          "order": 5,
+          "eventType": "message",
+          "from": "VDN-c08451c6db1f6af4",
+          "to": "VDN-f972f22cbbcf1e2f",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theConfirmationGatedRuleDeletesTheSelectedCulturalHeritageRecordByItsIdentifier()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0006",
+          "order": 6,
+          "eventType": "message",
+          "from": "VDN-f972f22cbbcf1e2f",
+          "to": "VDN-c08451c6db1f6af4",
+          "arrow": "-->",
+          "type": "return",
+          "message": "persistenceReportsTheDeletionOfTheSelectedCulturalHeritageBackToTheRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0007",
+          "order": 7,
+          "eventType": "message",
+          "from": "VDN-c08451c6db1f6af4",
+          "to": "VDN-9c276a1d75ac9f49",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReturnsTheSuccessfulEliminationOrTheRejectionToTheDeletionRoute()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0008",
+          "order": 8,
+          "eventType": "message",
+          "from": "VDN-9c276a1d75ac9f49",
+          "to": "VDN-e05e8071615706e0",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRequestBoundaryReturnsTheSuccessfulElimination204OrTheRejection409ToTheCulturalHeritageScreen()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "controlFlows": [],
+      "events": [
+        {
+          "id": "sequence_sc_1:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-17b0bc2770432ef2",
+          "to": "VDN-b31b85277d1d8727",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "rootForwardsRuntimeInputsToAppShell()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-b31b85277d1d8727",
+          "to": "VDN-e05e8071615706e0",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "appshellRendersCulturalHeritageScreenWithTheAvailableCulturalHeritageRecordsForSelectionAndElimination()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0003",
+          "order": 3,
+          "eventType": "message",
+          "from": "VDN-e05e8071615706e0",
+          "to": "VDN-9c276a1d75ac9f49",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theOperatorSConfirmedEliminationIsSubmittedToTheDELETECulturalHeritageRequestBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0004",
+          "order": 4,
+          "eventType": "message",
+          "from": "VDN-9c276a1d75ac9f49",
+          "to": "VDN-c08451c6db1f6af4",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theDeletionRouteInvokesTheConfirmationGatedEliminationRuleWithTheCulturalHeritageIdAndTheOperatorConfirmation()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0005",
+          "order": 5,
+          "eventType": "message",
+          "from": "VDN-c08451c6db1f6af4",
+          "to": "VDN-f972f22cbbcf1e2f",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theConfirmationGatedRuleDeletesTheSelectedCulturalHeritageRecordByItsIdentifier()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0006",
+          "order": 6,
+          "eventType": "message",
+          "from": "VDN-f972f22cbbcf1e2f",
+          "to": "VDN-c08451c6db1f6af4",
+          "arrow": "-->",
+          "type": "return",
+          "message": "persistenceReportsTheDeletionOfTheSelectedCulturalHeritageBackToTheRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0007",
+          "order": 7,
+          "eventType": "message",
+          "from": "VDN-c08451c6db1f6af4",
+          "to": "VDN-9c276a1d75ac9f49",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReturnsTheSuccessfulEliminationOrTheRejectionToTheDeletionRoute()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_1:message:0008",
+          "order": 8,
+          "eventType": "message",
+          "from": "VDN-9c276a1d75ac9f49",
+          "to": "VDN-e05e8071615706e0",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRequestBoundaryReturnsTheSuccessfulElimination204OrTheRejection409ToTheCulturalHeritageScreen()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "id": "sequence_sc_2",
+      "nodes": [
+        {
+          "id": "VDN-8154a2b82dcbdedd",
+          "type": "actor",
+          "label": "CulturalHeritage deletion cancellation confirmation on the confirmation dialog"
+        },
+        {
+          "id": "VDN-aebccf9fe2287c31",
+          "type": "participant",
+          "label": "Cancellation rule that cancels the CulturalHeritage deletion before the request is dispatched"
+        }
+      ],
+      "messages": [
+        {
+          "id": "sequence_sc_2:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-8154a2b82dcbdedd",
+          "to": "VDN-aebccf9fe2287c31",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theOperatorSConfirmedCancellationFromTheOpenConfirmationDialogIsResolvedByTheCancellationRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_2:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-aebccf9fe2287c31",
+          "to": "VDN-8154a2b82dcbdedd",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReturnsTheNeverDispatchedDeletionTheUnchangedSelectionAndTheCancellationConfirmationToTheScreen()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "controlFlows": [],
+      "events": [
+        {
+          "id": "sequence_sc_2:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-8154a2b82dcbdedd",
+          "to": "VDN-aebccf9fe2287c31",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theOperatorSConfirmedCancellationFromTheOpenConfirmationDialogIsResolvedByTheCancellationRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_2:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-aebccf9fe2287c31",
+          "to": "VDN-8154a2b82dcbdedd",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReturnsTheNeverDispatchedDeletionTheUnchangedSelectionAndTheCancellationConfirmationToTheScreen()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "id": "sequence_sc_3",
+      "nodes": [
+        {
+          "id": "VDN-7591323b8e28fe0f",
+          "type": "participant",
+          "label": "ETOUR connection interruption rollback rule"
+        },
+        {
+          "id": "VDN-aebba2a693dbdd96",
+          "type": "database",
+          "label": "CulturalHeritage deletion interruption rollback persistence"
+        },
+        {
+          "id": "VDN-b2af0c88ed45e400",
+          "type": "participant",
+          "label": "Interrupted CulturalHeritage deletion request boundary"
+        },
+        {
+          "id": "VDN-e56af334b66c19a6",
+          "type": "actor",
+          "label": "CulturalHeritage deletion connection-interruption error on the confirmation dialog"
+        }
+      ],
+      "messages": [
+        {
+          "id": "sequence_sc_3:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-e56af334b66c19a6",
+          "to": "VDN-b2af0c88ed45e400",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theConfirmationDialogForwardsTheInterruptedConfirmedEliminationToTheDELETECulturalHeritageRequestBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-b2af0c88ed45e400",
+          "to": "VDN-7591323b8e28fe0f",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theDeletionBoundaryInvokesTheDeletionRuleWithTheSelectedCulturalHeritageIdentifierTheOperatorConfirmationAndTheObservedETOURConnectionInterruptionSignal()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0003",
+          "order": 3,
+          "eventType": "message",
+          "from": "VDN-7591323b8e28fe0f",
+          "to": "VDN-aebba2a693dbdd96",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theInterruptionRollbackRuleAttemptsToDeleteTheSelectedCulturalHeritageRecordByItsIdentifier()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0004",
+          "order": 4,
+          "eventType": "message",
+          "from": "VDN-aebba2a693dbdd96",
+          "to": "VDN-7591323b8e28fe0f",
+          "arrow": "-->",
+          "type": "return",
+          "message": "persistenceReportsTheRolledBackInterruptionFailureAndUnchangedCulturalHeritageBackToTheRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0005",
+          "order": 5,
+          "eventType": "message",
+          "from": "VDN-7591323b8e28fe0f",
+          "to": "VDN-b2af0c88ed45e400",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReportsTheRolledBackInterruptionFailureToTheDeletionBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0006",
+          "order": 6,
+          "eventType": "message",
+          "from": "VDN-b2af0c88ed45e400",
+          "to": "VDN-e56af334b66c19a6",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRequestBoundaryReportsTheConnectionInterruptionFailureToTheConfirmationDialogForRetry()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "controlFlows": [],
+      "events": [
+        {
+          "id": "sequence_sc_3:message:0001",
+          "order": 1,
+          "eventType": "message",
+          "from": "VDN-e56af334b66c19a6",
+          "to": "VDN-b2af0c88ed45e400",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theConfirmationDialogForwardsTheInterruptedConfirmedEliminationToTheDELETECulturalHeritageRequestBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0002",
+          "order": 2,
+          "eventType": "message",
+          "from": "VDN-b2af0c88ed45e400",
+          "to": "VDN-7591323b8e28fe0f",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theDeletionBoundaryInvokesTheDeletionRuleWithTheSelectedCulturalHeritageIdentifierTheOperatorConfirmationAndTheObservedETOURConnectionInterruptionSignal()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0003",
+          "order": 3,
+          "eventType": "message",
+          "from": "VDN-7591323b8e28fe0f",
+          "to": "VDN-aebba2a693dbdd96",
+          "arrow": "-->",
+          "type": "synchronous",
+          "message": "theInterruptionRollbackRuleAttemptsToDeleteTheSelectedCulturalHeritageRecordByItsIdentifier()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0004",
+          "order": 4,
+          "eventType": "message",
+          "from": "VDN-aebba2a693dbdd96",
+          "to": "VDN-7591323b8e28fe0f",
+          "arrow": "-->",
+          "type": "return",
+          "message": "persistenceReportsTheRolledBackInterruptionFailureAndUnchangedCulturalHeritageBackToTheRule()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0005",
+          "order": 5,
+          "eventType": "message",
+          "from": "VDN-7591323b8e28fe0f",
+          "to": "VDN-b2af0c88ed45e400",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRuleReportsTheRolledBackInterruptionFailureToTheDeletionBoundary()",
+          "controlPath": [],
+          "terminal": false
+        },
+        {
+          "id": "sequence_sc_3:message:0006",
+          "order": 6,
+          "eventType": "message",
+          "from": "VDN-b2af0c88ed45e400",
+          "to": "VDN-e56af334b66c19a6",
+          "arrow": "-->",
+          "type": "return",
+          "message": "theRequestBoundaryReportsTheConnectionInterruptionFailureToTheConfirmationDialogForRetry()",
+          "controlPath": [],
+          "terminal": true
+        }
+      ],
+      "parseIssues": []
+    }
+  ],
+  "created_at": "2026-11-03T09:13:17Z"
+}

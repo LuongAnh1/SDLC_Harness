@@ -14,6 +14,7 @@ import json
 
 from ..sources.fixtures import UseCaseSource
 from ..storage.runtime import RuntimeStore, utc_now_iso
+from ..core.coerce import dict_items as _dict_items
 
 
 def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSource) -> str:
@@ -35,45 +36,6 @@ def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSo
 """
     path.write_text(content, encoding="utf-8")
     return store.relative(path)
-
-
-def write_phase2_traceability_attempt(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    design_version: int,
-    attempt: dict[str, object],
-) -> dict[str, str]:
-    """Persist raw traceability output and metadata before normalization can fail."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    diagram = str(attempt.get("diagram") or "trace").replace(" diagram", "").replace(" ", "_")
-    attempt_number = int(attempt.get("attempt") or 1)
-    stem = f"traceability_{diagram}_v{design_version}_attempt{attempt_number}"
-    raw_path = artifact_dir / f"{stem}_raw.txt"
-    metadata_path = artifact_dir / f"{stem}_metadata.json"
-    raw_path.write_text(str(attempt.get("raw_response") or "").rstrip() + "\n", encoding="utf-8")
-    metadata = {
-        "version": "traceability_attempt_v1",
-        "created_at": utc_now_iso(),
-        "design_version": f"v{design_version}",
-        "diagram": attempt.get("diagram"),
-        "attempt": attempt_number,
-        "finish_reason": attempt.get("finish_reason"),
-        "usage": attempt.get("usage") if isinstance(attempt.get("usage"), dict) else {},
-        "parse_status": attempt.get("parse_status"),
-        "error": attempt.get("error"),
-        "raw_response": store.relative(raw_path),
-    }
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return {
-        "raw_response": store.relative(raw_path),
-        "metadata": store.relative(metadata_path),
-    }
 
 
 def write_phase2_design_artifacts(
@@ -423,105 +385,6 @@ def write_phase4_code_trace_report(
     return store.relative(path)
 
 
-def write_phase4_qa_test_report(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    report: dict[str, object],
-    version: int = 1,
-) -> str:
-    """Ghi QA/Tester acceptance report sau khi code trace đã pass."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    path = artifact_dir / f"qa_test_report_{suffix}.md"
-    path.write_text(
-        _qa_test_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
-        encoding="utf-8",
-    )
-    return store.relative(path)
-
-
-def write_phase4_qa_generated_tests(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    generated: dict[str, object],
-    version: int = 1,
-) -> str:
-    """Write the QA-generated acceptance/system tests before execution."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    path = artifact_dir / f"qa_generated_tests_{suffix}.json"
-    payload = {
-        **generated,
-        "created_at": utc_now_iso(),
-        "artifact_ref": f"qa_generated_tests_{suffix}",
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
-def write_phase4_qa_execution_report(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    report: dict[str, object],
-    version: int = 1,
-) -> str:
-    """Write the Verification Runner report after QA-generated tests are applied."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    path = artifact_dir / f"qa_test_execution_{suffix}.md"
-    path.write_text(
-        _qa_execution_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
-        encoding="utf-8",
-    )
-    return store.relative(path)
-def write_phase4_qa_raw_response(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    raw_response: str,
-    version: int = 1,
-) -> str:
-    """Lưu raw LLM response của QA/Tester khi parse lỗi để debug output bị cắt."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    path = artifact_dir / f"qa_tester_raw_response_{suffix}.txt"
-    path.write_text(raw_response.rstrip() + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
-def write_phase4_qa_repair_feedback(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    feedback: dict[str, object],
-    version: int = 1,
-) -> str:
-    """Ghi feedback QA để Developer sửa code/test theo acceptance failure."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    path = artifact_dir / f"qa_repair_feedback_{suffix}.json"
-    payload = {
-        **feedback,
-        "created_at": utc_now_iso(),
-        "artifact_ref": f"qa_repair_feedback_{suffix}",
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
 def write_phase4_github_pr_body(
     *,
     store: RuntimeStore,
@@ -597,49 +460,6 @@ def write_phase4_repair_feedback(
         **feedback,
         "created_at": utc_now_iso(),
         "artifact_ref": f"implementation_repair_feedback_{suffix}",
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
-def write_phase4_developer_raw_response(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    action: str,
-    raw_response: str,
-    version: int = 1,
-) -> str:
-    """Lưu raw LLM response của Developer để debug khi parse/repair khó hội tụ."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    safe_action = action.strip().replace(" ", "_") or "developer"
-    path = artifact_dir / f"developer_{safe_action}_raw_response_{suffix}.txt"
-    path.write_text(raw_response.rstrip() + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
-def write_phase4_developer_llm_metadata(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    action: str,
-    metadata: dict[str, object],
-    version: int = 1,
-) -> str:
-    """Lưu finish_reason/usage của từng lần gọi Developer structured output."""
-
-    artifact_dir = store.run_dir(run_id) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"v{version}"
-    safe_action = action.strip().replace(" ", "_") or "developer"
-    path = artifact_dir / f"developer_{safe_action}_llm_metadata_{suffix}.json"
-    payload = {
-        **metadata,
-        "created_at": utc_now_iso(),
-        "artifact_ref": f"developer_{safe_action}_llm_metadata_{suffix}",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return store.relative(path)
@@ -918,187 +738,6 @@ def _test_report_markdown(report: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _qa_test_report_markdown(report: dict[str, object]) -> str:
-    scenarios = _dict_items(report.get("scenarios"))
-    evidence = [str(item).strip() for item in report.get("evidence", []) if str(item).strip()] if isinstance(report.get("evidence"), list) else []
-    risks = [str(item).strip() for item in report.get("risks", []) if str(item).strip()] if isinstance(report.get("risks"), list) else []
-    context_budget = report.get("review_context")
-    context_budget = context_budget if isinstance(context_budget, dict) else {}
-    requirement_contract = report.get("requirement_contract")
-    requirement_contract = requirement_contract if isinstance(requirement_contract, dict) else {}
-    requirement_ids = [
-        str(item).strip() for item in report.get("requirement_ids", []) if str(item).strip()
-    ] if isinstance(report.get("requirement_ids"), list) else []
-    generation_profile = report.get("generation_profile")
-    generation_profile = generation_profile if isinstance(generation_profile, dict) else {}
-    lines = [
-        f"# QA Test Report {report.get('artifact_version', 'V1')}",
-        "",
-        "## Run Context",
-        "",
-        f"- Run id: `{report.get('run_id', '')}`",
-        f"- Source ref: `{report.get('source_ref', '')}`",
-        f"- Issue key: `{report.get('issue_key', '')}`",
-        f"- Target repo: `{report.get('target_repo', '')}`",
-        f"- Branch: `{report.get('branch', '')}`",
-        f"- Requirement contract: `{requirement_contract.get('version', 'v2')}` revision `{requirement_contract.get('revision', 0)}`",
-        f"- Stable requirements covered: `{len(requirement_ids)}`",
-        f"- Test framework: `{generation_profile.get('framework', 'legacy')}`",
-        "",
-        "## Generated Test Execution",
-        "",
-        f"- Generated tests artifact: `{report.get('qa_generated_tests', '')}`",
-        f"- Execution artifact: `{report.get('qa_test_execution', '')}`",
-        f"- Execution status: `{report.get('execution_status', '')}`",
-        f"- Selected test files: `{json.dumps(report.get('selected_test_files') or [], ensure_ascii=False)}`",
-        f"- Verified test files: `{json.dumps(report.get('verified_test_files') or [], ensure_ascii=False)}`",
-        "",
-        "### Applied Test Files",
-        "",
-    ]
-    applied_tests = _dict_items(report.get("applied_tests"))
-    lines.extend([f"- `{item.get('path', '')}`" for item in applied_tests] or ["- none"])
-    lines.extend(
-        [
-            "",
-            "## Acceptance Result",
-            "",
-            f"- Status: `{report.get('status', '')}`",
-            f"- Summary: {report.get('summary', '')}",
-            "",
-            "## Scenarios",
-            "",
-            "| Scenario | Requirement IDs | Result | Evidence | Risk |",
-            "| --- | --- | --- | --- | --- |",
-        ]
-    )
-    for item in scenarios:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    _table_cell(str(item.get("name") or "")),
-                    _table_cell(", ".join(str(value) for value in item.get("requirement_ids", []) if str(value).strip())),
-                    _table_cell(str(item.get("result") or "")),
-                    _table_cell(str(item.get("evidence") or "")),
-                    _table_cell(str(item.get("risk") or "")),
-                ]
-            )
-            + " |"
-        )
-    if not scenarios:
-        lines.append("| _none_ |  |  |  |  |")
-    lines.extend(["", "## Evidence", ""])
-    lines.extend([f"- {item}" for item in evidence] or ["- none"])
-    lines.extend(["", "## Risks", ""])
-    lines.extend([f"- {item}" for item in risks] or ["- none"])
-    lines.extend(
-        [
-            "",
-            "## Context Budget",
-            "",
-            f"- Packet mode: `{context_budget.get('packet_mode', '')}`",
-            f"- Sections: `{context_budget.get('section_count', '')}`",
-            f"- Code files: `{context_budget.get('code_file_count', '')}`",
-            f"- Chars sent: `{context_budget.get('chars_sent', '')}`",
-            f"- Chars total: `{context_budget.get('chars_total', '')}`",
-            f"- Any truncated: `{str(context_budget.get('any_truncated', False)).lower()}`",
-            f"- Omitted full artifacts: `{', '.join(str(item) for item in context_budget.get('omitted_full_artifacts', []) if str(item).strip())}`",
-            "",
-            "## Scope",
-            "",
-            "- QA/Tester Agent generates acceptance/system tests from a compact packet, applies them inside the run's QA path policy, and executes them through Verification Runner.",
-            "- Full design and implementation plan are references, not copied into the QA prompt in Slice 4.7A.",
-            "- Developer QA repair loop starts from `qa_repair_needed`; failed QA tests only block after the configured limit.",
-            "- Commit/Draft PR is not created in Slice 4.7A.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _qa_execution_report_markdown(report: dict[str, object]) -> str:
-    applied_tests = _dict_items(report.get("applied_tests"))
-    stage_results = _dict_items(report.get("stage_results"))
-    lines = [
-        f"# QA Test Execution {report.get('artifact_version', 'V1')}",
-        "",
-        "## Run Context",
-        "",
-        f"- Run id: `{report.get('run_id', '')}`",
-        f"- Source ref: `{report.get('source_ref', '')}`",
-        f"- Issue key: `{report.get('issue_key', '')}`",
-        f"- Target repo: `{report.get('target_repo', '')}`",
-        f"- Branch: `{report.get('branch', '')}`",
-        f"- Generated tests artifact: `{report.get('qa_generated_tests', '')}`",
-        "",
-        "## Applied QA Test Files",
-        "",
-    ]
-    lines.extend([f"- `{item.get('path', '')}`" for item in applied_tests] or ["- none"])
-    lines.extend(
-        [
-            "",
-            "## Verification Result",
-            "",
-            f"- Status: `{report.get('status', '')}`",
-            f"- Command: `{report.get('command', '')}`",
-            f"- Exit code: `{report.get('exit_code', '')}`",
-            f"- Duration: `{report.get('duration_seconds', '')}` seconds",
-            f"- Reason: {report.get('reason', '')}",
-            f"- Selected test files: `{json.dumps(report.get('selected_test_files') or [], ensure_ascii=False)}`",
-            f"- Verified test files: `{json.dumps(report.get('verified_test_files') or [], ensure_ascii=False)}`",
-            "",
-            "## Verification Stages",
-            "",
-        ]
-    )
-    for item in stage_results:
-        lines.extend(
-            [
-                f"### {item.get('stage_id', '')}",
-                "",
-                f"- Status: `{item.get('status', '')}`",
-                f"- Argv: `{json.dumps(item.get('argv') or [], ensure_ascii=False)}`",
-                f"- Cwd: `{item.get('cwd', '')}`",
-                f"- Timeout: `{item.get('timeout_seconds', '')}` seconds",
-                f"- Selected test files: `{json.dumps(item.get('selected_test_files') or [], ensure_ascii=False)}`",
-                f"- Verified test files: `{json.dumps(item.get('verified_test_files') or [], ensure_ascii=False)}`",
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "",
-            "## Stdout",
-            "",
-            "```text",
-            str(report.get("stdout") or "").rstrip(),
-            "```",
-            "",
-            "## Stderr",
-            "",
-            "```text",
-            str(report.get("stderr") or "").rstrip(),
-            "```",
-            "",
-            "## Scope",
-            "",
-            "- Runner: Verification Runner after QA-generated acceptance tests are applied.",
-            "- Developer QA repair loop starts from `qa_repair_needed`; failed QA tests only block after the configured limit.",
-            "- Commit/Draft PR is not created in Slice 4.7A.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
 def _table_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ").strip()
 
@@ -1110,12 +749,6 @@ def _excerpt(content: str, *, limit: int = 1400) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "\n\n... truncated for implementation planning ..."
-
-
-def _traceability_result_text(missing_count: int) -> str:
-    if missing_count == 0:
-        return "Validator traceability V1 không phát hiện missing link ở class hoặc sequence diagram."
-    return "Validator traceability V1 còn phát hiện missing link cần Designer repair hoặc human review."
 
 
 def _design_findings_markdown(value: object) -> str:
@@ -1149,5 +782,4 @@ def _missing_links_markdown(missing_links: dict[str, list[dict[str, str]]]) -> s
         for item in items:
             lines.append(f"- {item.get('requirement')}: {item.get('content')}")
     return "\n".join(lines)
-
 

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from sdlc_harness.application.config_service import ConfigurationService
-from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.config import load_settings, phase4_llm_call_options
 from sdlc_harness.core.config_schema import config_field_index
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.core.runtime_config import RuntimeConfigStore
@@ -105,22 +105,9 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_thinking_mode, "disabled")
         self.assertEqual(settings.sync_mode, "mock")
         self.assertNotIn("SDLC_DESIGNER_LOOP_ENABLED", config_field_index())
-        self.assertEqual(settings.designer_contract_version, "vertical_design_graph_v1")
-        self.assertEqual(
-            config_field_index()["SDLC_DESIGNER_CONTRACT_VERSION"]["options"],
-            ["vertical_design_graph_v1", "vertical_design_graph_v2"],
-        )
-        self.assertEqual(settings.vertical_trace_mode, "enforce")
-        self.assertEqual(config_field_index()["SDLC_VERTICAL_TRACE_MODE"]["options"], ["shadow", "enforce"])
+        self.assertNotIn("SDLC_DESIGNER_CONTRACT_VERSION", config_field_index())
+        self.assertNotIn("SDLC_VERTICAL_TRACE_MODE", config_field_index())
 
-    def test_invalid_vertical_trace_mode_falls_back_to_enforce(self) -> None:
-        settings = load_settings(
-            root=self.root,
-            runtime_root=self.runtime_root,
-            overrides={"SDLC_VERTICAL_TRACE_MODE": "unexpected"},
-        )
-
-        self.assertEqual(settings.vertical_trace_mode, "enforce")
 
     def test_implementation_plan_step_review_defaults_and_overrides(self) -> None:
         default = load_settings(root=self.root, runtime_root=self.runtime_root)
@@ -205,16 +192,7 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         )
 
-        investigation = settings.phase2_llm_profiles["designer_investigation"]
-        self.assertEqual(
-            (
-                investigation.model,
-                investigation.thinking_effort,
-                investigation.max_tokens,
-                investigation.timeout_seconds,
-            ),
-            ("global-model", "low", 8192, 300),
-        )
+        self.assertNotIn("designer_investigation", settings.phase2_llm_profiles)
         delta = settings.phase2_llm_profiles["designer_delta"]
         self.assertEqual(
             (delta.model, delta.thinking_effort, delta.max_tokens, delta.timeout_seconds),
@@ -253,7 +231,7 @@ class RuntimeConfigTests(unittest.TestCase):
             ("global-model", "high", 49152, 480),
         )
 
-    def test_phase4_llm_profiles_have_action_and_repair_defaults_with_individual_overrides(self) -> None:
+    def test_phase4_llm_profiles_have_validator_action_and_repair_defaults_with_individual_overrides(self) -> None:
         settings = load_settings(
             root=self.root,
             runtime_root=self.runtime_root,
@@ -266,8 +244,20 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         )
 
+        validator_profile = settings.phase4_llm_profiles["code_validator"]
         action_profile = settings.phase4_llm_profiles["developer_action"]
         repair_profile = settings.phase4_llm_profiles["developer_repair"]
+        journey_profile = settings.phase4_llm_profiles["journey_planner"]
+        polish_profile = settings.phase4_llm_profiles["polish_validator"]
+        self.assertEqual(
+            (
+                validator_profile.model,
+                validator_profile.thinking_effort,
+                validator_profile.max_tokens,
+                validator_profile.timeout_seconds,
+            ),
+            ("deepseek-flash", "high", 32768, 600),
+        )
         self.assertEqual(
             (
                 action_profile.model,
@@ -287,8 +277,47 @@ class RuntimeConfigTests(unittest.TestCase):
             ("deepseek-flash", "high", 32768, 480),
         )
         fields = config_field_index()
+        self.assertIn("SDLC_PHASE4_CODE_VALIDATOR_THINKING_EFFORT", fields)
         self.assertIn("SDLC_PHASE4_DEVELOPER_ACTION_MAX_TOKENS", fields)
         self.assertIn("SDLC_PHASE4_DEVELOPER_REPAIR_TIMEOUT_SECONDS", fields)
+        self.assertFalse(journey_profile.accepts_images)
+        self.assertTrue(polish_profile.accepts_images)
+        self.assertNotIn("accepts_images", phase4_llm_call_options(settings, "journey_planner"))
+        self.assertTrue(phase4_llm_call_options(settings, "polish_validator")["accepts_images"])
+        self.assertEqual(settings.browser_max_images_per_call, 12)
+        self.assertEqual(settings.browser_qa_repair_limit, 3)
+        self.assertIn("SDLC_BROWSER_MAX_IMAGES_PER_CALL", fields)
+        self.assertIn("SDLC_BROWSER_QA_REPAIR_LIMIT", fields)
+
+    def test_browser_image_limit_is_configurable_and_bounded_to_a_positive_value(self) -> None:
+        configured = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={"SDLC_BROWSER_MAX_IMAGES_PER_CALL": "7"},
+        )
+        bounded = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={"SDLC_BROWSER_MAX_IMAGES_PER_CALL": "0"},
+        )
+
+        self.assertEqual(configured.browser_max_images_per_call, 7)
+        self.assertEqual(bounded.browser_max_images_per_call, 1)
+
+    def test_browser_qa_repair_limit_is_configurable_and_allows_zero(self) -> None:
+        configured = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={"SDLC_BROWSER_QA_REPAIR_LIMIT": "2"},
+        )
+        bounded = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={"SDLC_BROWSER_QA_REPAIR_LIMIT": "-1"},
+        )
+
+        self.assertEqual(configured.browser_qa_repair_limit, 2)
+        self.assertEqual(bounded.browser_qa_repair_limit, 0)
 
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

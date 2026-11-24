@@ -92,6 +92,21 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             ),
         ]
 
+    def test_open_questions_without_effective_blocking_get_it_from_python(self) -> None:
+        # The prompt no longer asks for effective_blocking; Python must still set it on every question.
+        without = deepcopy(self.payload)
+        for question in without["open_questions"]:
+            question.pop("effective_blocking")
+
+        baseline, _ = self.refine(self.completion(self.payload))
+        result, _ = self.refine(self.completion(without))
+
+        self.assertEqual(result.final_report.status, baseline.final_report.status)
+        self.assertEqual(
+            [question["effective_blocking"] for question in result.model.open_questions],
+            [question["effective_blocking"] for question in baseline.model.open_questions],
+        )
+
     def test_step_review_pauses_before_input_and_after_output_without_skipping_action(self) -> None:
         client = ScriptedLlmClient(self.source_actions() + [self.completion(self.payload)])
         with TemporaryDirectory() as directory:
@@ -236,7 +251,7 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             )
             self.assertEqual(
                 [call["max_tokens"] for call in client.calls],
-                [2048, 4096, 32768],
+                [2048, 4096, 65536],
             )
             prompts = [str(call["prompt"]) for call in client.calls]
             self.assertNotIn("# Requirement Model V2 Structured Output", prompts[0])
@@ -245,12 +260,38 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             self.assertIn('{"action":"source.search|source.read"', prompts[1])
             self.assertIn("# Requirement Model V2 Structured Output", prompts[2])
             self.assertIn('{"action":"source.search|source.read|complete"', prompts[2])
+            # The model contract must not contradict the action envelope (Conduit UC1: bare models returned).
+            self.assertIn('{"action":"complete","arguments":{"requirement_model":{...}}', prompts[2])
+            self.assertNotIn("Return exactly one JSON object", prompts[2])
+            # Prompt matches the validator: QR may join scenarios, verifies targets are listed, Python binds questions.
+            self.assertIn("`POST-*`, `BR-*`, or `QR-*`", prompts[2])
+            self.assertIn("never restate a\n  `QR-*` as a `BR-*`", prompts[2])
+            self.assertIn("`verifies` may list any requirement IDs", prompts[2])
+            self.assertIn("Return every scenario `open_question_refs` as an empty list", prompts[2])
+            # Same source boundary as the coverage reviewer: no questions about unmentioned validation or mechanisms.
+            self.assertIn("Apply this test only to a decision that the source introduces", prompts[2])
+            self.assertIn("how the system stores or compares identities belongs to Design", prompts[2])
+            # Conduit UC4 H-r1: a refusal whose request answer the source leaves open was dropped as "UI copy".
+            self.assertIn("A refusal is observable to the actor and also at the application's request boundary", prompts[2])
+            self.assertIn("The rule about exact UI copy does not cover it", prompts[2])
+            self.assertIn("A question's `affects` lists every requirement whose text or pass/fail result", prompts[2])
+            # No silent choices inside `explicit` items, and a checklist for overlaps and related records.
+            self.assertIn("`explicit` text says no more than its quoted evidence", prompts[2])
+            self.assertIn("Check every pair of clauses that can apply to the same situation", prompts[2])
+            self.assertIn("names other records related to it, check that the model states", prompts[2])
+            self.assertIn("two clauses whose conditions can hold at\n  the same time", prompts[2])
+            self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])
             self.assertIn(
                 "Do not mark `api` as `not_applicable` merely because the source omits",
                 prompts[2],
             )
+            # Surface requirement_refs are each surface's scope (Design reads them so), not a justifying sample.
+            self.assertIn("every scenario-local behavior or acceptance criterion this surface takes part in", prompts[2])
+            self.assertIn("a step the actor performs through the interface belongs to `ui`", prompts[2])
+            self.assertIn("Never leave an item off a surface to keep an open question away from it", prompts[2])
+            self.assertNotIn("criteria that justify it", prompts[2])
 
             unrelated_model = replace(
                 result.model,
@@ -529,7 +570,7 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertIn("must appear in the question's `affects` list", repair_prompt)
         self.assertIn("requirement.propose_delta", repair_prompt)
         self.assertIn("Requirement Repair Delta V1", repair_prompt)
-        self.assertNotIn("## Required JSON shape", repair_prompt)
+        self.assertNotIn("## Required `requirement_model` shape", repair_prompt)
 
     def test_invalid_question_options_use_bounded_delta_repair(self) -> None:
         invalid = deepcopy(self.payload)

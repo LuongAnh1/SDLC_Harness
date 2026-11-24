@@ -16,25 +16,33 @@ from typing import Any
 
 from ..requirements import RequirementModelV2
 from ...core.config import phase3_llm_call_options
+from ...profiles.runtime_config import (
+    canonical_runtime_config_impact,
+    runtime_config_policy,
+    runtime_config_prompt_context,
+)
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
     LanguagePromptDirective,
-    PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
+    QA_INTENT_STAGE_OWNER,
     VerificationStagePolicy,
     build_implementation_signature_contract,
-    get_language_profile,
-    resolve_language_prompt_directive,
 )
 from .component_plan import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    attach_existing_test_paths,
     build_component_work_units,
     canonicalize_work_unit_dependencies,
     component_plan_projections,
+    mark_existing_code_coverage,
     merge_work_unit_updates,
+    test_intent_id,
     rebind_legacy_mappings_to_work_units,
+    unit_write_scope,
 )
+from ...core.coerce import dict_items as _dict_items, string_items as _string_items
 
 
 @dataclass(frozen=True)
@@ -50,76 +58,6 @@ class DeveloperPlanAgent:
 
     def __init__(self, llm_client: Any | None = None):
         self.llm_client = llm_client
-
-    def _llm_plan(
-        self,
-        *,
-        run_id: str,
-        source_ref: str,
-        issue_key: str,
-        requirement_packet: str,
-        design_artifact: str,
-        requirement_design_trace: dict[str, object],
-        class_graph: dict[str, object],
-        sequence_graph: dict[str, object],
-        repo_context: dict[str, object],
-        base_mappings: list[dict[str, object]],
-        base_test_intents: list[dict[str, object]],
-        target_repo_path: str,
-        target_repo_remote: str,
-        target_base_branch: str,
-        planned_branch: str,
-        target_files: list[str],
-        test_command: str,
-        repair_feedback: str,
-        previous_review: dict[str, object],
-        canonical_requirement: RequirementModelV2 | None,
-        planning_policy: PlanningPathPolicy,
-        prompt_directive: LanguagePromptDirective | None,
-        verification_policy: VerificationStagePolicy,
-    ) -> dict[str, object]:
-        """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
-
-        if not self.llm_client:
-            return {}
-        prompt = _developer_plan_prompt(
-            run_id=run_id,
-            source_ref=source_ref,
-            issue_key=issue_key,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-            requirement_design_trace=requirement_design_trace,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            repo_context=repo_context,
-            base_mappings=base_mappings,
-            base_test_intents=base_test_intents,
-            target_repo_path=target_repo_path,
-            target_repo_remote=target_repo_remote,
-            target_base_branch=target_base_branch,
-            planned_branch=planned_branch,
-            target_files=target_files,
-            test_command=test_command,
-            repair_feedback=repair_feedback,
-            previous_review=previous_review,
-            canonical_requirement=canonical_requirement,
-            planning_policy=planning_policy,
-            prompt_directive=prompt_directive,
-            verification_policy=verification_policy,
-        )
-        raw = _complete_phase3_json(
-            self.llm_client,
-            system=(
-                "You are SDLC Harness Developer.plan. Return JSON only. "
-                "Create a concrete implementation plan, but do not write code."
-            ),
-            prompt=prompt,
-            profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
-        )
-        try:
-            return _parse_developer_plan_payload(raw)
-        except HarnessError as exc:
-            return {"_developer_llm_parse_error": exc.message}
 
     def plan(
         self,
@@ -150,7 +88,6 @@ class DeveloperPlanAgent:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
-        contract_version: str = PROFILED_IMPLEMENTATION_PLAN_VERSION,
         vertical_design_graph: dict[str, object] | None = None,
         vertical_trace_graph: dict[str, object] | None = None,
         repo_landscape: dict[str, object] | None = None,
@@ -164,61 +101,7 @@ class DeveloperPlanAgent:
         )
         assert planning_policy is not None
         repo_context = repo_context or {}
-        if contract_version == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
-            return self._plan_component_aware(
-                run_id=run_id,
-                source_ref=source_ref,
-                issue_key=issue_key,
-                requirement_packet=requirement_packet,
-                design_artifact=design_artifact,
-                requirement_design_trace=requirement_design_trace,
-                class_graph=class_graph,
-                sequence_graph=sequence_graph,
-                target_repo_path=target_repo_path,
-                target_repo_remote=target_repo_remote,
-                target_base_branch=target_base_branch,
-                planned_branch=planned_branch,
-                target_files=target_files,
-                repo_context=repo_context,
-                workspace_mode=workspace_mode,
-                workspace_ref=workspace_ref,
-                base_sha=base_sha,
-                requirement_graph=requirement_graph or {},
-                requirement_artifact_refs=requirement_artifact_refs or {},
-                planning_policy=planning_policy,
-                prompt_directive=prompt_directive,
-                verification_policy=verification_policy,
-                vertical_design_graph=vertical_design_graph or {},
-                vertical_trace_graph=vertical_trace_graph or {},
-                repo_landscape=repo_landscape or {},
-                component_plan_inputs=component_plan_inputs or {},
-            )
-        mappings = _design_mappings(
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            target_files=target_files,
-            target_repo_path=target_repo_path,
-            requirement_design_trace=requirement_design_trace,
-            planning_policy=planning_policy,
-        )
-        design_adjustments = _design_adjustments(
-            class_graph=class_graph,
-            class_targets=_class_target_files(
-                class_graph=class_graph,
-                target_files=target_files,
-                planning_policy=planning_policy,
-            ),
-            target_repo_path=target_repo_path,
-            requirement_design_trace=requirement_design_trace,
-            planning_policy=planning_policy,
-        )
-        mappings = _apply_design_adjustments(mappings, design_adjustments)
-        test_intents = _test_intents(
-            mappings=mappings,
-            test_command=test_command,
-            verification_policy=verification_policy,
-        )
-        llm_payload = self._llm_plan(
+        return self._plan_component_aware(
             run_id=run_id,
             source_ref=source_ref,
             issue_key=issue_key,
@@ -227,138 +110,25 @@ class DeveloperPlanAgent:
             requirement_design_trace=requirement_design_trace,
             class_graph=class_graph,
             sequence_graph=sequence_graph,
-            repo_context=repo_context,
-            base_mappings=mappings,
-            base_test_intents=test_intents,
             target_repo_path=target_repo_path,
             target_repo_remote=target_repo_remote,
             target_base_branch=target_base_branch,
             planned_branch=planned_branch,
             target_files=target_files,
-            test_command=test_command,
-            repair_feedback=repair_feedback,
-            previous_review=previous_review or {},
-            canonical_requirement=canonical_requirement,
+            repo_context=repo_context,
+            workspace_mode=workspace_mode,
+            workspace_ref=workspace_ref,
+            base_sha=base_sha,
+            requirement_graph=requirement_graph or {},
+            requirement_artifact_refs=requirement_artifact_refs or {},
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            vertical_design_graph=vertical_design_graph or {},
+            vertical_trace_graph=vertical_trace_graph or {},
+            repo_landscape=repo_landscape or {},
+            component_plan_inputs=component_plan_inputs or {},
         )
-        mappings = _merge_mappings(
-            mappings,
-            _dict_items(llm_payload.get("design_mappings")),
-            planning_policy=planning_policy,
-        )
-        mappings = _apply_design_adjustments(mappings, design_adjustments)
-        test_intents = _dict_items(llm_payload.get("test_intents")) or test_intents
-        requirement_coverage = _requirement_coverage(
-            requirement_graph=requirement_graph or {},
-            requirement_design_trace=requirement_design_trace,
-            mappings=mappings,
-        ) if canonical_requirement is not None else []
-        llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
-        implementation_steps = _apply_design_adjustments_to_steps(
-            _dict_items(llm_payload.get("implementation_steps"))
-            or _implementation_steps_from_mappings(mappings, planning_policy=planning_policy),
-            design_adjustments,
-        )
-        implementation_steps = _canonicalize_implementation_steps(
-            implementation_steps,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        proposed_files = _canonical_proposed_files(
-            proposed_files=_dict_items(llm_payload.get("proposed_files")),
-            implementation_steps=implementation_steps,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        proposed_files = _ensure_executable_test_files(
-            proposed_files=proposed_files,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        signature_contract = (
-            build_implementation_signature_contract(
-                planning_policy=planning_policy,
-                mappings=mappings,
-                class_graph=class_graph,
-                candidate=llm_payload.get("implementation_signature_contract"),
-            )
-            if planning_policy and verification_policy
-            else None
-        )
-        structured = {
-            "version": PROFILED_IMPLEMENTATION_PLAN_VERSION,
-            "planning_mode": (
-                "llm_developer_with_codegraph_context_v1"
-                if self.llm_client and not llm_parse_error
-                else "deterministic_graph_mapping_after_llm_parse_error_v1"
-                if self.llm_client
-                else "deterministic_graph_mapping_v1"
-            ),
-            "run_id": run_id,
-            "source_ref": source_ref,
-            "issue_key": issue_key,
-            "target_repository": {
-                "local_path": target_repo_path,
-                "remote": target_repo_remote,
-                "base_branch": target_base_branch,
-                "planned_branch": planned_branch,
-                "workspace_mode": workspace_mode,
-                "workspace_ref": workspace_ref,
-                "base_sha": base_sha,
-            },
-            "planning_profile": planning_policy.metadata(),
-            "verification_stage_ids": list(verification_policy.stage_ids),
-            "inputs": {
-                "requirement_design_trace_version": requirement_design_trace.get("version", ""),
-                "class_graph_version": class_graph.get("version", ""),
-                "sequence_graph_version": sequence_graph.get("version", ""),
-            },
-            "requirement_contract": {
-                "version": "v2" if canonical_requirement is not None else "v1",
-                "revision": canonical_requirement.revision if canonical_requirement is not None else 0,
-                "artifact_refs": requirement_artifact_refs or {},
-            },
-            "repo_context": _repo_context_summary(repo_context),
-            "repo_evidence": _string_items(llm_payload.get("repo_evidence"))
-            or _repo_context_evidence_lines(repo_context),
-            "implementation_steps": implementation_steps,
-            "proposed_files": proposed_files,
-            "design_mappings": mappings,
-            **(
-                {"implementation_signature_contract": signature_contract}
-                if signature_contract is not None
-                else {}
-            ),
-            "design_adjustments": design_adjustments,
-            "requirement_coverage": requirement_coverage,
-            "test_intents": test_intents,
-            "assumptions": [
-                "Phase 3 tạo branch/worktree riêng cho run để lập kế hoạch; Phase 4 mới sửa code, chạy test và mở Draft PR.",
-                "Các target file chưa tồn tại được hiểu là file Phase 4 có thể tạo mới trong run workspace.",
-            ],
-            "open_questions": [
-                "Nếu human muốn đổi kiến trúc hoặc component target, cần request_change trước khi duyệt plan.",
-            ],
-            "developer_llm": {
-                "used": bool(self.llm_client),
-                "summary": str(llm_payload.get("summary") or "").strip(),
-                "parse_error": llm_parse_error,
-                "repair_feedback_attached": bool(repair_feedback.strip()),
-            },
-            "out_of_scope": [
-                "Không sửa source/test hoặc tạo commit trong Phase 3.",
-                "Không ghi file source/test trong target repo ở Phase 3.",
-                "Không tạo Pull Request trong Phase 3.",
-            ],
-        }
-        markdown = _markdown_plan(
-            structured=structured,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-        )
-        return ImplementationPlanDraft(markdown=markdown, structured=structured)
 
     def repair_plan(
         self,
@@ -391,7 +161,6 @@ class DeveloperPlanAgent:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
-        contract_version: str = PROFILED_IMPLEMENTATION_PLAN_VERSION,
         vertical_design_graph: dict[str, object] | None = None,
         vertical_trace_graph: dict[str, object] | None = None,
         repo_landscape: dict[str, object] | None = None,
@@ -405,47 +174,11 @@ class DeveloperPlanAgent:
         )
         assert planning_policy is not None
         previous = dict(previous_draft.structured)
-        if contract_version == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
-            return self._repair_component_aware(
-                previous=previous,
-                review_report=review_report,
-                developer_feedback=developer_feedback,
-                iteration=iteration,
-                run_id=run_id,
-                source_ref=source_ref,
-                issue_key=issue_key,
-                requirement_packet=requirement_packet,
-                design_artifact=design_artifact,
-                requirement_design_trace=requirement_design_trace,
-                class_graph=class_graph,
-                sequence_graph=sequence_graph,
-                target_repo_path=target_repo_path,
-                target_repo_remote=target_repo_remote,
-                target_base_branch=target_base_branch,
-                planned_branch=planned_branch,
-                target_files=target_files,
-                repo_context=repo_context or {},
-                workspace_mode=workspace_mode,
-                workspace_ref=workspace_ref,
-                base_sha=base_sha,
-                requirement_graph=requirement_graph or {},
-                requirement_artifact_refs=requirement_artifact_refs or {},
-                planning_policy=planning_policy,
-                prompt_directive=prompt_directive,
-                verification_policy=verification_policy,
-                vertical_design_graph=vertical_design_graph or {},
-                vertical_trace_graph=vertical_trace_graph or {},
-                repo_landscape=repo_landscape or {},
-                component_plan_inputs=component_plan_inputs or {},
-            )
-        previous_mappings = _dict_items(previous.get("design_mappings"))
-        previous_tests = _dict_items(previous.get("test_intents"))
-        compact_review = _compact_review(review_report)
-        repair_context = {
-            **_repo_context_summary(repo_context or {}),
-            "previous_plan_candidate": _repair_candidate(previous),
-        }
-        llm_payload = self._llm_plan(
+        return self._repair_component_aware(
+            previous=previous,
+            review_report=review_report,
+            developer_feedback=developer_feedback,
+            iteration=iteration,
             run_id=run_id,
             source_ref=source_ref,
             issue_key=issue_key,
@@ -459,127 +192,20 @@ class DeveloperPlanAgent:
             target_base_branch=target_base_branch,
             planned_branch=planned_branch,
             target_files=target_files,
-            test_command=test_command,
-            repo_context=repair_context,
-            base_mappings=previous_mappings,
-            base_test_intents=previous_tests,
-            repair_feedback=developer_feedback,
-            previous_review=compact_review,
-            canonical_requirement=canonical_requirement,
+            repo_context=repo_context or {},
+            workspace_mode=workspace_mode,
+            workspace_ref=workspace_ref,
+            base_sha=base_sha,
+            requirement_graph=requirement_graph or {},
+            requirement_artifact_refs=requirement_artifact_refs or {},
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            vertical_design_graph=vertical_design_graph or {},
+            vertical_trace_graph=vertical_trace_graph or {},
+            repo_landscape=repo_landscape or {},
+            component_plan_inputs=component_plan_inputs or {},
         )
-        mappings = _merge_mappings(
-            previous_mappings,
-            _dict_items(llm_payload.get("design_mappings")),
-            planning_policy=planning_policy,
-        )
-        adjustments = _dict_items(previous.get("design_adjustments"))
-        mappings = _apply_design_adjustments(mappings, adjustments)
-        test_intents = _dict_items(llm_payload.get("test_intents")) or previous_tests
-        implementation_steps = _apply_design_adjustments_to_steps(
-            _dict_items(llm_payload.get("implementation_steps"))
-            or _dict_items(previous.get("implementation_steps")),
-            adjustments,
-        )
-        implementation_steps = _canonicalize_implementation_steps(
-            implementation_steps,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        proposed_files = _canonical_proposed_files(
-            proposed_files=[
-                *_dict_items(previous.get("proposed_files")),
-                *_dict_items(llm_payload.get("proposed_files")),
-            ],
-            implementation_steps=implementation_steps,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        proposed_files = _ensure_executable_test_files(
-            proposed_files=proposed_files,
-            mappings=mappings,
-            planning_policy=planning_policy,
-        )
-        signature_contract = (
-            _merge_implementation_signature_contract(
-                planning_policy=planning_policy,
-                mappings=mappings,
-                class_graph=class_graph,
-                previous=previous.get("implementation_signature_contract"),
-                patch=llm_payload.get("implementation_signature_contract"),
-            )
-            if planning_policy and verification_policy
-            else None
-        )
-        requirement_coverage = (
-            _requirement_coverage(
-                requirement_graph=requirement_graph or {},
-                requirement_design_trace=requirement_design_trace,
-                mappings=mappings,
-            )
-            if canonical_requirement is not None
-            else []
-        )
-        llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
-        history = _dict_items(previous.get("repair_history"))
-        history.append(
-            {
-                "iteration": iteration,
-                "source": "validator_review_plan",
-                "previous_plan_version": f"implementation_plan_v{iteration}",
-                "issue_count": int(review_report.get("issue_count") or len(_string_items(review_report.get("issues")))),
-                "feedback": developer_feedback,
-            }
-        )
-        structured = {
-            **previous,
-            "version": (
-                PROFILED_IMPLEMENTATION_PLAN_VERSION
-                if verification_policy
-                else previous.get("version", "implementation_plan_structured_v1")
-            ),
-            "planning_mode": "llm_repair_patch_v1" if not llm_parse_error else "deterministic_repair_after_llm_parse_error_v1",
-            "repo_context": _repo_context_summary(repo_context or {}),
-            "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
-            "implementation_steps": implementation_steps,
-            "proposed_files": proposed_files,
-            "design_mappings": mappings,
-            **(
-                {"implementation_signature_contract": signature_contract}
-                if signature_contract is not None
-                else {}
-            ),
-            "design_adjustments": adjustments,
-            "requirement_coverage": requirement_coverage,
-            "verification_stage_ids": (
-                list(verification_policy.stage_ids)
-                if verification_policy
-                else _string_items(previous.get("verification_stage_ids"))
-            ),
-            "test_intents": test_intents,
-            "repair_iteration": iteration,
-            "repair_source": "validator_review_plan",
-            "repair_history": history,
-            "developer_llm": {
-                "used": bool(self.llm_client),
-                "summary": str(llm_payload.get("summary") or "").strip(),
-                "parse_error": llm_parse_error,
-                "repair_feedback_attached": True,
-            },
-        }
-        markdown = _markdown_plan(
-            structured=structured,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-        )
-        markdown += (
-            "\n\n## Repair Feedback Addressed\n\n"
-            f"- Repair iteration: {iteration}\n"
-            f"- Validator feedback: {developer_feedback or 'No free-form feedback provided.'}\n"
-        )
-        return ImplementationPlanDraft(markdown=markdown, structured=structured)
 
     def _plan_component_aware(
         self,
@@ -611,11 +237,15 @@ class DeveloperPlanAgent:
         repo_landscape: dict[str, object],
         component_plan_inputs: dict[str, object],
     ) -> ImplementationPlanDraft:
-        skeleton = build_component_work_units(
-            design_graph=vertical_design_graph,
-            trace_graph=vertical_trace_graph,
-            repo_landscape=repo_landscape,
-            planning_policy=planning_policy,
+        skeleton = attach_existing_test_paths(
+            build_component_work_units(
+                design_graph=vertical_design_graph,
+                trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                planning_policy=planning_policy,
+            ),
+            component_plan_inputs.get("repo_target_tests"),
+            planning_policy,
         )
         legacy_mappings = _design_mappings(
             class_graph=class_graph,
@@ -630,31 +260,100 @@ class DeveloperPlanAgent:
             design_graph=vertical_design_graph,
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
+            symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
         )
         signature_targets = _implementation_signature_targets(
             mappings=legacy_mappings,
             class_graph=class_graph,
         )
-        llm_payload = self._component_plan_llm(
-            run_id=run_id,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-            units=skeleton,
-            vertical_design_graph=vertical_design_graph,
-            vertical_trace_graph=vertical_trace_graph,
-            repo_context=repo_context,
-            planning_policy=planning_policy,
-            prompt_directive=prompt_directive,
-            verification_policy=verification_policy,
-            signature_targets=signature_targets,
-            repair_feedback="",
-            previous_review={},
-        )
-        units = merge_work_unit_updates(
-            units=skeleton,
-            updates=llm_payload.get("work_unit_updates"),
-            planning_policy=planning_policy,
-        )
+        slices, fallback_reason = _scenario_plan_slices(skeleton)
+        sliced = bool(slices) and not fallback_reason
+        if not sliced:
+            slices = [("", skeleton)]
+
+        units = skeleton
+        completed_unit_ids: set[str] = set()
+        summaries: list[str] = []
+        repo_evidence: list[str] = []
+        signature_entries: dict[tuple[str, str], dict[str, object]] = {}
+        runtime_config_decision: object = None
+        for scenario_id, base_slice_units in slices:
+            slice_ids = {str(unit.get("unit_id") or "") for unit in base_slice_units}
+            current_slice = [
+                unit for unit in units if str(unit.get("unit_id") or "") in slice_ids
+            ]
+            slice_signature_targets = _signature_targets_for_units(
+                signature_targets=signature_targets,
+                units=current_slice,
+                planning_policy=planning_policy,
+            )
+            llm_payload = self._component_plan_llm(
+                run_id=run_id,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                units=current_slice,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_context=repo_context,
+                planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
+                signature_targets=slice_signature_targets,
+                repair_feedback="",
+                previous_review={},
+                component_plan_inputs=component_plan_inputs,
+                runtime_config_decision=runtime_config_decision,
+                scenario_id=scenario_id,
+                prior_plan_context=_prior_scenario_plan_context(
+                    units=units,
+                    current_units=current_slice,
+                    completed_unit_ids=completed_unit_ids,
+                    signature_entries=list(signature_entries.values()),
+                ),
+                allowed_unit_ids=slice_ids,
+                required_unit_ids=slice_ids,
+                owned_sources=_owned_source_files(
+                    units=current_slice,
+                    target_repo_path=target_repo_path,
+                    planning_policy=planning_policy,
+                    target_callers=_repo_target_callers(component_plan_inputs),
+                    workspaces=_repo_workspaces(component_plan_inputs),
+                    after_mount=_repo_after_mount_middleware(component_plan_inputs),
+                ),
+            )
+            units = merge_work_unit_updates(
+                units=units,
+                updates=llm_payload.get("work_unit_updates"),
+                planning_policy=planning_policy,
+            )
+            units = canonicalize_work_unit_dependencies(units)
+            completed_unit_ids.update(slice_ids)
+            summary = str(llm_payload.get("summary") or "").strip()
+            if summary:
+                summaries.append(f"{scenario_id}: {summary}" if scenario_id else summary)
+            for item in _string_items(llm_payload.get("repo_evidence")):
+                if item not in repo_evidence:
+                    repo_evidence.append(item)
+            for entry in _dict_items(
+                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
+            ):
+                key = (
+                    str(entry.get("target_path") or "").strip().replace("\\", "/"),
+                    str(entry.get("target_symbol") or "").strip(),
+                )
+                if key[0]:
+                    signature_entries[key] = entry
+            if isinstance(component_plan_inputs.get("repo_runtime_config"), dict):
+                runtime_config_decision = llm_payload.get("runtime_config_impact")
+
+        llm_payload = {
+            "summary": "; ".join(summaries),
+            "repo_evidence": repo_evidence,
+            "implementation_signature_contract": {
+                "entries": list(signature_entries.values())
+            },
+            "runtime_config_impact": runtime_config_decision,
+        }
         units = canonicalize_work_unit_dependencies(units)
         projections = component_plan_projections(
             units=units,
@@ -663,13 +362,17 @@ class DeveloperPlanAgent:
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
         )
-        projections["requirement_coverage"] = _merge_requirement_coverage(
-            projections["requirement_coverage"],
-            _requirement_coverage(
-                requirement_graph=requirement_graph,
-                requirement_design_trace=requirement_design_trace,
-                mappings=projections["design_mappings"],
+        projections["requirement_coverage"] = mark_existing_code_coverage(
+            _merge_requirement_coverage(
+                projections["requirement_coverage"],
+                _requirement_coverage(
+                    requirement_graph=requirement_graph,
+                    requirement_design_trace=requirement_design_trace,
+                    mappings=projections["design_mappings"],
+                ),
             ),
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
         )
         signature_contract = build_implementation_signature_contract(
             planning_policy=planning_policy,
@@ -685,7 +388,9 @@ class DeveloperPlanAgent:
         structured: dict[str, object] = {
             "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
             "planning_mode": (
-                "llm_component_aware_plan_v1"
+                "llm_component_aware_scenario_sliced_v1"
+                if self.llm_client and not parse_error and sliced
+                else "llm_component_aware_plan_v1"
                 if self.llm_client and not parse_error
                 else "deterministic_component_plan_after_llm_parse_error_v1"
                 if self.llm_client
@@ -717,6 +422,7 @@ class DeveloperPlanAgent:
             "work_units": units,
             **projections,
             "implementation_signature_contract": signature_contract,
+            **_runtime_config_slot(component_plan_inputs, llm_payload.get("runtime_config_impact")),
             "design_adjustments": [],
             "assumptions": [
                 "Phase 3 only plans approved full-stack work; Phase 4 owns source mutation.",
@@ -728,6 +434,8 @@ class DeveloperPlanAgent:
                 "summary": str(llm_payload.get("summary") or "").strip(),
                 "parse_error": parse_error,
                 "repair_feedback_attached": False,
+                "planning_scenarios": [scenario_id for scenario_id, _ in slices if scenario_id],
+                "scenario_slicing_fallback_reason": fallback_reason,
             },
             "out_of_scope": [
                 "No source/test mutation or command execution in Phase 3.",
@@ -777,11 +485,15 @@ class DeveloperPlanAgent:
         repo_landscape: dict[str, object],
         component_plan_inputs: dict[str, object],
     ) -> ImplementationPlanDraft:
-        skeleton = build_component_work_units(
-            design_graph=vertical_design_graph,
-            trace_graph=vertical_trace_graph,
-            repo_landscape=repo_landscape,
-            planning_policy=planning_policy,
+        skeleton = attach_existing_test_paths(
+            build_component_work_units(
+                design_graph=vertical_design_graph,
+                trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                planning_policy=planning_policy,
+            ),
+            component_plan_inputs.get("repo_target_tests"),
+            planning_policy,
         )
         preserved = merge_work_unit_updates(
             units=skeleton,
@@ -789,7 +501,18 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         preserved = canonicalize_work_unit_dependencies(preserved)
-        legacy_mappings = _design_mappings(
+        (
+            repair_units,
+            repair_prior_context,
+            affected_unit_ids,
+        ) = _component_repair_slice(
+            units=preserved,
+            review_report=review_report,
+            signature_entries=_dict_items(
+                _object_dict(previous.get("implementation_signature_contract")).get("entries")
+            ),
+        )
+        base_mappings = _design_mappings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             target_files=target_files,
@@ -800,29 +523,51 @@ class DeveloperPlanAgent:
         legacy_mappings = rebind_legacy_mappings_to_work_units(
             units=preserved,
             design_graph=vertical_design_graph,
-            legacy_mappings=legacy_mappings,
+            legacy_mappings=base_mappings,
             planning_policy=planning_policy,
+            symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
         )
         signature_targets = _implementation_signature_targets(
             mappings=legacy_mappings,
             class_graph=class_graph,
         )
+        repair_signature_targets = _signature_targets_for_units(
+            signature_targets=signature_targets,
+            units=repair_units,
+            planning_policy=planning_policy,
+        )
         llm_payload = self._component_plan_llm(
             run_id=run_id,
             requirement_packet=requirement_packet,
             design_artifact=design_artifact,
-            units=preserved,
+            units=repair_units,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
             repo_context=repo_context,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
-            signature_targets=signature_targets,
+            signature_targets=repair_signature_targets,
             repair_feedback=developer_feedback,
-            previous_review=_compact_review(review_report),
+            # The review summary also describes warnings; repair sees the blocking issues only.
+            previous_review={
+                key: value for key, value in _compact_review(review_report).items() if key != "summary"
+            },
+            component_plan_inputs=component_plan_inputs,
+            runtime_config_decision=previous.get("runtime_config_impact"),
+            prior_plan_context=repair_prior_context,
+            allowed_unit_ids=affected_unit_ids or None,
+            required_unit_ids=affected_unit_ids or None,
+            signature_contract_required=False,
+            owned_sources=_owned_source_files(
+                units=repair_units,
+                target_repo_path=target_repo_path,
+                planning_policy=planning_policy,
+                target_callers=_repo_target_callers(component_plan_inputs),
+                workspaces=_repo_workspaces(component_plan_inputs),
+                after_mount=_repo_after_mount_middleware(component_plan_inputs),
+            ),
         )
-        affected_unit_ids = set(_affected_unit_ids(review_report))
         proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
         if affected_unit_ids:
             proposed_updates = [
@@ -836,6 +581,25 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         units = canonicalize_work_unit_dependencies(units)
+        affected_paths = {
+            str(target.get("path") or "")
+            for unit in units
+            if str(unit.get("unit_id") or "") in affected_unit_ids
+            for target in _dict_items(unit.get("planned_code_targets"))
+        }
+        if any(_dict_items(item.get("remove_planned_code_targets")) for item in proposed_updates):
+            # Mappings bound before the patch may still point at a target the patch removed.
+            legacy_mappings = rebind_legacy_mappings_to_work_units(
+                units=units,
+                design_graph=vertical_design_graph,
+                legacy_mappings=base_mappings,
+                planning_policy=planning_policy,
+                symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
+            )
+            signature_targets = _implementation_signature_targets(
+                mappings=legacy_mappings,
+                class_graph=class_graph,
+            )
         projections = component_plan_projections(
             units=units,
             design_graph=vertical_design_graph,
@@ -843,13 +607,17 @@ class DeveloperPlanAgent:
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
         )
-        projections["requirement_coverage"] = _merge_requirement_coverage(
-            projections["requirement_coverage"],
-            _requirement_coverage(
-                requirement_graph=requirement_graph,
-                requirement_design_trace=requirement_design_trace,
-                mappings=projections["design_mappings"],
+        projections["requirement_coverage"] = mark_existing_code_coverage(
+            _merge_requirement_coverage(
+                projections["requirement_coverage"],
+                _requirement_coverage(
+                    requirement_graph=requirement_graph,
+                    requirement_design_trace=requirement_design_trace,
+                    mappings=projections["design_mappings"],
+                ),
             ),
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
         )
         signature_contract = _merge_implementation_signature_contract(
             planning_policy=planning_policy,
@@ -861,7 +629,12 @@ class DeveloperPlanAgent:
                     llm_payload=llm_payload,
                     developer_feedback=developer_feedback,
                 ),
-                signature_targets=signature_targets,
+                # A repair re-signs only the targets of the units the review cited.
+                signature_targets=[
+                    target
+                    for target in signature_targets
+                    if not affected_unit_ids or str(target.get("target_path") or "") in affected_paths
+                ],
             ),
             bind_to_mapped_symbol=True,
         )
@@ -898,10 +671,22 @@ class DeveloperPlanAgent:
                 "artifact_refs": requirement_artifact_refs,
             },
             "repo_context": _repo_context_summary(repo_context),
-            "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
+            "repo_evidence": list(
+                dict.fromkeys(
+                    [
+                        *_string_items(previous.get("repo_evidence")),
+                        *_string_items(llm_payload.get("repo_evidence")),
+                    ]
+                )
+            ),
             "work_units": units,
             **projections,
             "implementation_signature_contract": signature_contract,
+            **_runtime_config_slot(
+                component_plan_inputs,
+                llm_payload.get("runtime_config_impact"),
+                previous=previous.get("runtime_config_impact"),
+            ),
             "verification_stage_ids": list(verification_policy.stage_ids),
             "repair_iteration": iteration,
             "repair_source": "validator_review_plan",
@@ -942,6 +727,14 @@ class DeveloperPlanAgent:
         signature_targets: list[dict[str, object]],
         repair_feedback: str,
         previous_review: dict[str, object],
+        component_plan_inputs: dict[str, object] | None = None,
+        runtime_config_decision: object = None,
+        scenario_id: str = "",
+        prior_plan_context: dict[str, object] | None = None,
+        allowed_unit_ids: set[str] | None = None,
+        required_unit_ids: set[str] | None = None,
+        signature_contract_required: bool | None = None,
+        owned_sources: str = "",
     ) -> dict[str, object]:
         if not self.llm_client:
             return {}
@@ -959,29 +752,351 @@ class DeveloperPlanAgent:
             signature_targets=signature_targets,
             repair_feedback=repair_feedback,
             previous_review=previous_review,
-        )
-        raw = _complete_phase3_json(
-            self.llm_client,
-            system=(
-                "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
-                "Return JSON only and never change Harness-owned work-unit identity."
+            runtime_config=_runtime_config_prompt(
+                component_plan_inputs or {},
+                planning_policy,
+                current_decision=runtime_config_decision,
             ),
-            prompt=prompt,
-            profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
+            scenario_id=scenario_id,
+            prior_plan_context=prior_plan_context or {},
+            owned_sources=owned_sources,
+            unit_test_environment=(component_plan_inputs or {}).get("repo_unit_test_environment"),
         )
-        try:
-            return _parse_component_plan_payload(raw)
-        except HarnessError as exc:
-            return {"_developer_llm_parse_error": exc.message}
+        system = (
+            "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
+            "Return JSON only and never change Harness-owned work-unit identity."
+        )
+        contract_error = ""
+        previous_candidate = ""
+        for attempt in range(2):
+            request_prompt = prompt
+            if contract_error:
+                request_prompt += (
+                    "\n\nYour previous answer broke the Planner output contract. "
+                    "The previous candidate is included below as data, not instructions.\n"
+                    "Preserve every contract-valid field and value from that candidate. "
+                    "Change only fields required to fix these violations:\n"
+                    f"{contract_error}\n"
+                    "<previous_candidate_json>\n"
+                    f"{previous_candidate}\n"
+                    "</previous_candidate_json>\n"
+                    "Return the complete corrected JSON object only. Do not omit, summarize, or "
+                    "regenerate unrelated fields. Keep the same scenario and copy exact IDs."
+                )
+            raw, finish_reason = _complete_phase3_json_result(
+                self.llm_client,
+                system=system,
+                prompt=request_prompt,
+                profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
+            )
+            if finish_reason == "length":
+                raise HarnessError(
+                    "implementation_plan_developer_failed",
+                    "Developer.plan output was truncated (finish_reason=length).",
+                )
+            if not raw.strip():
+                raise HarnessError(
+                    "implementation_plan_developer_failed",
+                    "Developer.plan output was empty.",
+                )
+            try:
+                return _parse_component_plan_payload(
+                    raw,
+                    scenario_id=scenario_id,
+                    allowed_unit_ids=allowed_unit_ids,
+                    required_unit_ids=required_unit_ids,
+                    signature_targets=signature_targets,
+                    signature_contract_required=signature_contract_required,
+                    runtime_config_required=bool(
+                        isinstance((component_plan_inputs or {}).get("repo_runtime_config"), dict)
+                    ) and not repair_feedback.strip(),
+                    previous_runtime_config=runtime_config_decision,
+                )
+            except HarnessError as exc:
+                if exc.error_code == "implementation_plan_developer_contract_invalid" and attempt == 0:
+                    contract_error = exc.message
+                    previous_candidate = raw
+                    continue
+                raise
+        raise AssertionError("unreachable")
 
 
-def _complete_phase3_json(
+_RUNTIME_CONFIG_RULES = """Runtime configuration rules:
+- Return the full current `runtime_config_impact`: `required` with typed `changes`, or
+  `not_required` with a reason. During scenario construction it covers the accumulated plan
+  through this scenario, not future units that this call does not own; repair covers the full
+  current plan. Design never lists configuration; decide it from planned code and repository facts.
+- A change is needed when planned code reads a value that differs per environment (for
+  example the base URL of an external system), imports a package not listed in the importing
+  workspace's manifest, or needs a service the product itself runs that compose lacks. This
+  includes sibling workspace packages: use their repository `version` in an `npm_package`
+  change for the consuming manifest. Reuse a dependency only when that consuming manifest
+  already lists it. An external system is reached through its configured URL; never add a
+  compose service or stub for it.
+- Before deciding the status, perform dependency closure for every planned call, adapter or
+  injected dependency whose provider target is in another workspace. Identify the source
+  target that owns production wiring, its consuming manifest, the provider workspace package,
+  and whether that manifest declares the package. Optional or defaulted injection still needs
+  the provider package wherever its production default is wired; package existence elsewhere
+  in the monorepo is not a declaration in the consuming manifest. A `not_required` reason must
+  name every cross-workspace package check and its consuming manifest; a generic claim that all
+  imports already exist is insufficient.
+- Each change names its owning `unit_id` and only the fields listed for its kind. `read_by`
+  and `used_by` must be planned source targets of that unit. Defaults are non-secret and
+  keep the product and its tests runnable without the variable set.
+- Never edit locked configuration; Harness materializes manifests, lockfiles and compose.
+- In a later scenario or repair, `current_decision` is the plan's present decision. Return
+  the full updated decision and preserve changes owned by earlier scenarios exactly; only
+  the current scenario may add or update its own changes.
+"""
+
+
+def _runtime_config_prompt(
+    component_plan_inputs: dict[str, object],
+    planning_policy: PlanningPathPolicy,
+    current_decision: object = None,
+) -> dict[str, object]:
+    facts = component_plan_inputs.get("repo_runtime_config")
+    policy = runtime_config_policy(planning_policy.project_profile_id)
+    if not isinstance(facts, dict) or policy is None:
+        return {}
+    context: dict[str, object] = {"repository": facts, "policy": runtime_config_prompt_context(policy)}
+    if isinstance(current_decision, dict):
+        # Later scenarios preserve the status and changes; the earlier reason is prose, and showing it
+        # would make every rerun of an earlier scenario change (and rerun) every later prompt.
+        context["current_decision"] = {
+            key: value
+            for key, value in canonical_runtime_config_impact(current_decision).items()
+            if key != "reason"
+        }
+    return context
+
+
+def _runtime_config_slot(
+    component_plan_inputs: dict[str, object],
+    proposed: object,
+    *,
+    previous: object = None,
+) -> dict[str, object]:
+    """Harness-created decision slot; a repair without a new decision keeps the previous one."""
+
+    if not isinstance(component_plan_inputs.get("repo_runtime_config"), dict):
+        return {}
+    decision = canonical_runtime_config_impact(proposed)
+    if not decision["status"] and previous is not None:
+        decision = canonical_runtime_config_impact(previous)
+    return {"runtime_config_impact": decision}
+
+
+def _scenario_plan_slices(
+    units: list[dict[str, object]],
+) -> tuple[list[tuple[str, list[dict[str, object]]]], str]:
+    """Group a topological plan by scenario when every cross-scenario edge stays forward."""
+
+    ordered = sorted(units, key=lambda item: int(item.get("order") or 0))
+    scenario_order: list[str] = []
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for unit in ordered:
+        scenario_id = str(unit.get("scenario_id") or "").strip()
+        if not scenario_id:
+            return [], "work unit has no scenario_id"
+        if scenario_id not in grouped:
+            grouped[scenario_id] = []
+            scenario_order.append(scenario_id)
+        grouped[scenario_id].append(unit)
+    rank = {scenario_id: index for index, scenario_id in enumerate(scenario_order)}
+    scenario_by_unit = {
+        str(unit.get("unit_id") or ""): str(unit.get("scenario_id") or "")
+        for unit in ordered
+    }
+    for unit in ordered:
+        current = str(unit.get("scenario_id") or "")
+        for dependency in _string_items(unit.get("depends_on")):
+            dependency_scenario = scenario_by_unit.get(dependency, current)
+            if dependency_scenario != current and rank[dependency_scenario] >= rank[current]:
+                return [], (
+                    f"cross-scenario dependency {dependency}->{unit.get('unit_id')} "
+                    "requires interleaved planning"
+                )
+    return [(scenario_id, grouped[scenario_id]) for scenario_id in scenario_order], ""
+
+
+def _component_repair_slice(
+    *,
+    units: list[dict[str, object]],
+    review_report: dict[str, object],
+    signature_entries: list[dict[str, object]],
+) -> tuple[
+    list[dict[str, object]],
+    dict[str, object],
+    set[str],
+]:
+    """Limit a semantic repair to cited units; keep related units as read-only context."""
+
+    affected = set(_affected_unit_ids(review_report))
+    if not affected:
+        return units, {}, set()
+    units_by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
+    unknown = sorted(affected - set(units_by_id))
+    if unknown:
+        raise HarnessError(
+            "implementation_plan_repair_scope_invalid",
+            "Implementation plan repair cites unknown work units: " + ", ".join(unknown),
+        )
+    scoped = [unit for unit in units if str(unit.get("unit_id") or "") in affected]
+    prior_context = _prior_scenario_plan_context(
+        units=units,
+        current_units=scoped,
+        completed_unit_ids=set(units_by_id) - affected,
+        signature_entries=signature_entries,
+    )
+    return scoped, prior_context, affected
+
+
+def _signature_targets_for_units(
+    *,
+    signature_targets: list[dict[str, object]],
+    units: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy,
+) -> list[dict[str, object]]:
+    allowed_paths = {
+        str(target.get("path") or "")
+        for unit in units
+        for target in _dict_items(unit.get("planned_code_targets"))
+    }
+    for unit in units:
+        allowed_paths.update(_string_items(unit_write_scope(unit, planning_policy).get("files")))
+    return [
+        target
+        for target in signature_targets
+        if str(target.get("target_path") or "") in allowed_paths
+    ]
+
+
+def _prior_scenario_plan_context(
+    *,
+    units: list[dict[str, object]],
+    current_units: list[dict[str, object]],
+    completed_unit_ids: set[str],
+    signature_entries: list[dict[str, object]],
+) -> dict[str, object]:
+    if not completed_unit_ids:
+        return {}
+    current_dependencies = {
+        dependency
+        for unit in current_units
+        for dependency in _string_items(unit.get("depends_on"))
+    }
+    current_entities = {
+        str(entity.get("entity") or "")
+        for unit in current_units
+        for entity in _dict_items(unit.get("code_entities"))
+        if str(entity.get("entity") or "")
+    }
+    current_paths = {
+        str(target.get("path") or "")
+        for unit in current_units
+        for target in _dict_items(unit.get("planned_code_targets"))
+        if str(target.get("path") or "")
+    }
+    relevant: list[dict[str, object]] = []
+    relevant_paths: set[str] = set()
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "")
+        if unit_id not in completed_unit_ids:
+            continue
+        unit_entities = {
+            str(entity.get("entity") or "")
+            for entity in _dict_items(unit.get("code_entities"))
+            if str(entity.get("entity") or "")
+        }
+        unit_paths = {
+            str(target.get("path") or "")
+            for target in _dict_items(unit.get("planned_code_targets"))
+            if str(target.get("path") or "")
+        }
+        if (
+            unit_id not in current_dependencies
+            and not (unit_entities & current_entities)
+            and not (unit_paths & current_paths)
+        ):
+            continue
+        relevant_paths.update(unit_paths)
+        verification_targets: list[dict[str, object]] = []
+        seen_verification_targets: set[tuple[str, tuple[str, ...]]] = set()
+        for intent in [
+            *_dict_items(unit.get("test_intents")),
+            *_dict_items(unit.get("qa_test_intents")),
+        ]:
+            stage_id = str(intent.get("stage_id") or "").strip()
+            target_paths = tuple(_string_items(intent.get("target_paths")))
+            key = (stage_id, target_paths)
+            if not stage_id or not target_paths or key in seen_verification_targets:
+                continue
+            seen_verification_targets.add(key)
+            verification_targets.append(
+                {"stage_id": stage_id, "target_paths": list(target_paths)}
+            )
+        relevant.append(
+            {
+                key: unit.get(key)
+                for key in (
+                    "unit_id",
+                    "scenario_id",
+                    "component_id",
+                    "objective",
+                    "planned_code_targets",
+                    "migration_impact",
+                )
+                if key in unit
+            }
+            | ({"verification_targets": verification_targets} if verification_targets else {})
+        )
+    signatures = [
+        entry
+        for entry in signature_entries
+        if str(entry.get("target_path") or entry.get("source_path") or "")
+        in relevant_paths | current_paths
+    ]
+    return {
+        "completed_units": relevant,
+        "implementation_signature_entries": signatures,
+    }
+
+
+def _units_for_prompt(
+    units: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[dict[str, object]]:
+    """Drop contract copies the prompt already carries; add each unit's write scope."""
+
+    result = []
+    for unit in units:
+        # Phase 4 Browser QA owns browser tests, so the Plan never shows a QA intent slot.
+        item = {
+            key: value
+            for key, value in unit.items()
+            if key not in {"surface_contracts", "boundary_contracts", "qa_test_intents"}
+        }
+        if _dict_items(unit.get("test_intents")):
+            # Ids let a repair drop one test without resending the others.
+            item["test_intents"] = [
+                {"id": test_intent_id(test), **test} for test in _dict_items(unit.get("test_intents"))
+            ]
+        scope =unit_write_scope(unit, planning_policy) if planning_policy else {}
+        if scope:
+            item["write_scope"] = scope
+        result.append(item)
+    return result
+
+
+def _complete_phase3_json_result(
     llm_client: Any,
     *,
     system: str,
     prompt: str,
     profile_name: str,
-) -> str:
+) -> tuple[str, str]:
     complete_with_metadata = getattr(llm_client, "complete_with_metadata", None)
     if callable(complete_with_metadata):
         settings = getattr(llm_client, "settings", None)
@@ -996,8 +1111,8 @@ def _complete_phase3_json(
                 fallback_max_tokens=fallback_max_tokens,
             ),
         )
-        return str(completion.content)
-    return str(llm_client.complete(system=system, prompt=prompt))
+        return str(completion.content), str(getattr(completion, "finish_reason", "") or "")
+    return str(llm_client.complete(system=system, prompt=prompt)), ""
 
 
 def _component_plan_prompt(
@@ -1015,8 +1130,43 @@ def _component_plan_prompt(
     signature_targets: list[dict[str, object]],
     repair_feedback: str,
     previous_review: dict[str, object],
+    runtime_config: dict[str, object] | None = None,
+    scenario_id: str = "",
+    prior_plan_context: dict[str, object] | None = None,
+    owned_sources: str = "",
+    unit_test_environment: object = None,
 ) -> str:
-    node_ids = {node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))}
+    node_ids = {
+        node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))
+    }
+    shared_node_ids = {
+        design_node_id
+        for unit in units
+        for entity in _dict_items(unit.get("code_entities"))
+        for design_node_id in _string_items(entity.get("design_node_ids"))
+    } - node_ids
+    design_nodes = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(vertical_design_graph.get("nodes"))
+    }
+    shared_code_entity_contracts = [
+        {
+            key: node.get(key)
+            for key in (
+                "id",
+                "scenario_id",
+                "component_id",
+                "kind",
+                "surface",
+                "contract",
+                "surface_contract",
+            )
+            if key in node
+        }
+        for node_id in sorted(shared_node_ids)
+        for node in [_object_dict(design_nodes.get(node_id))]
+        if node
+    ]
     design_slice = {
         "schema_version": vertical_design_graph.get("schema_version"),
         "artifact_digest": vertical_design_graph.get("artifact_digest"),
@@ -1048,20 +1198,134 @@ def _component_plan_prompt(
         ],
     }
     language = prompt_directive.developer_plan_context() if prompt_directive else {}
-    repair = (
-        "\nRepair feedback:\n"
-        + repair_feedback
-        + "\nPrevious review:\n"
-        + json.dumps(previous_review, ensure_ascii=False, indent=2)
+    runtime_config_section = (
+        "Runtime configuration (Harness-extracted repository facts and policy; read-only):\n"
+        + json.dumps(runtime_config, ensure_ascii=False, indent=2)
+        + "\n"
+        + _RUNTIME_CONFIG_RULES
+        if runtime_config
+        else ""
+    )
+    if repair_feedback.strip():
+        structured_findings = _dict_items(previous_review.get("findings"))
+        repair = (
+            "\nBlocking review findings:\n"
+            + json.dumps(previous_review, ensure_ascii=False, indent=2)
+            if structured_findings
+            else "\nRepair feedback:\n"
+            + repair_feedback
+            + "\nPrevious review:\n"
+            + json.dumps(previous_review, ensure_ascii=False, indent=2)
+        )
+    else:
+        repair = ""
+    browser_qa_active = (
+        "browser_e2e" in verification_policy.stage_ids
+        and verification_policy.owner_for_stage("browser_e2e") == QA_INTENT_STAGE_OWNER
+    )
+    # With Browser QA active, Phase 4 plans and runs browser journeys for every UI obligation from the
+    # approved Design and demo seed, so the Plan carries neither browser tests nor unverified obligations.
+    repair_unverified_rule = (
+        ""
+        if browser_qa_active
+        else "\n  - `unverified_obligations` entries add to or replace the unit's entries with the same id."
+    )
+    repair_rules = (
+        """
+- This is a repair patch. Return only the units named by the review, and in them only what changes:
+  - `planned_code_targets` and `test_intents` add to what the unit already has; never resend an
+    existing target or test. Drop an existing test by listing its `id` in `remove_test_intents`,
+    and drop a target the review calls unapproved or unnecessary by listing its exact path and
+    symbol in `remove_planned_code_targets`. Targets seeded from runtime_bindings cannot be removed."""
+        + repair_unverified_rule
+        + """
+  - Send `objective` only when the review requires it to change; keep its unchanged sentences
+    word for word and add the new ones.
+""".rstrip()
         if repair_feedback.strip()
         else ""
     )
-    return f"""Component-aware Implementation Plan V4
+    unverified_field = (
+        ""
+        if browser_qa_active
+        else """
+      "unverified_obligations": [
+        {"id": "ui_obligations id no active stage fully observes", "reason": "what stays unobserved and why"}
+      ],"""
+    )
+    static_markup_rule = (
+        "CSS class names without owned style rules do not cover responsive behavior, and static\n"
+        "  markup does not cover interaction or focus; Phase 4 Browser QA observes such items in the\n"
+        "  real browser."
+        if browser_qa_active
+        else "CSS class names without owned style rules do not cover responsive behavior, and static\n"
+        "  markup does not cover interaction or focus; record such items in `unverified_obligations`."
+    )
+    browser_behavior_rule = (
+        "When behavior needs more than the `unit`\n"
+        "  stage capability, Phase 4 Browser QA observes it; never claim a `unit` test proves it."
+        if browser_qa_active
+        else "When behavior needs a DOM or browser that\n"
+        "  no active stage provides, say in the objective that it stays unverified until such a stage\n"
+        "  exists; never claim a test proves it."
+    )
+    obligation_accounting_rule = (
+        "Phase 4 Browser QA\n"
+        "  observes every id in the real browser. List an id in `obligation_refs` of a `unit` test intent\n"
+        "  when that test observes it within the `unit` stage capability: static markup shows roles, aria\n"
+        "  attributes, accessible names and state-dependent markup; only a DOM test shows focus and\n"
+        "  events; no `unit` test shows viewport layout."
+        if browser_qa_active
+        else "Account for every id:\n"
+        "  list it in `obligation_refs` of a test intent whose stage can observe it, or in\n"
+        "  `unverified_obligations` with the reason, or in both when a test observes part of it and the\n"
+        "  rest needs a stage the profile does not activate. Roles, aria attributes, accessible names and\n"
+        "  state-dependent markup are observable by static rendering; focus movement, keyboard\n"
+        "  interaction and viewport layout need a stage the profile may not activate. The rule review\n"
+        "  rejects a unit that leaves an id unaccounted for."
+    )
+    owned_sources_section = (
+        "\nOwned source files (current worktree text, with line numbers, of every file in the work "
+        "units' write_scope, then of read-only caller files outside it; evidence for targets and "
+        "signatures):\n"
+        + owned_sources
+        + "\n"
+        if owned_sources.strip()
+        else ""
+    )
+    browser_qa_rule = (
+        "Browser QA is active: in Phase 4 the Harness plans and runs browser journeys for every UI "
+        "obligation from the approved Design and the approved demo seed. Do not plan browser tests "
+        "or their test data here. For each `runtime_input` obligation whose approved Design source "
+        "is `external_use_case`, keep the production dependency external: do not add or alter a "
+        "production provider, endpoint, entrypoint, global, history state, runtime config, or Design "
+        "seam to supply test data."
+        if browser_qa_active
+        else "Browser QA is inactive. Record UI behavior that active stages cannot observe in "
+        "`unverified_obligations`."
+    )
+    acceptance_rule = (
+        "A unit without `ui_obligations` covers every acceptance ref with at least one `test_intents`\n"
+        "  entry. Phase 4 Browser QA covers the acceptance refs of a unit with `ui_obligations`; plan its\n"
+        "  `unit` tests for what the `unit` stage capability observes."
+        if browser_qa_active
+        else "Keep every acceptance ref covered by at least one `test_intents` entry in its owning unit."
+    )
+    scenario_contract = (
+        f"This call plans exactly scenario `{scenario_id}`. Return top-level "
+        f"`scenario_id: \"{scenario_id}\"` and exactly one update for every listed work unit. "
+        "Do not return a work unit from another scenario."
+        if scenario_id
+        else "This call plans the complete supplied work-unit set."
+    )
+    scenario_field = f'  "scenario_id": "{scenario_id}",\n' if scenario_id else ""
+    return f"""Component-aware Implementation Plan V5
 
 Enrich the Harness-owned work units. Do not add, delete, merge, split or reorder units.
+{scenario_contract}
 Return JSON only:
 {{
-  "summary": "short human summary",
+{scenario_field}  "summary": "short human summary",
   "repo_evidence": ["bounded evidence"],
   "work_unit_updates": [
     {{
@@ -1071,22 +1335,35 @@ Return JSON only:
       "planned_code_targets": [
         {{"path": "profile-approved repo-relative path", "symbol": "optional qualified symbol"}}
       ],
+      "remove_planned_code_targets": [
+        {{"path": "exact existing target path", "symbol": "exact existing target symbol"}}
+      ],
       "migration_impact": {{
         "status": "required|not_required",
         "reason": "decision grounded in the approved data contract",
-        "targets": ["packages/db/prisma/... only when required"]
+        "targets": ["packages/db/prisma/... when required; otherwise an empty array"]
       }},
       "test_intents": [
         {{
-          "stage_id": "one approved stage",
+          "stage_id": "one stage owned by developer_intent",
           "intent": "verification intent",
           "acceptance_refs": ["AC-..."],
-          "target_paths": ["exact profile-approved test path"]
+          "target_paths": ["exact profile-approved test path"],
+          "obligation_refs": ["ui_obligations ids this test observes"]
         }}
-      ],
+      ],{unverified_field}
+      "remove_test_intents": ["id of an existing test intent to drop"],
       "repo_evidence_refs": ["evidence refs used for this unit"]
     }}
   ],
+  "runtime_config_impact": {{
+    "status": "required|not_required",
+    "reason": "why runtime configuration is or is not needed; include every cross-workspace package check",
+    "changes": [
+      {{"kind": "env_var", "unit_id": "existing WU id", "name": "UPPER_SNAKE", "default": "non-secret default", "read_by": "planned source path", "purpose": "why"}},
+      {{"kind": "npm_package", "unit_id": "existing WU id", "manifest": "consuming workspace package.json", "package": "npm or sibling workspace package", "version": "exact repository version", "dev": false, "used_by": "planned source path in that workspace", "purpose": "why"}}
+    ]
+  }},
   "implementation_signature_contract": {{
     "entries": [
       {{
@@ -1107,43 +1384,105 @@ Rules:
 - Update every work unit that lacks an exact target or test intent.
 - Never return command, argv, cwd, env or timeout fields.
 - Use only paths allowed by the immutable planning policy.
-- Keep every acceptance ref covered by at least one test intent in its owning unit.
+- {acceptance_rule}
+- Stage ownership is authoritative: `test_intents` may use only `developer_intent` stages;
+  `qa_intent` and `harness_global` stages never appear in the Plan because the Harness runs them.
+- {browser_qa_rule}
 - A `unit` test intent must target an exact test file. A `typecheck` intent must
   target an exact non-test source file already listed in that work unit's
   planned_code_targets.
 - Add explicit test intent for every negative, exception, cancellation, duplicate,
   interruption, and confirmation gate stated by the owning unit's approved contract.
-- Data units must decide migration impact. Non-data units may omit migration_impact.
+- Data units must decide migration impact. Non-data units must omit `migration_impact`.
+- When `migration_impact` is present, `targets` is always an array: use `[]` for
+  `not_required` and one or more exact migration paths for `required`.
 - When migration is `required`, include a concrete
   `packages/db/prisma/migrations/<id>_<name>/migration.sql` target. Include
   `packages/db/prisma/schema.prisma` in planned_code_targets when the model changes.
 - When another data unit already owns the same schema migration, mark a read-only
   consumer `not_required` and explain that it uses the approved shared schema.
 - Do not invent Requirement, Design, component, dependency or work-unit IDs.
-- Treat each work unit's `surface_contracts` as immutable approved behavior. For UI work,
-  make the objective, targets, and tests realize its component structure, feedback,
-  accessibility, responsive behavior, focus flow, and guidance references.
-- A UI objective is only executable when it names every non-empty experience-contract
-  category. Map focus/navigation, accessibility, responsive rules, feedback, data source,
-  authentication, and runtime attachment to exact code and test targets instead of hiding
-  them behind a happy-path summary.
-- Do not claim responsive coverage from CSS class names without an owned or verified style
-  implementation. Do not claim interaction/focus coverage from static markup alone; use the
-  repository's actual DOM-capable test convention or report the plan as non-executable.
+- Treat the `surface_contract` of every Design node in a unit's design_node_ids and the
+  `boundary_contract` of every edge in its design_edge_ids (both in the Vertical Design slice;
+  the work units below omit these copies) as immutable approved behavior. For UI work,
+  `ui_obligations` lists the contract items each unit must account for.
+- When an approved contract states a behavior but lists no outcome or response for it, never add
+  a status, field, endpoint or response the contract does not list. Choose the reading that
+  satisfies the Requirement within the listed outcomes and state it in the objective as
+  `Reading of <Design node or edge ID>: ...`, so the plan review can judge it.
+- Map data source, authentication and runtime attachment to exact code targets. The objective
+  says what the unit builds and through which seams; it does not restate the contract, which
+  the Vertical Design slice already carries.
+- {static_markup_rule}
 - For every boundary, identify the owner of required auth and input mappings plus the caller
   that supplies them. A completed dependency ID without its component/surface/artifacts is
   not sufficient execution evidence.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
-  wiring, except approved shared-contract files and data schema/migration artifacts.
-- When Web and API cross a boundary and the profile has a contracts component, add an
-  exact `packages/contracts/src/...` target to the nearest API work unit. Include the
-  shared-contract barrel only when repository evidence requires its export.
+  wiring, except approved shared-contract files, data schema/migration artifacts and UI
+  stylesheets. A unit's `write_scope` lists exactly the source files it may target: put new
+  helpers, clients and adapters as exported symbols inside those files, never in a new file.
+  A `unit` test intent names its own test file (the profile test suffix, normally next to the
+  source it tests); test files are not `write_scope` targets.
+- `existing_test_paths` lists the repository's existing tests of the unit's write_scope files
+  (Owned source files show them); the unit's Developer may update them. When the unit changes
+  behavior such a test asserts, plan a `unit` test intent that targets that exact file and
+  says which assertions change; never leave an existing test asserting replaced behavior.
+- Read-only caller files in Owned source files show existing code that reaches a target, such
+  as a route and its middleware. A response that such code already produces (for example a
+  validation middleware on the route) stays there: do not re-implement it in a planned target,
+  and do not plan a `unit` test that expects the planned target to produce it. A planned
+  target keeps the responses its own existing code already produces unless its approved
+  contract changes them.
+- Read-only middleware registered after the router (Owned source files) answers what a target
+  passes on (`next(error)` or a thrown error): its responses and body shapes are the
+  repository's error convention. When an approved outcome needs a response the middleware
+  does not give for that error, the planned target answers it itself; never assume a status
+  the middleware does not produce.
+- A UI unit may own stylesheet targets under the planning policy's `ui_stylesheets` root.
+  Choose the style mechanism from repository evidence; when the contract needs responsive,
+  focus-appearance or visual-token rules and no stylesheet exists, plan one stylesheet next to
+  the screen component in the first unit that owns that component (code_entities order) and
+  import it there. Later units extend the same file.
+- Bind every test intent to a verification stage whose stated capability can observe the
+  behavior it claims. Put decisions the contract fixes (state transitions, focus targets,
+  announcement text, which controls are blocked) in exported pure functions inside the
+  planned targets so the `unit` stage can test them. {browser_behavior_rule}
+- When the Design adds an API endpoint that the web calls and the profile has a contracts
+  component, add an exact `packages/contracts/src/...` target to the nearest API work unit; do the
+  same when a changed endpoint needs a request or response shape no shared contract describes yet.
+  An endpoint whose existing contract types still fit needs no contract target: use those types
+  (Owned source files show the shared contracts a target imports) instead of restating their
+  shapes inline. Include the shared-contract barrel only when repository evidence requires its
+  export.
 - Do not add database, API, or Web barrel/index targets. Harness assigns repo-profile
-  package entrypoints to one provider work unit after this enrichment step.
+  package entrypoints to one provider work unit after this enrichment step; leave an
+  entrypoint Harness already placed in a unit as it is.
 - Do not change dependency or order in prose. Harness serializes units that share code,
   test, contract, schema, or migration artifacts.
-- For a repair, return only affected unit updates.
-- Emit exactly one signature entry for every Harness-owned signature target below.
+- `code_entities` lists, in implementation order, every unit whose Design nodes bind to the
+  same code symbol. A later unit extends the code an earlier unit creates: its objective and
+  tests add only its own scenario's behavior and must stay compatible with the contracts of
+  the other listed design_node_ids, which appear in Shared code-entity contracts. When the
+  extension changes how earlier code is called (a new parameter, dependency or response),
+  keep the earlier call working (optional parameter, injected dependency with a default) or
+  add a test intent here that updates the earlier unit's test file, named by exact path.
+  Every unit, the first one included, implements and tests only the behavior of its own
+  design_node_ids: behavior that only Shared code-entity contracts state belongs to the unit that
+  owns those nodes, so an earlier unit keeps its code open to it (for example a result union with
+  room for that outcome) but neither implements nor tests it.
+- A runtime binding with `attachment_wired_by` is already attached to its owner by that earlier
+  unit. Target the owner file when this unit adds something the owner must create, inject or
+  pass on (for example a client with a network default that tests replace); otherwise leave
+  the owner file untouched.
+- Targets seeded from `runtime_bindings` (a binding target and its attachment owner) stay
+  planned. When the owner's existing code already reaches the target, as Owned source files
+  show (for example it mounts the router that registers the handler), state in the objective
+  that the owner needs no change and do not invent one.
+- `ui_obligations` lists, with stable ids, the states, validations, transitions, feedback,
+  accessibility, focus and responsive items of the unit's UI contracts. {obligation_accounting_rule}
+{repair_rules}
+- Emit one signature entry for every Harness-owned signature target below; in a repair, only
+  for targets of the units you update.
 - Copy `target_path` and `target_symbol` exactly. Harness owns Design-to-code binding;
   never derive a class/method owner from the legacy Class graph and never invent a target.
 - Multiple legacy Design operations may trace to one function/component target. Describe
@@ -1158,8 +1497,8 @@ Run id: {run_id}
 Planning policy:
 {json.dumps(planning_policy.prompt_context(), ensure_ascii=False, indent=2)}
 Verification policy:
-{json.dumps(verification_policy.prompt_context(), ensure_ascii=False, indent=2)}
-Language directive:
+{json.dumps(verification_policy.prompt_context(unit_test_environment), ensure_ascii=False, indent=2)}
+{runtime_config_section}Language directive:
 {json.dumps(language, ensure_ascii=False, indent=2)}
 Harness-owned signature targets:
 {json.dumps(
@@ -1174,323 +1513,35 @@ Harness-owned signature targets:
     indent=2,
 )}
 Harness-owned work units:
-{json.dumps(units, ensure_ascii=False, indent=2)}
+{json.dumps(_units_for_prompt(units, planning_policy), ensure_ascii=False, indent=2)}
+Prior scenario plan context (read-only; preserve compatible shared decisions):
+{json.dumps(prior_plan_context or {}, ensure_ascii=False, separators=(",", ":"))}
+Shared code-entity contracts (read-only compatibility context, not units to plan):
+{json.dumps(shared_code_entity_contracts, ensure_ascii=False, separators=(",", ":"))}
 Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:
 {json.dumps(trace_slice, ensure_ascii=False, separators=(",", ":"))}
-
+{owned_sources_section}
 Repository context:
 {json.dumps(_repo_context_summary(repo_context), ensure_ascii=False, indent=2)}
 Repository evidence:
 {_excerpt(str(repo_context.get("evidence") or ""), limit=6000)}
-Approved Requirement summary:
-{_excerpt(requirement_packet, limit=3000)}
-Approved Design human context:
-{_excerpt(design_artifact, limit=2000)}
 {repair}
 """.strip()
 
 
-def _developer_plan_prompt(
+def _parse_component_plan_payload(
+    raw: str,
     *,
-    run_id: str,
-    source_ref: str,
-    issue_key: str,
-    requirement_packet: str,
-    design_artifact: str,
-    requirement_design_trace: dict[str, object],
-    class_graph: dict[str, object],
-    sequence_graph: dict[str, object],
-    repo_context: dict[str, object],
-    base_mappings: list[dict[str, object]],
-    base_test_intents: list[dict[str, object]],
-    target_repo_path: str,
-    target_repo_remote: str,
-    target_base_branch: str,
-    planned_branch: str,
-    target_files: list[str],
-    test_command: str,
-    repair_feedback: str,
-    previous_review: dict[str, object],
-    canonical_requirement: RequirementModelV2 | None,
-    planning_policy: PlanningPathPolicy,
-    prompt_directive: LanguagePromptDirective | None,
-    verification_policy: VerificationStagePolicy,
-) -> str:
-    canonical_section = (
-        "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
-        + json.dumps(canonical_requirement.to_dict(), ensure_ascii=False, indent=2)
-        if canonical_requirement is not None
-        else "Canonical Requirement V2: not enabled for this V1 run."
-    )
-    repair_mode = bool(repair_feedback.strip())
-    requirement_text = _excerpt(requirement_packet, limit=3000 if repair_mode else 6000)
-    design_text = _excerpt(design_artifact, limit=3000 if repair_mode else 6000)
-    trace_payload = (
-        {
-            key: requirement_design_trace.get(key, [])
-            for key in ("version", "class_trace", "sequence_trace")
-        }
-        if repair_mode
-        else requirement_design_trace
-    )
-    class_payload = _compact_class_graph(class_graph) if repair_mode else class_graph
-    sequence_payload = _compact_sequence_graph(sequence_graph) if repair_mode else sequence_graph
-    mapping_payload = _compact_mappings(base_mappings) if repair_mode else base_mappings
-    if planning_policy:
-        if prompt_directive is None:
-            prompt_directive = resolve_language_prompt_directive(
-                get_language_profile(planning_policy.language_profile_id)
-            )
-        if prompt_directive.language_profile_id != planning_policy.language_profile_id:
-            raise HarnessError(
-                "prompt_directive_mismatch",
-                "Phase 3 planning requires a prompt directive matching the planning language profile.",
-            )
-        example_rule = planning_policy.component_rules[0]
-        source_example = f"{example_rule.source_root}/Example{example_rule.source_suffix}"
-        test_example = f"{example_rule.source_root}/Example{example_rule.test_suffix}"
-        path_rules = (
-            "Use only paths accepted by the immutable planning policy below. "
-            "Do not choose or change a component for an existing deterministic mapping."
-        )
-        planning_context = {
-            **planning_policy.prompt_context(),
-            "language_prompt": prompt_directive.developer_plan_context(),
-        }
-    else:  # Defensive only; public planning entry points reject missing policy first.
-        raise HarnessError(
-            "planning_profile_policy_invalid",
-            "Developer planning requires an immutable planning policy.",
-        )
-    if verification_policy:
-        if test_command.strip():
-            raise HarnessError(
-                "verification_stage_policy_mismatch",
-                "Profiled Phase 3 planning cannot receive a raw test command.",
-            )
-        if planning_policy and verification_policy.project_profile_id != planning_policy.project_profile_id:
-            raise HarnessError(
-                "verification_stage_policy_mismatch",
-                "Verification stages do not belong to the frozen planning project profile.",
-            )
-        stage_example = "unit" if "unit" in verification_policy.stage_ids else verification_policy.stage_ids[0]
-        test_intent_schema = json.dumps(
-            [
-                {
-                    "scope": "unit_or_service",
-                    "intent": "specific behavior to verify",
-                    "stage_id": stage_example,
-                }
-            ],
-            ensure_ascii=False,
-        )
-        verification_rules = (
-            "Every test_intents item must reference exactly one allowed stage_id. "
-            "Never emit command, shell, argv, cwd, env, or timeout fields."
-        )
-        verification_context = json.dumps(
-            verification_policy.prompt_context(),
-            ensure_ascii=False,
-            indent=2,
-        )
-        verification_run_context = ""
-        signature_contract_field = (
-            '  "implementation_signature_contract": '
-            + json.dumps(
-                {
-                    "version": "implementation_signature_contract_v1",
-                    "entries": [
-                        {
-                            "design_element_id": "method:Owner.operation",
-                            "symbol_kind": "method",
-                            "owner_kind": "class|interface|abstract",
-                            "qualified_name": "Owner.operation",
-                            "parameters": [
-                                {
-                                    "name": "value",
-                                    "type": "string",
-                                    "optional": False,
-                                    "rest": False,
-                                }
-                            ],
-                            "return_type": "Promise<void>",
-                            "type_parameters": ["T extends string"],
-                            "async": True,
-                        }
-                    ],
-                },
-                ensure_ascii=False,
-            )
-            + ",\n"
-        )
-        signature_rules = (
-            "For every approved method mapping, provide one or more exact implementation "
-            "signature entries. Parameter names are evidence; parameter type/order, "
-            "optional/rest, return type, type parameters, and async are approved contract. "
-            "Use qualified Owner.method names and do not include source_path or contract_id; "
-            "the harness binds those deterministically."
-        )
-    else:  # Defensive only; public planning entry points reject missing policy first.
-        raise HarnessError(
-            "planning_profile_policy_invalid",
-            "Developer planning requires an immutable verification policy.",
-        )
-    return f"""Developer Implementation Plan v1
-
-You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
-Do not write source code. Do not create commits or branches. Your job is to explain exactly how
-the approved requirement/design should be implemented in the target repository in Phase 4.
-
-Return JSON only with this shape:
-{{
-  "summary": "short summary for human reviewer",
-  "repo_evidence": ["specific repo evidence from CodeGraph/context, max 8 items"],
-  "implementation_steps": [
-    {{
-      "order": 1,
-      "title": "short step title",
-      "description": "what Phase 4 should change",
-      "files": ["{source_example}"],
-      "design_refs": ["class:...", "method:...", "sequence:..."]
-    }}
-  ],
-  "proposed_files": [
-    {{
-      "path": "{test_example}",
-      "action": "create|update|verify",
-      "reason": "why this file is needed",
-      "related_design_elements": ["class:..."]
-    }}
-  ],
-  "design_mappings": [
-    {{
-      "design_element_id": "class:...",
-      "design_element_type": "class|method|sequence_message",
-      "design_element_name": "...",
-      "planned_code_target": "{source_example}#method",
-      "reason": "concrete implementation reason",
-      "test_intent": "how to verify this element"
-    }}
-  ],
-{signature_contract_field}  "test_intents": {test_intent_schema},
-  "assumptions": [],
-  "open_questions": []
-}}
-
-Rules:
-- Keep the whole response compact and below 3000 output tokens.
-- Do not repeat all base deterministic mappings. The harness already preserves
-  them in Python. In `design_mappings`, return only mappings you improve or
-  correct using repo evidence. Return [] when the base mappings are good enough.
-- `implementation_steps` must be 3-6 high-level steps, not one step per design element.
-- `proposed_files` must include every file named by implementation steps or design mappings.
-- Keep proposed files grouped by file, not by method.
-- `test_intents` must be max 6 focused tests.
-- {verification_rules}
-- {signature_rules}
-- Do not add behavior outside the approved requirement/design.
-- {path_rules}
-- Use CodeGraph evidence when naming existing classes/files.
-- If this is a repair iteration, address the validator feedback directly.
-- A mapping with `implementation_status=waived_by_design_adjustment` is intentionally omitted
-  from executable code. Never plan that method in a step, prose, test, or direct symbol target.
-- During repair, return concise replacements and keep the response below 3000 tokens. Do not
-  repeat unchanged design mappings or repository evidence.
-
-Run context:
-- run_id: {run_id}
-- source_ref: {source_ref}
-- issue_key: {issue_key}
-- target_repo_path: {target_repo_path}
-- target_repo_remote: {target_repo_remote}
-- target_base_branch: {target_base_branch}
-- planned_branch: {planned_branch}
-{verification_run_context}
-
-Target files:
-{json.dumps(target_files, ensure_ascii=False, indent=2)}
-
-Immutable planning path policy:
-{json.dumps(planning_context, ensure_ascii=False, indent=2)}
-
-Immutable verification stage policy:
-{verification_context}
-
-{canonical_section}
-
-Approved requirement packet:
-{requirement_text}
-
-Approved design artifact:
-{design_text}
-
-Requirement-design trace:
-{json.dumps(trace_payload, ensure_ascii=False, separators=(",", ":"))}
-
-Class graph:
-{json.dumps(class_payload, ensure_ascii=False, separators=(",", ":"))}
-
-Sequence graph:
-{json.dumps(sequence_payload, ensure_ascii=False, separators=(",", ":"))}
-
-Base deterministic mappings:
-{json.dumps(mapping_payload, ensure_ascii=False, separators=(",", ":"))}
-
-Base test intents:
-{json.dumps(base_test_intents, ensure_ascii=False, indent=2)}
-
-CodeGraph repo context:
-{json.dumps(repo_context, ensure_ascii=False, indent=2)}
-
-Repair feedback:
-{repair_feedback or "none"}
-
-Previous review:
-{json.dumps(previous_review, ensure_ascii=False, indent=2)}
-""".strip()
-
-
-def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
-    try:
-        parsed = _parse_first_json_object(
-            raw,
-            expected_keys={
-                "summary",
-                "repo_evidence",
-                "implementation_steps",
-                "proposed_files",
-                "design_mappings",
-                "test_intents",
-            },
-        )
-    except json.JSONDecodeError as exc:
-        raise HarnessError(
-            "implementation_plan_developer_failed",
-            "Developer.plan LLM did not return valid JSON.",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise HarnessError(
-            "implementation_plan_developer_failed",
-            "Developer.plan LLM must return a JSON object.",
-        )
-    return {
-        "summary": str(parsed.get("summary") or "").strip(),
-        "repo_evidence": _string_items(parsed.get("repo_evidence")),
-        "implementation_steps": _dict_items(parsed.get("implementation_steps")),
-        "proposed_files": _dict_items(parsed.get("proposed_files")),
-        "design_mappings": _dict_items(parsed.get("design_mappings")),
-        "implementation_signature_contract": _object_dict(
-            parsed.get("implementation_signature_contract")
-        ),
-        "test_intents": _dict_items(parsed.get("test_intents")),
-        "assumptions": _string_items(parsed.get("assumptions")),
-        "open_questions": _string_items(parsed.get("open_questions")),
-    }
-
-
-def _parse_component_plan_payload(raw: str) -> dict[str, object]:
+    scenario_id: str = "",
+    allowed_unit_ids: set[str] | None = None,
+    required_unit_ids: set[str] | None = None,
+    signature_targets: list[dict[str, object]] | None = None,
+    signature_contract_required: bool | None = None,
+    runtime_config_required: bool = False,
+    previous_runtime_config: object = None,
+) -> dict[str, object]:
     try:
         parsed = _parse_first_json_object(
             raw,
@@ -1499,16 +1550,359 @@ def _parse_component_plan_payload(raw: str) -> dict[str, object]:
     except json.JSONDecodeError as exc:
         raise HarnessError(
             "implementation_plan_developer_failed",
-            "Developer.plan V4 LLM did not return valid component-plan JSON.",
+            "Developer.plan V5 LLM did not return valid component-plan JSON.",
         ) from exc
+    issues = _component_plan_payload_issues(
+        parsed,
+        scenario_id=scenario_id,
+        allowed_unit_ids=allowed_unit_ids,
+        required_unit_ids=required_unit_ids,
+        signature_targets=signature_targets or [],
+        signature_contract_required=signature_contract_required,
+        runtime_config_required=runtime_config_required,
+        previous_runtime_config=previous_runtime_config,
+    )
+    if issues:
+        raise HarnessError(
+            "implementation_plan_developer_contract_invalid",
+            "Developer.plan V5 output contract invalid: " + "; ".join(issues[:12]),
+        )
     return {
+        **({"scenario_id": scenario_id} if scenario_id else {}),
         "summary": str(parsed.get("summary") or "").strip(),
         "repo_evidence": _string_items(parsed.get("repo_evidence")),
         "work_unit_updates": _dict_items(parsed.get("work_unit_updates")),
         "implementation_signature_contract": _object_dict(
             parsed.get("implementation_signature_contract")
         ),
+        "runtime_config_impact": _object_dict(parsed.get("runtime_config_impact")),
     }
+
+
+def _component_plan_payload_issues(
+    payload: dict[str, object],
+    *,
+    scenario_id: str,
+    allowed_unit_ids: set[str] | None,
+    required_unit_ids: set[str] | None,
+    signature_targets: list[dict[str, object]],
+    signature_contract_required: bool | None,
+    runtime_config_required: bool,
+    previous_runtime_config: object,
+) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(payload.get("summary"), str):
+        issues.append("$.summary must be a string")
+    if "repo_evidence" in payload:
+        _require_string_list(payload.get("repo_evidence"), "$.repo_evidence", issues)
+    if scenario_id and payload.get("scenario_id") != scenario_id:
+        issues.append(f"$.scenario_id must equal `{scenario_id}`")
+    updates = payload.get("work_unit_updates")
+    if not isinstance(updates, list):
+        issues.append("$.work_unit_updates must be an array")
+        updates = []
+    seen: set[str] = set()
+    for index, raw_update in enumerate(updates):
+        path = f"$.work_unit_updates[{index}]"
+        if not isinstance(raw_update, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        unit_id = raw_update.get("unit_id")
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            issues.append(f"{path}.unit_id must be a non-empty string")
+            continue
+        unit_id = unit_id.strip()
+        if unit_id in seen:
+            issues.append(f"{path}.unit_id duplicates `{unit_id}`")
+        seen.add(unit_id)
+        if allowed_unit_ids is not None and unit_id not in allowed_unit_ids:
+            issues.append(f"{path}.unit_id `{unit_id}` is outside this planning slice")
+        for field in ("title", "objective"):
+            if field in raw_update and not isinstance(raw_update.get(field), str):
+                issues.append(f"{path}.{field} must be a string")
+        for field in ("planned_code_targets", "remove_planned_code_targets"):
+            _require_target_list(raw_update.get(field), f"{path}.{field}", issues, optional=True)
+        _require_test_intent_list(
+            raw_update.get("test_intents"), f"{path}.test_intents", issues, optional=True
+        )
+        for field in ("qa_test_intents", "remove_qa_test_intents"):
+            if field in raw_update:
+                issues.append(
+                    f"{path}.{field} is not part of the Plan; Phase 4 Browser QA plans the browser tests"
+                )
+        for field in ("remove_test_intents", "repo_evidence_refs"):
+            if field in raw_update:
+                _require_string_list(raw_update.get(field), f"{path}.{field}", issues)
+        if "unverified_obligations" in raw_update:
+            rows = raw_update.get("unverified_obligations")
+            if not isinstance(rows, list):
+                issues.append(f"{path}.unverified_obligations must be an array")
+            else:
+                for row_index, row in enumerate(rows):
+                    row_path = f"{path}.unverified_obligations[{row_index}]"
+                    if not isinstance(row, dict):
+                        issues.append(f"{row_path} must be an object")
+                        continue
+                    for field in ("id", "reason"):
+                        if not isinstance(row.get(field), str) or not str(row.get(field)).strip():
+                            issues.append(f"{row_path}.{field} must be a non-empty string")
+        if "migration_impact" in raw_update:
+            migration = raw_update.get("migration_impact")
+            if not isinstance(migration, dict):
+                issues.append(f"{path}.migration_impact must be an object")
+            else:
+                for field in ("status", "reason"):
+                    if not isinstance(migration.get(field), str):
+                        issues.append(f"{path}.migration_impact.{field} must be a string")
+                _require_string_list(
+                    migration.get("targets"), f"{path}.migration_impact.targets", issues
+                )
+    if required_unit_ids is not None and seen != required_unit_ids:
+        missing = sorted(required_unit_ids - seen)
+        extra = sorted(seen - required_unit_ids)
+        issues.append(
+            "$.work_unit_updates must contain the exact slice unit set "
+            f"(missing={missing}, extra={extra})"
+        )
+    _require_signature_contract(
+        payload.get("implementation_signature_contract"),
+        signature_targets=signature_targets,
+        required=(
+            required_unit_ids is not None
+            if signature_contract_required is None
+            else signature_contract_required
+        ),
+        issues=issues,
+    )
+    _require_runtime_config(
+        payload.get("runtime_config_impact"),
+        required=runtime_config_required,
+        allowed_unit_ids=allowed_unit_ids,
+        previous=previous_runtime_config,
+        issues=issues,
+    )
+    return issues
+
+
+def _require_string_list(value: object, path: str, issues: list[str]) -> None:
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array of strings")
+        return
+    if any(not isinstance(item, str) for item in value):
+        issues.append(f"{path} must contain only strings")
+
+
+def _require_target_list(
+    value: object,
+    path: str,
+    issues: list[str],
+    *,
+    optional: bool,
+) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array")
+        return
+    for index, target in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(target, dict):
+            issues.append(f"{item_path} must be an object")
+            continue
+        if not isinstance(target.get("path"), str) or not str(target.get("path")).strip():
+            issues.append(f"{item_path}.path must be a non-empty string")
+        if "symbol" in target and not isinstance(target.get("symbol"), str):
+            issues.append(f"{item_path}.symbol must be a string")
+
+
+def _require_test_intent_list(
+    value: object,
+    path: str,
+    issues: list[str],
+    *,
+    optional: bool,
+) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array")
+        return
+    for index, intent in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(intent, dict):
+            issues.append(f"{item_path} must be an object")
+            continue
+        for field in ("stage_id", "intent"):
+            if not isinstance(intent.get(field), str) or not str(intent.get(field)).strip():
+                issues.append(f"{item_path}.{field} must be a non-empty string")
+        for field in ("acceptance_refs", "target_paths", "obligation_refs"):
+            if field in intent:
+                _require_string_list(intent.get(field), f"{item_path}.{field}", issues)
+        if "target_paths" not in intent:
+            issues.append(f"{item_path}.target_paths must be an array of strings")
+
+
+def _require_signature_contract(
+    value: object,
+    *,
+    signature_targets: list[dict[str, object]],
+    required: bool,
+    issues: list[str],
+) -> None:
+    if value is None:
+        if required and signature_targets:
+            issues.append("$.implementation_signature_contract must be an object")
+        return
+    if not isinstance(value, dict):
+        issues.append("$.implementation_signature_contract must be an object")
+        return
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        issues.append("$.implementation_signature_contract.entries must be an array")
+        return
+    allowed = {
+        (str(item.get("target_path") or ""), str(item.get("target_symbol") or ""))
+        for item in signature_targets
+    }
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(entries):
+        path = f"$.implementation_signature_contract.entries[{index}]"
+        if not isinstance(entry, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        raw_key = (entry.get("target_path"), entry.get("target_symbol"))
+        key = tuple(str(item) if isinstance(item, str) else "" for item in raw_key)
+        seen.add(key)
+        if not all(isinstance(item, str) for item in raw_key):
+            issues.append(f"{path} target_path and target_symbol must be strings")
+        elif allowed and key not in allowed:
+            issues.append(f"{path} names a signature target outside this planning slice")
+        parameters = entry.get("parameters")
+        if not isinstance(parameters, list):
+            issues.append(f"{path}.parameters must be an array")
+        else:
+            for parameter_index, parameter in enumerate(parameters):
+                parameter_path = f"{path}.parameters[{parameter_index}]"
+                if not isinstance(parameter, dict):
+                    issues.append(f"{parameter_path} must be an object")
+                    continue
+                for field in ("name", "type"):
+                    if not isinstance(parameter.get(field), str):
+                        issues.append(f"{parameter_path}.{field} must be a string")
+                for field in ("optional", "rest"):
+                    if not isinstance(parameter.get(field), bool):
+                        issues.append(f"{parameter_path}.{field} must be a boolean")
+        if not isinstance(entry.get("return_type"), str):
+            issues.append(f"{path}.return_type must be a string")
+        _require_string_list(entry.get("type_parameters"), f"{path}.type_parameters", issues)
+        if "async" in entry and not isinstance(entry.get("async"), bool):
+            issues.append(f"{path}.async must be a boolean")
+    if required and allowed and seen != allowed:
+        issues.append(
+            "$.implementation_signature_contract.entries must contain the exact slice target set "
+            f"(missing={sorted(allowed - seen)}, extra={sorted(seen - allowed)})"
+        )
+
+
+def _require_runtime_config(
+    value: object,
+    *,
+    required: bool,
+    allowed_unit_ids: set[str] | None,
+    previous: object,
+    issues: list[str],
+) -> None:
+    if value is None and not required:
+        return
+    if not isinstance(value, dict):
+        issues.append("$.runtime_config_impact must be an object")
+        return
+    status = value.get("status")
+    if status not in {"required", "not_required"}:
+        issues.append("$.runtime_config_impact.status must be `required` or `not_required`")
+    elif not isinstance(status, str):
+        issues.append("$.runtime_config_impact.status must be a string")
+    if not isinstance(value.get("reason"), str) or not str(value.get("reason")).strip():
+        issues.append("$.runtime_config_impact.reason must be a non-empty string")
+    changes = value.get("changes")
+    if not isinstance(changes, list):
+        issues.append("$.runtime_config_impact.changes must be an array")
+        return
+    if status == "not_required" and changes:
+        issues.append("$.runtime_config_impact.changes must be empty when status is `not_required`")
+    if status == "required" and not changes:
+        issues.append("$.runtime_config_impact.changes must not be empty when status is `required`")
+    for index, change in enumerate(changes):
+        path = f"$.runtime_config_impact.changes[{index}]"
+        if not isinstance(change, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        if not isinstance(change.get("kind"), str):
+            issues.append(f"{path}.kind must be a string")
+        if not isinstance(change.get("unit_id"), str):
+            issues.append(f"{path}.unit_id must be a string")
+        for field, field_value in change.items():
+            if field in {"kind", "unit_id"}:
+                continue
+            if not isinstance(field_value, (str, bool)):
+                issues.append(f"{path}.{field} must be a string or boolean")
+    if previous is None:
+        if allowed_unit_ids is not None:
+            foreign = {
+                str(change.get("unit_id") or "")
+                for change in changes
+                if isinstance(change, dict)
+            } - allowed_unit_ids
+            if foreign:
+                issues.append(
+                    "$.runtime_config_impact contains changes outside this planning slice: "
+                    f"{sorted(foreign)}"
+                )
+        return
+    previous_impact = canonical_runtime_config_impact(previous)
+    current_impact = canonical_runtime_config_impact(value)
+    previous_identities = {
+        _runtime_change_identity(change)
+        for change in _dict_items(previous_impact.get("changes"))
+    }
+    current_changes = {
+        _runtime_change_identity(change): change
+        for change in _dict_items(current_impact.get("changes"))
+    }
+    if allowed_unit_ids is not None:
+        foreign_new = sorted(
+            {
+                str(change.get("unit_id") or "")
+                for identity, change in current_changes.items()
+                if identity not in previous_identities
+                and str(change.get("unit_id") or "") not in allowed_unit_ids
+            }
+        )
+        if foreign_new:
+            issues.append(
+                "$.runtime_config_impact adds changes outside this planning slice: "
+                f"{foreign_new}"
+            )
+    for change in _dict_items(previous_impact.get("changes")):
+        unit_id = str(change.get("unit_id") or "")
+        if allowed_unit_ids is not None and unit_id in allowed_unit_ids:
+            continue
+        if current_changes.get(_runtime_change_identity(change)) != change:
+            issues.append(
+                "$.runtime_config_impact must preserve prior change owned by "
+                f"unit `{unit_id}` byte-for-byte"
+            )
+
+
+def _runtime_change_identity(change: dict[str, object]) -> tuple[str, str, str]:
+    kind = str(change.get("kind") or "")
+    identity = str(
+        change.get("name")
+        or change.get("package")
+        or change.get("service")
+        or ""
+    )
+    return kind, str(change.get("unit_id") or ""), identity
 
 
 def _merge_implementation_signature_contract(
@@ -1692,37 +2086,195 @@ def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) ->
     return expected_keys.issubset(candidate.keys())
 
 
-def _merge_mappings(
-    base: list[dict[str, object]],
-    llm_items: list[dict[str, object]],
+_OWNED_SOURCE_FILE_CHARS = 8000
+_OWNED_SOURCE_TOTAL_CHARS = 24000
+
+
+def _repo_symbol_kinds(component_plan_inputs: dict[str, object]) -> dict[tuple[str, str], str]:
+    return {
+        (str(item.get("path") or ""), str(item.get("symbol") or "")): str(item.get("kind") or "")
+        for item in _dict_items(component_plan_inputs.get("repo_symbol_kinds"))
+    }
+
+
+def _repo_workspaces(component_plan_inputs: dict[str, object]) -> list[dict[str, object]]:
+    runtime_config = component_plan_inputs.get("repo_runtime_config")
+    return _dict_items(runtime_config.get("workspaces")) if isinstance(runtime_config, dict) else []
+
+
+def _repo_after_mount_middleware(component_plan_inputs: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    return {
+        str(item.get("path") or ""): _dict_items(item.get("middleware"))
+        for item in _dict_items(component_plan_inputs.get("repo_after_mount_middleware"))
+    }
+
+
+def _repo_target_callers(component_plan_inputs: dict[str, object]) -> dict[tuple[str, str], list[dict[str, object]]]:
+    return {
+        (str(item.get("path") or ""), str(item.get("symbol") or "")): _dict_items(item.get("callers"))
+        for item in _dict_items(component_plan_inputs.get("repo_target_callers"))
+    }
+
+
+def _owned_source_files(
     *,
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    by_id = {str(item.get("design_element_id") or ""): dict(item) for item in base}
-    for item in llm_items:
-        element_id = str(item.get("design_element_id") or "")
-        if not element_id or (planning_policy and element_id not in by_id):
+    units: list[dict[str, object]],
+    target_repo_path: str,
+    planning_policy: PlanningPathPolicy,
+    target_callers: dict[tuple[str, str], list[dict[str, object]]] | None = None,
+    workspaces: list[dict[str, object]] | None = None,
+    after_mount: dict[str, list[dict[str, object]]] | None = None,
+) -> str:
+    """Line-numbered worktree text of the files the units may write, their existing tests, the
+    shared contracts they import, the code that calls or registers their targets and the
+    middleware registered after that code is mounted (read-only); the shared evidence is run-wide."""
+
+    paths: list[str] = []
+    for unit in units:
+        for path in _string_items(unit_write_scope(unit, planning_policy).get("files")):
+            if path not in paths:
+                paths.append(path)
+    callers: dict[str, list[str]] = {}
+    for unit in units:
+        for binding in _dict_items(unit.get("runtime_bindings")):
+            target = _object_dict(binding.get("target"))
+            key = (str(target.get("path") or ""), str(target.get("symbol") or ""))
+            for caller in (target_callers or {}).get(key, []):
+                caller_path = str(caller.get("path") or "")
+                if caller_path in paths or planning_policy.is_test_path(caller_path):
+                    continue
+                note = f"{key[1]} at line {int(caller.get('line') or 0)}"
+                if note not in callers.setdefault(caller_path, []):
+                    callers[caller_path].append(note)
+    existing_tests = [
+        path
+        for path in dict.fromkeys(
+            path for unit in units for path in _string_items(unit.get("existing_test_paths"))
+        )
+        if path not in paths and path not in callers
+    ]
+    # code_entities lists units in implementation order: a new file a later unit extends is
+    # created by the first unit of that entity, not by this slice.
+    slice_ids = {str(unit.get("unit_id") or "") for unit in units}
+    creators: dict[str, str] = {}
+    for unit in units:
+        for entity in _dict_items(unit.get("code_entities")):
+            entity_path = str(entity.get("entity") or "").partition("#")[0]
+            first = next(iter(_string_items(entity.get("unit_ids"))), "")
+            if entity_path and first and first not in slice_ids:
+                creators.setdefault(entity_path, first)
+    if not target_repo_path or not paths:
+        return ""
+    root = Path(target_repo_path).resolve()
+    blocks: list[str] = []
+    remaining = _OWNED_SOURCE_TOTAL_CHARS
+    contracts = {
+        path: names
+        for path, names in _shared_contract_declarations(
+            root=root, paths=paths, planning_policy=planning_policy, workspaces=workspaces or []
+        ).items()
+        if path not in paths and path not in existing_tests and path not in callers
+    }
+    middleware: dict[str, list[str]] = {}
+    for start in [*paths, *callers]:
+        for item in (after_mount or {}).get(start, []):
+            path = str(item.get("path") or "")
+            if not path or path in paths or path in existing_tests or path in contracts or path in callers:
+                continue
+            note = f"{item.get('name')} that {item.get('registered_by')} registers at line {int(item.get('line') or 0)}"
+            if note not in middleware.setdefault(path, []):
+                middleware[path].append(note)
+    for path in [*paths, *existing_tests, *contracts, *callers, *middleware]:
+        source = (root / path).resolve()
+        if not source.is_relative_to(root):
             continue
-        current = by_id.get(element_id, {})
-        merged = {
-            **current,
-            **{key: value for key, value in item.items() if str(value).strip()},
-        }
-        if planning_policy and current:
-            merged["planned_code_target"] = current.get("planned_code_target", "")
-            merged["component_id"] = current.get("component_id", "")
-        by_id[element_id] = merged
-    ordered: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for item in base:
-        element_id = str(item.get("design_element_id") or "")
-        if element_id in by_id:
-            ordered.append(by_id[element_id])
-            seen.add(element_id)
-    for element_id, item in by_id.items():
-        if element_id not in seen:
-            ordered.append(item)
-    return ordered
+        role = (
+            f"read-only caller of {', '.join(callers[path])}; "
+            if path in callers
+            else f"read-only shared contract declaring {', '.join(contracts[path])}; "
+            if path in contracts
+            else f"read-only middleware registered after the router: {', '.join(middleware[path])}; "
+            if path in middleware
+            else "existing test of a write_scope file; " if path in existing_tests else ""
+        )
+        if not source.is_file():
+            if not role:
+                creator = creators.get(path, "")
+                blocks.append(
+                    f"--- {path}: does not exist in the worktree yet; earlier unit {creator} creates it."
+                    if creator
+                    else f"--- {path}: does not exist yet; the work unit creates it."
+                )
+            continue
+        if remaining <= 0:
+            blocks.append(f"--- {path} ({role}exists; not shown because the owned-source budget is used up)")
+            continue
+        lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+        numbered = "\n".join(f"{index:>4}\t{line}" for index, line in enumerate(lines, start=1))
+        limit = min(_OWNED_SOURCE_FILE_CHARS, remaining)
+        if len(numbered) > limit:
+            cut = numbered.rfind("\n", 0, limit)
+            numbered = numbered[: cut if cut > 0 else limit]
+            shown = numbered.count("\n") + 1
+            numbered += f"\n[cut: lines {shown + 1}-{len(lines)} not shown]"
+        remaining -= len(numbered)
+        blocks.append(f"--- {path} ({role}{len(lines)} lines)\n{numbered}")
+    return "\n".join(blocks)
+
+
+_NAMED_IMPORT = re.compile(r"import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+[\"']([^\"']+)[\"']")
+
+
+def _shared_contract_declarations(
+    *,
+    root: Path,
+    paths: list[str],
+    planning_policy: PlanningPathPolicy,
+    workspaces: list[dict[str, object]],
+) -> dict[str, list[str]]:
+    """Files of the contracts component that declare the names the given sources import from it."""
+
+    rule = next((item for item in planning_policy.component_rules if item.component_id == "contracts"), None)
+    if rule is None:
+        return {}
+    manifest = rule.source_root.rsplit("/", 1)[0] + "/package.json"
+    package = next(
+        (str(item.get("name") or "") for item in workspaces if str(item.get("manifest") or "") == manifest), ""
+    )
+    if not package:
+        return {}
+    names: set[str] = set()
+    for path in paths:
+        source = root / path
+        if not source.is_file():
+            continue
+        # shortcut: a regex over named imports; namespace or default imports of contracts are not followed.
+        for match in _NAMED_IMPORT.finditer(source.read_text(encoding="utf-8", errors="replace")):
+            if match.group(2) == package or match.group(2).startswith(f"{package}/"):
+                names.update(
+                    name.strip().removeprefix("type ").split(" as ")[0].strip()
+                    for name in match.group(1).split(",")
+                    if name.strip()
+                )
+    contract_root = root / rule.source_root
+    if not names or not contract_root.is_dir():
+        return {}
+    declarations: dict[str, list[str]] = {}
+    for source in sorted(contract_root.rglob("*.ts")):
+        relative = source.relative_to(root).as_posix()
+        if planning_policy.is_test_path(relative):
+            continue
+        text = source.read_text(encoding="utf-8", errors="replace")
+        declared = sorted(
+            name
+            for name in names
+            if re.search(
+                rf"export\s+(?:declare\s+)?(?:type|interface|const|function|class|enum)\s+{re.escape(name)}\b", text
+            )
+        )
+        if declared:
+            declarations[relative] = declared
+    return declarations
 
 
 def _repo_context_summary(repo_context: dict[str, object]) -> dict[str, object]:
@@ -1744,367 +2296,18 @@ def _repo_context_evidence_lines(repo_context: dict[str, object]) -> list[str]:
     return lines[:8]
 
 
-def _implementation_steps_from_mappings(
-    mappings: list[dict[str, object]],
-    *,
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    files = _proposed_files_from_mappings(mappings)
-    return [
-        {
-            "order": 1,
-            "title": "Map approved design to code targets",
-            "description": "Implement the approved class and sequence behavior using the mapped source/test files.",
-            "files": [str(item.get("path") or "") for item in files],
-            "design_refs": [str(item.get("design_element_id") or "") for item in mappings],
-        },
-        {
-            "order": 2,
-            "title": "Run verification",
-            "description": (
-                "Add or update tests for the mapped behavior, then run the profile-owned verification stages."
-                if planning_policy
-                else "Add or update tests for the mapped behavior, then run the configured target repo test command."
-            ),
-            "files": [
-                str(item.get("path") or "")
-                for item in files
-                if (
-                    planning_policy.is_test_path(item.get("path"))
-                    if planning_policy
-                    else "src/test/" in str(item.get("path") or "")
-                )
-            ],
-            "design_refs": [str(item.get("design_element_id") or "") for item in mappings],
-        },
-    ]
-
-
-def _proposed_files_from_mappings(mappings: list[dict[str, object]]) -> list[dict[str, object]]:
-    result: dict[str, dict[str, object]] = {}
-    for item in mappings:
-        target = str(item.get("planned_code_target") or "").split("#", 1)[0]
-        if not target:
-            continue
-        entry = result.setdefault(
-            target,
-            {
-                "path": target,
-                "action": "create_or_update",
-                "reason": "Needed by approved design mapping.",
-                "related_design_elements": [],
-            },
-        )
-        refs = entry.setdefault("related_design_elements", [])
-        if isinstance(refs, list):
-            refs.append(str(item.get("design_element_id") or ""))
-    return list(result.values())
-
-
-def _canonicalize_implementation_steps(
-    steps: list[dict[str, object]],
-    *,
-    mappings: list[dict[str, object]],
-    planning_policy: PlanningPathPolicy | None,
-) -> list[dict[str, object]]:
-    """Giữ files hợp lệ và khôi phục deterministic mapping paths sau output LLM."""
-
-    if not planning_policy:
-        return steps
-    mapping_paths = {
-        str(item.get("design_element_id") or ""): planning_policy.normalize_mapping_path(
-            str(item.get("planned_code_target") or "").split("#", 1)[0]
-        )
-        for item in mappings
-    }
-    result: list[dict[str, object]] = []
-    for step in steps:
-        item = dict(step)
-        files = [
-            path
-            for raw_path in (item.get("files") if isinstance(item.get("files"), list) else [])
-            for path in [planning_policy.normalize_editable_path(raw_path)]
-            if path
-        ]
-        for design_ref in _string_items(item.get("design_refs")):
-            path = mapping_paths.get(design_ref, "")
-            if path and path not in files:
-                files.append(path)
-        item["files"] = files
-        result.append(item)
-    return result
-
-
-def _canonical_proposed_files(
-    *,
-    proposed_files: list[dict[str, object]],
-    implementation_steps: list[dict[str, object]],
-    mappings: list[dict[str, object]],
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    """Return the executable profile-approved file set as one deterministic union."""
-
-    by_path: dict[str, dict[str, object]] = {}
-    for item in proposed_files:
-        path = _planning_path(item.get("path"), planning_policy=planning_policy)
-        if path:
-            by_path[path] = _with_path_component({**item, "path": path}, planning_policy)
-    for step in implementation_steps:
-        for raw_path in step.get("files", []) if isinstance(step.get("files"), list) else []:
-            path = _planning_path(raw_path, planning_policy=planning_policy)
-            if path and path not in by_path:
-                by_path[path] = _with_path_component({
-                    "path": path,
-                    "action": "create_or_update",
-                    "reason": "Named by an implementation step.",
-                    "related_design_elements": _string_items(step.get("design_refs")),
-                }, planning_policy)
-    for mapping in mappings:
-        path = _planning_path(
-            str(mapping.get("planned_code_target") or "").split("#", 1)[0],
-            planning_policy=planning_policy,
-            mapping_only=True,
-        )
-        if not path:
-            continue
-        entry = by_path.setdefault(
-            path,
-            _with_path_component({
-                "path": path,
-                "action": "create_or_update",
-                "reason": "Needed by an approved design mapping.",
-                "related_design_elements": [],
-            }, planning_policy),
-        )
-        refs = entry.setdefault("related_design_elements", [])
-        element_id = str(mapping.get("design_element_id") or "").strip()
-        if isinstance(refs, list) and element_id and element_id not in refs:
-            refs.append(element_id)
-    return list(by_path.values())
-
-
-def _planning_path(
-    value: object,
-    *,
-    planning_policy: PlanningPathPolicy | None,
-    mapping_only: bool = False,
-) -> str:
-    if planning_policy:
-        return (
-            planning_policy.normalize_mapping_path(value)
-            if mapping_only
-            else planning_policy.normalize_editable_path(value)
-        )
-    return _java_path(value)
-
-
-def _with_path_component(
-    item: dict[str, object],
-    planning_policy: PlanningPathPolicy | None,
-) -> dict[str, object]:
-    if planning_policy:
-        item["component_id"] = planning_policy.component_for_path(item.get("path"))
-    return item
-
-
-def _java_path(value: object) -> str:
-    path = str(value or "").strip().replace("\\", "/")
-    return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
-
-
-def _ensure_executable_test_files(
-    *,
-    proposed_files: list[dict[str, object]],
-    mappings: list[dict[str, object]],
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    """Ensure flow and repository behaviors have editable test targets."""
-
-    result = list(proposed_files)
-    seen = {str(item.get("path") or "") for item in result}
-    class_targets = {
-        str(item.get("design_element_name") or ""): str(item.get("planned_code_target") or "").split("#", 1)[0]
-        for item in mappings
-        if item.get("design_element_type") == "class"
-    }
-    required: list[tuple[str, str, str]] = []
-    controllers = [
-        (name, path)
-        for name, path in class_targets.items()
-        if name.endswith("Controller") or (planning_policy and name.endswith("Boundary"))
-    ]
-    if controllers and any(item.get("design_element_type") == "sequence_message" for item in mappings):
-        name, path = controllers[0]
-        flow_base = name.removesuffix("Controller")
-        if planning_policy:
-            flow_base = flow_base.removesuffix("Boundary")
-        flow_name = flow_base + ("Flow" if planning_policy else "FlowTest")
-        required.append(
-            (
-                name,
-                _test_path_for_main(path, flow_name, planning_policy=planning_policy),
-                "Verify the approved sequence and acceptance flow.",
-            )
-        )
-    repositories = [(name, path) for name, path in class_targets.items() if name.endswith("Repository")]
-    if repositories:
-        name, path = repositories[0]
-        test_name = name if planning_policy else f"{name}Test"
-        required.append(
-            (
-                name,
-                _test_path_for_main(path, test_name, planning_policy=planning_policy),
-                "Verify repository rules and persistence boundaries.",
-            )
-        )
-    for design_name, path, reason in required:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        result.append(
-            _with_path_component({
-                "path": path,
-                "action": "create_or_update",
-                "reason": reason,
-                "related_design_elements": [f"class:{design_name}"],
-            }, planning_policy)
-        )
-    return result
-
-
-def _test_path_for_main(
-    main_path: str,
-    test_class_name: str,
-    *,
-    planning_policy: PlanningPathPolicy | None = None,
-) -> str:
-    if planning_policy:
-        return planning_policy.test_path_for_source(main_path, test_class_name)
-    path = _java_path(main_path)
-    if not path or not path.startswith("src/main/java/"):
-        return ""
-    parent = path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
-    return f"{parent}/{test_class_name}.java"
-
-
-def _design_adjustments(
-    *,
-    class_graph: dict[str, object],
-    class_targets: dict[str, str],
-    target_repo_path: str,
-    requirement_design_trace: dict[str, object],
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    """Propose omission of untraced setters that conflict with existing final fields."""
-
-    if planning_policy:
-        return []
-
-    directly_traced = {
-        str(link.get("target") or "").strip()
-        for key in ("class_trace", "sequence_trace")
-        for item in _dict_items(requirement_design_trace.get(key))
-        for link in _dict_items(item.get("links"))
-        if str(link.get("target") or "").strip()
-    }
-    root = Path(target_repo_path) if target_repo_path else None
-    result: list[dict[str, object]] = []
-    for node in _dict_items(class_graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        class_file = class_targets.get(class_name, "")
-        source = ""
-        if root and class_file:
-            source_path = root / class_file
-            if source_path.exists():
-                source = source_path.read_text(encoding="utf-8", errors="replace")
-        if not source:
-            continue
-        for method in _dict_items(node.get("methods")):
-            method_name = str(method.get("name") or "").strip()
-            if not re.fullmatch(r"set[A-Z].*", method_name):
-                continue
-            field_name = method_name[3:4].lower() + method_name[4:]
-            if not re.search(rf"\bfinal\b[^;]*\b{re.escape(field_name)}\s*;", source):
-                continue
-            design_name = f"{class_name}.{method_name}"
-            traced = design_name in directly_traced or method_name in directly_traced
-            result.append(
-                {
-                    "design_element_id": f"method:{design_name}",
-                    "action": "unresolved" if traced else "omit",
-                    "current_contract": f"`{class_name}.{field_name}` is final in the target repository.",
-                    "proposed_effective_contract": (
-                        f"Preserve immutable `{class_name}` state and constructor assignment; omit `{method_name}`."
-                    ),
-                    "reason": "A generated setter would conflict with the repository's immutable final-field invariant.",
-                    "requirement_trace_refs": [design_name] if traced else [],
-                    "requires_human_approval": True,
-                    "status": "conflict" if traced else "proposed",
-                }
-            )
-    return result
-
-
-def _apply_design_adjustments(
-    mappings: list[dict[str, object]], adjustments: list[dict[str, object]]
-) -> list[dict[str, object]]:
-    by_id = {str(item.get("design_element_id") or ""): item for item in adjustments}
-    result: list[dict[str, object]] = []
-    for mapping in mappings:
-        item = dict(mapping)
-        adjustment = by_id.get(str(item.get("design_element_id") or ""))
-        if adjustment and adjustment.get("action") == "omit":
-            item["planned_code_target"] = str(item.get("planned_code_target") or "").split("#", 1)[0]
-            item["implementation_status"] = "waived_by_design_adjustment"
-            item["adjustment_ref"] = adjustment.get("design_element_id")
-            item["trace_policy"] = "design_adjustment"
-            item["reason"] = str(adjustment.get("proposed_effective_contract") or adjustment.get("reason") or "")
-            item["test_intent"] = "Verify the existing immutable constructor contract remains intact; do not add this setter."
-        result.append(item)
-    return result
-
-
-def _apply_design_adjustments_to_steps(
-    steps: list[dict[str, object]], adjustments: list[dict[str, object]]
-) -> list[dict[str, object]]:
-    omitted = [item for item in adjustments if item.get("action") == "omit"]
-    if not omitted:
-        return steps
-    by_class: dict[str, list[str]] = {}
-    omitted_ids = {str(item.get("design_element_id") or "") for item in omitted}
-    for item in omitted:
-        element_id = str(item.get("design_element_id") or "")
-        qualified = element_id.split(":", 1)[-1]
-        if "." not in qualified:
-            continue
-        class_name, method_name = qualified.rsplit(".", 1)
-        by_class.setdefault(class_name, []).append(method_name)
-
-    result: list[dict[str, object]] = []
-    for step in steps:
-        item = dict(step)
-        refs = _string_items(item.get("design_refs"))
-        text = f"{item.get('title') or ''} {item.get('description') or ''}"
-        affected = {
-            class_name: methods
-            for class_name, methods in by_class.items()
-            if any(f"method:{class_name}.{method}" in refs or method in text for method in methods)
-        }
-        item["design_refs"] = [ref for ref in refs if ref not in omitted_ids]
-        if affected:
-            constraints = []
-            for class_name, methods in affected.items():
-                constraints.append(
-                    f"Preserve the existing immutable `{class_name}` constructor contract and do not add "
-                    + ", ".join(f"`{method}`" for method in methods)
-                    + "; those methods are omitted by the design adjustment reviewed at this checkpoint."
-                )
-            item["description"] = " ".join(constraints) + " Keep all other approved design refs in this step unchanged."
-        result.append(item)
-    return result
-
-
 def _compact_review(review: dict[str, object]) -> dict[str, object]:
+    llm_review = _object_dict(review.get("llm_review"))
+    blocking_findings = [
+        finding
+        for finding in _dict_items(llm_review.get("findings"))
+        if finding.get("severity") == "blocking"
+    ]
+    if blocking_findings:
+        return {
+            "ok": review.get("ok"),
+            "findings": blocking_findings,
+        }
     return {
         "ok": review.get("ok"),
         "summary": review.get("summary"),
@@ -2146,70 +2349,6 @@ def _affected_unit_ids(review: dict[str, object]) -> list[str]:
         ]
     )
     return sorted(set(re.findall(r"\bWU-[A-F0-9]{12}\b", text)))
-
-
-def _repair_candidate(plan: dict[str, object]) -> dict[str, object]:
-    return {
-        "implementation_steps": _dict_items(plan.get("implementation_steps")),
-        "proposed_files": _dict_items(plan.get("proposed_files")),
-        "design_adjustments": _dict_items(plan.get("design_adjustments")),
-        "implementation_signature_contract": _object_dict(
-            plan.get("implementation_signature_contract")
-        ),
-        "test_intents": _dict_items(plan.get("test_intents")),
-    }
-
-
-def _compact_mappings(mappings: list[dict[str, object]]) -> list[dict[str, object]]:
-    keys = (
-        "design_element_id",
-        "design_element_type",
-        "design_element_name",
-        "planned_code_target",
-        "message_type",
-        "trace_policy",
-        "implementation_status",
-        "adjustment_ref",
-    )
-    return [{key: item[key] for key in keys if key in item} for item in mappings]
-
-
-def _compact_class_graph(graph: dict[str, object]) -> dict[str, object]:
-    return {
-        "nodes": [
-            {
-                "className": node.get("className") or node.get("id"),
-                "methods": [method.get("name") for method in _dict_items(node.get("methods"))],
-            }
-            for node in _dict_items(graph.get("nodes"))
-        ]
-    }
-
-
-def _compact_sequence_graph(graph: dict[str, object]) -> dict[str, object]:
-    return {
-        "sequenceDiagrams": [
-            {
-                "id": diagram.get("id"),
-                "messages": [
-                    {
-                        "from": message.get("from"),
-                        "to": message.get("to"),
-                        "message": message.get("message"),
-                        "type": message.get("type"),
-                    }
-                    for message in _dict_items(diagram.get("messages"))
-                ],
-            }
-            for diagram in _dict_items(graph.get("sequenceDiagrams"))
-        ]
-    }
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _requirement_coverage(
@@ -2435,54 +2574,6 @@ def _design_mappings(
     return mappings
 
 
-def _test_intents(
-    *,
-    mappings: list[dict[str, object]],
-    test_command: str,
-    verification_policy: VerificationStagePolicy | None = None,
-) -> list[dict[str, str]]:
-    methods = [
-        str(item.get("design_element_name") or "")
-        for item in mappings
-        if item.get("design_element_type") == "method"
-    ]
-    primary_methods = ", ".join(methods[:5]) if methods else "primary use-case behavior"
-    if verification_policy:
-        primary_stage = "unit" if "unit" in verification_policy.stage_ids else verification_policy.stage_ids[0]
-        regression_stage = (
-            "typecheck"
-            if "typecheck" in verification_policy.stage_ids
-            else next(
-                (stage_id for stage_id in verification_policy.stage_ids if stage_id != primary_stage),
-                primary_stage,
-            )
-        )
-        return [
-            {
-                "scope": "unit_or_service",
-                "intent": f"Validate {primary_methods}.",
-                "stage_id": primary_stage,
-            },
-            {
-                "scope": "regression",
-                "intent": "Run profile-owned static and regression verification after Phase 4 changes.",
-                "stage_id": regression_stage,
-            },
-        ]
-    return [
-        {
-            "scope": "unit_or_service",
-            "intent": f"Validate {primary_methods}.",
-            "command": test_command,
-        },
-        {
-            "scope": "regression",
-            "intent": "Run the target repo test command after Phase 4 code changes.",
-            "command": test_command,
-        },
-    ]
-
-
 def _class_target_files(
     *,
     class_graph: dict[str, object],
@@ -2638,7 +2729,9 @@ def _markdown_plan(
     signature_entries = _dict_items(signature_contract.get("entries"))
     version_text = str(structured.get("version") or "")
     plan_label = (
-        "V4"
+        "V5"
+        if version_text.endswith("_v5")
+        else "V4"
         if version_text.endswith("_v4")
         else "V3"
         if version_text.endswith("_v3")
@@ -2711,6 +2804,8 @@ def _markdown_plan(
                 lines.append(
                     f"- Test `{test.get('stage_id', '')}`: {test.get('intent', '')}"
                 )
+            for item in _dict_items(unit.get("unverified_obligations")):
+                lines.append(f"- Unverified `{item.get('id', '')}`: {item.get('reason', '')}")
             for binding in _dict_items(unit.get("surface_contracts")):
                 if str(binding.get("surface") or "") != "ui":
                     continue
@@ -2737,6 +2832,24 @@ def _markdown_plan(
                     ]
                 )
 
+    runtime_config = structured.get("runtime_config_impact")
+    if isinstance(runtime_config, dict):
+        lines.extend(
+            [
+                "",
+                "## Runtime Configuration",
+                "",
+                f"- Decision: `{runtime_config.get('status') or 'undecided'}` — "
+                f"{runtime_config.get('reason') or 'n/a'}",
+            ]
+        )
+        for change in _dict_items(runtime_config.get("changes")):
+            details = ", ".join(
+                f"{key}={value}"
+                for key, value in change.items()
+                if key not in {"kind", "unit_id"} and value != ""
+            )
+            lines.append(f"- `{change.get('kind')}` in `{change.get('unit_id')}`: {details}")
     lines.extend(
         [
             "",
@@ -2916,12 +3029,6 @@ def _markdown_plan(
         ]
     )
     return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _object_dict(value: object) -> dict[str, object]:

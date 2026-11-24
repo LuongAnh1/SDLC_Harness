@@ -19,6 +19,7 @@ from .clarification_policy_v1 import (
     proposed_default_answer,
 )
 from .model_v2 import RequirementModelV2
+from ...core.coerce import dict_items as _dict_items
 
 
 AGENT_DEFAULT_ORIGIN = "agent_reasonable_default"
@@ -297,10 +298,6 @@ def _next_assumption_id(used: set[str]) -> str:
     while f"ASM-{index}" in used:
         index += 1
     return f"ASM-{index}"
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

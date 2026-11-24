@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
 import pytest
 
 from sdlc_harness.agents.validator import CodeTraceValidator
+from sdlc_harness.profiles.signature import implementation_signature_contract_digest
 from sdlc_harness.agents.validator.typescript_ast import (
     TYPESCRIPT_AST_EVIDENCE_VERSION,
     TypeScriptAstEvidence,
@@ -31,14 +34,17 @@ class AcceptingCodeTraceLlm:
 
     def complete(self, *, system: str, prompt: str) -> str:
         self.prompt = prompt
+        task = json.loads(prompt)["task_contract"]
         return json.dumps(
             {
+                "task_id": task["task_id"],
+                "reviewed_claim_ids": task["authority_claim_ids"],
+                "reviewed_design_ids": task["required_reviewed_design_ids"],
+                "reviewed_boundary_contract_ids": task["required_reviewed_boundary_contract_ids"],
                 "ok": True,
-                "confidence": 0.95,
                 "summary": "Profiled code trace accepted.",
-                "graph_edges": [],
-                "missing_links": [],
-                "risks": [],
+                "findings": [],
+                "observations": [],
             }
         )
 
@@ -105,6 +111,8 @@ def _symbol(name: str, *, qualified_name: str | None = None) -> dict[str, object
         "type_parameters": [],
         "async": False,
         "exported": True,
+        "start_line": 1,
+        "end_line": 1,
     }
 
 
@@ -137,7 +145,14 @@ def _work_packet(*, source_path: str, test_path: str, symbol: str) -> dict[str, 
         },
         "proposed_files": [{"path": source_path}, {"path": test_path}],
         "output_contract": {"allowed_paths": [source_path, test_path]},
+        "implementation_signature_contract": _signature_contract(),
     }
+
+
+def _signature_contract() -> dict[str, object]:
+    contract: dict[str, object] = {"version": "implementation_signature_contract_v1", "entries": []}
+    contract["digest"] = implementation_signature_contract_digest(contract)
+    return contract
 
 
 def test_code_trace_policy_accepts_only_profiled_source_and_colocated_tests(
@@ -151,6 +166,9 @@ def test_code_trace_policy_accepts_only_profiled_source_and_colocated_tests(
     )
     assert code_trace_policy.normalize_test_path("apps/web/src/DeletePage.test.tsx") == (
         "apps/web/src/DeletePage.test.tsx"
+    )
+    assert code_trace_policy.normalize_test_path("apps/web/src/cancel-deletion.test.ts") == (
+        "apps/web/src/cancel-deletion.test.ts"
     )
     assert code_trace_policy.normalize_source_path("src/main/java/DeleteService.java") == ""
     assert code_trace_policy.normalize_test_path("tests/e2e/delete.spec.ts") == ""
@@ -221,6 +239,8 @@ def test_typescript_ast_bridge_uses_fixed_helper_and_validates_evidence(
                                 "type_parameters": ["T extends string"],
                                 "async": True,
                                 "exported": False,
+                                    "start_line": 1,
+                                    "end_line": 1,
                             },
                         ],
                     }
@@ -334,6 +354,60 @@ def test_real_typescript_ast_helper_fails_closed_without_target_package(
     assert caught.value.error_code == "typescript_ast_extractor_unavailable"
 
 
+def _installed_typescript_node_modules() -> Path | None:
+    harness_root = Path(__file__).resolve().parents[1]
+    candidates = [os.environ.get("SDLC_TEST_TYPESCRIPT_NODE_MODULES", "")] + [
+        str(harness_root.parent / name / "node_modules") for name in ("SDLC_Target_Conduit", "SDLC_Target_TypeScript")
+    ]
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "typescript" / "package.json").is_file():
+            return Path(candidate)
+    return None
+
+
+def test_real_typescript_ast_helper_extracts_top_level_variables(code_trace_policy: CodeTracePolicy) -> None:
+    node_modules = _installed_typescript_node_modules()
+    if node_modules is None or shutil.which("node") is None:
+        pytest.skip("needs node and an installed typescript package (SDLC_TEST_TYPESCRIPT_NODE_MODULES)")
+    source_path = "apps/api/src/middleware/auth/authenticator.ts"
+
+    def run_with_typescript(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = {**dict(kwargs.pop("env") or {}), "NODE_PATH": str(node_modules)}
+        return subprocess.run(argv, env=env, **kwargs)  # type: ignore[call-overload]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir)
+        (target / "package.json").write_text("{}", encoding="utf-8")
+        source = target / source_path
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "export const authenticate = jwt({ algorithms: ['HS256'] });\n"
+            "export const loadUser = async (name: string): Promise<string> => name;\n"
+            "const limit: number = 3, { a } = { a: 1 };\n",
+            encoding="utf-8",
+        )
+        evidence = TypeScriptAstExtractor(run_process=run_with_typescript).extract(
+            target_path=target,
+            source_paths=[source_path],
+            policy=code_trace_policy,
+            run_id="run-profiled-code-trace",
+        )
+
+    symbols = {item["name"]: item for item in evidence.files[0]["symbols"]}
+    # A destructuring declaration names no single symbol.
+    assert set(symbols) == {"authenticate", "loadUser", "limit"}
+    assert symbols["authenticate"]["kind"] == "variable"
+    assert symbols["authenticate"]["exported"] is True
+    assert symbols["loadUser"]["kind"] == "function"
+    assert symbols["loadUser"]["async"] is True
+    assert symbols["loadUser"]["parameters"] == [{"name": "name", "type": "string", "optional": False, "rest": False}]
+    assert symbols["loadUser"]["return_type"] == "Promise<string>"
+    assert symbols["limit"]["kind"] == "variable"
+    assert symbols["limit"]["return_type"] == "number"
+    assert symbols["limit"]["exported"] is False
+    assert "authenticate" in evidence.symbols_for(source_path)
+
+
 def test_typescript_ast_bridge_rejects_parse_diagnostics_and_mismatched_paths(
     code_trace_policy: CodeTracePolicy,
 ) -> None:
@@ -415,8 +489,66 @@ def test_profiled_code_trace_uses_exact_ast_symbol_evidence(
         "typescript_compiler_ast_v1"
     )
     assert exact.symbol_evidence["version"] == TYPESCRIPT_AST_EVIDENCE_VERSION
-    prompt = json.loads(llm.prompt.split("\n\n", 1)[1])
+    prompt = json.loads(llm.prompt)
     assert prompt["symbol_evidence"]["extractor_id"] == "typescript_compiler_ast_v1"
+
+
+def test_profiled_code_trace_checks_reused_code_and_skips_preconditions(
+    code_trace_policy: CodeTracePolicy,
+) -> None:
+    source_path = "apps/api/src/DeleteService.ts"
+    test_path = "apps/api/src/DeleteService.test.ts"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir)
+        (target / source_path).parent.mkdir(parents=True)
+        (target / source_path).write_text("export class DeleteService {}\nexport class ExistingGuard {}\n", encoding="utf-8")
+        (target / test_path).write_text("export {};\n", encoding="utf-8")
+        packet = _work_packet(source_path=source_path, test_path=test_path, symbol="DeleteService")
+        packet["canonical_requirements"] += [
+            {"id": "REQ-2", "content": "Existing guard keeps refusing visitors."},
+            {"id": "PRE-1", "content": "The user is signed in."},
+        ]
+        packet["requirement_coverage"] += [
+            {
+                "requirement_id": "REQ-2",
+                "content": "Existing guard keeps refusing visitors.",
+                "design_targets": [],
+                "design_element_ids": [],
+                "planned_code_targets": [],
+                "test_intents": [],
+                "coverage_kind": "existing_code",
+                "existing_design_node_ids": ["VDN-reused"],
+                "existing_code_targets": [f"{source_path}#ExistingGuard"],
+            },
+            {
+                "requirement_id": "PRE-1",
+                "content": "The user is signed in.",
+                "design_targets": [],
+                "design_element_ids": [],
+                "planned_code_targets": [],
+                "test_intents": [],
+                "coverage_kind": "precondition",
+            },
+        ]
+
+        present = CodeTraceValidator(
+            AcceptingCodeTraceLlm(),
+            symbol_extractor=StaticAstExtractor([_symbol("DeleteService"), _symbol("ExistingGuard")]),
+        ).validate(target_path=target, work_packet=packet, code_trace_policy=code_trace_policy)
+        vanished = CodeTraceValidator(
+            AcceptingCodeTraceLlm(),
+            symbol_extractor=StaticAstExtractor([_symbol("DeleteService")]),
+        ).validate(target_path=target, work_packet=packet, code_trace_policy=code_trace_policy)
+
+    status = {row["requirement_ref"]: row["evidence_status"] for row in present.mappings}
+    assert present.ok is True
+    assert status == {"REQ-1": "covered", "REQ-2": "existing_code", "PRE-1": "precondition"}
+    # Reused code that no longer exists is a missing link like any other.
+    assert vanished.ok is False
+    assert any(
+        item.get("type") == "missing_code_symbol" and item.get("requirement_ref") == "REQ-2"
+        for item in vanished.missing_links
+    )
 
 
 def test_profiled_code_trace_rejects_browser_e2e_as_unit_test_evidence(

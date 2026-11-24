@@ -1,6 +1,6 @@
 # Requirement Model V2 Structured Output
 
-Return exactly one JSON object. Do not use markdown fences or prose.
+This section defines `arguments.requirement_model` of the `complete` action. Never return the model on its own: the response is always the one action object `{"action":"complete","arguments":{"requirement_model":{...}},"summary":"..."}`, with no markdown fences or prose.
 
 Dataset: `{{DATASET}}`
 Use case: `{{USE_CASE}}`
@@ -11,6 +11,7 @@ Source ref: `{{SOURCE_REF}}`
 - Use only facts supported by an exact quote from the source snapshot.
 - Every `explicit` item must reference one or more evidence IDs.
 - A broad source statement supports only the behavior it literally states. It does not support any unstated criterion, threshold, field, role, transition, outcome, or implementation choice.
+- `explicit` text says no more than its quoted evidence. Never settle inside an `explicit` item a point the source leaves open, such as which of two clauses wins, a wider scope ("regardless of who sends it"), or what happens to related records; represent it as an open question instead.
 - Do not write an agent-selected assumption directly. Represent every unresolved choice as an open question and propose its disposition; Python creates any approved `ASM-*`.
 - Never use an assumption to replace a missing validation criterion, matching or identity rule, limit, authorization rule, state-transition condition, or acceptance-test decision introduced by the source.
 - Use `unknown` only for a material product decision that the source does not answer and link it to an open question.
@@ -19,6 +20,7 @@ Source ref: `{{SOURCE_REF}}`
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, `proposed_disposition`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, `answer_mode`, `options`, `recommended_option`, `suggested_answer`, `why_it_is_safe`, `impact`, `uncertainty`, `reversible`, and `evidence_refs`.
+- A question's `affects` lists every requirement whose text or pass/fail result its answer can change, including an explicit rule or acceptance criterion that restates a source clause the answer could narrow.
 - For `answer_mode="short"`, return `options=[]` and `recommended_option=null`.
 - For `answer_mode="multiple_choice"`, return 2-5 option objects shaped as `{"key":"stable_key","answer":"User-facing answer","implication":"Optional impact"}`. Keys must be unique, `recommended_option` must be null or reference one option key, and bare string options are invalid.
 - Set `proposed_disposition` to `human_required`, `agent_default`, or `deferred_to_design`.
@@ -26,7 +28,7 @@ Source ref: `{{SOURCE_REF}}`
 - When the source explicitly delegates such a conventional default, keep the unresolved choice out of `BR-*`, `AC-*`, and `QR-*` until Python accepts it as an assumption. It may reference a related flow item, but use one of the exact agent-default categories above and do not mark a scenario surface `clarification_required` solely for that choice.
 - Use `deferred_to_design` for colors, layout, visual style, UI-only wording, terminology-only choices, and implementation preferences. Do not create an assumption for them.
 - Use `human_required` for source conflict, business rules, acceptance criteria, data identity, API/external contracts, authorization, security/privacy, compliance, scope, or a decision that changes whether a UI/API/business/data surface participates.
-- `effective_blocking`, root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
+- Do not return `effective_blocking`; Python derives it from `proposed_blocking` and the clarification policy. Root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
 
 ## Required source coverage pass
 
@@ -35,6 +37,8 @@ Before reducing or merging questions, account for every source clause that intro
 - Map each source-supported clause to at least one explicit goal, actor, condition, flow, postcondition, business rule, acceptance criterion, or quality requirement.
 - Do not silently omit a source-mentioned decision because its deciding criteria are missing. Preserve the supported high-level behavior as `explicit`, then represent the missing criterion through one linked open question and an unknown acceptance criterion when pass/fail depends on it.
 - Copying or paraphrasing a vague source clause does not make it operationally complete.
+- Check every pair of clauses that can apply to the same situation (for example an outcome stated for one actor and an outcome stated for anyone). When their outcomes differ and the source does not say which wins, that is a source conflict.
+- When the source changes or deletes an item and names other records related to it, check that the model states what happens to those records; when the source does not say, that is a decision the source introduces.
 - Perform question reduction only after source coverage and acceptance coverage are complete.
 
 ## Mandatory operational-decision check
@@ -50,12 +54,15 @@ For every decision-bearing clause:
 
 Use this counterfactual test: if two implementations can both satisfy the literal source text but disagree about which input is accepted, which records match, who is authorized, whether a limit is exceeded, which state follows, or whether an acceptance test passes, the source contains a material unresolved decision and the model must not return a false-clear result.
 
+Apply this test only to a decision that the source introduces: a check, limit, match, authorization, or outcome that the source mentions. If two implementations disagree only after adding a validation, policy, or constraint that the source never mentions, that is not a gap. When the source states in product terms who may act or what matches (for example, the author is the user who wrote the item), that statement is the criterion; how the system stores or compares identities belongs to Design.
+
 ## Minimum necessary question and precision rules
 
 - Ask for the missing product decision, not the implementation mechanism.
 - Do not ask for exact UI copy, visual layout, widget/control choice, class structure, database layout, framework, internal algorithm, or vendor/service selection unless the source explicitly makes it contractual.
 - Do not invent a timeout, failure mode, cancellation path, or integration scenario merely because software could fail. Ask about it only when the source mentions it or an explicit external contract requires its outcome.
 - A source-supported result is already an observable outcome. For example, if the source says an object is deleted, do not ask what success message confirms deletion unless a notification is itself required.
+- A refusal is observable to the actor and also at the application's request boundary. When the source makes the request answer part of the contract (it states one, such as HTTP 404 for one actor, or requires the server rather than the page to enforce its rules) and a refusal it introduces leaves that answer open (for example "the request is refused" for another actor or case), that answer is a source-introduced decision: two implementations that both refuse can still fail each other's acceptance tests. The rule about exact UI copy does not cover it. Ask one consolidated `api_contract` question that lists every such refusal of the use case and puts the requirement IDs of each in `affects`.
 - Prefer one question per owner decision. Merge overlapping questions and attach every affected requirement ID to the merged question. Merging must preserve every material decision; it must not remove a source-introduced gap.
 - Do not ask separately for form fields, submitted data, and validation criteria when one input-contract question can resolve the same decision.
 - Unknown actor identity is blocking only when different actors would change authorization, responsibility, available behavior, or acceptance testing. Do not require a human actor for a purely system-internal step.
@@ -65,7 +72,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 
 - `acceptance_criteria` must not be empty when the source describes a success outcome, a material business rule, or a source-mentioned alternative/exception outcome.
 - Create at least one evidence-backed acceptance criterion for the primary source-supported success outcome.
-- Every material business rule must be referenced by at least one acceptance criterion through `verifies`.
+- Every material business rule must be referenced by at least one acceptance criterion through `verifies`. `verifies` may list any requirement IDs the criterion tests: `BR-*`, `QR-*`, flow steps (`MF-*`, `AF-*`, `EF-*`), `PRE-*`, or `POST-*`.
 - Cover each source-mentioned alternative or exception whose result changes externally observable behavior.
 - An explicit acceptance criterion must contain an objective condition and observable expected outcome supported by source evidence. Merely saying “verify”, “check”, “process”, “handle”, or repeating an undefined term such as “valid” is not testable coverage.
 - When the outcome is fully specified, create an `explicit` acceptance criterion directly and do not ask a question.
@@ -76,12 +83,14 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - Return `scenario_contract.schema_version="requirement_scenario_surface_v1"` and at least one scenario.
 - Split source behavior into stable `SC-*` main, alternative, and exception scenarios. Every `MF-*`, `AF-*`, `EF-*`, `BR-*`, and `AC-*` must be covered by at least one scenario.
 - Every scenario must reference at least one behavior item, one acceptance criterion, and source evidence.
-- `scenario.requirement_refs` may contain only scenario behavior IDs (`MF-*`, `AF-*`,
-  `EF-*`, or `BR-*`). `scenario.acceptance_refs` may contain only `AC-*` IDs. Never put
+- `scenario.requirement_refs` may contain only scenario behavior and constraint IDs (`MF-*`,
+  `AF-*`, `EF-*`, `POST-*`, `BR-*`, or `QR-*`). A quality requirement needs no scenario of its
+  own: list each `QR-*` in the scenarios whose behavior it constrains, and never restate a
+  `QR-*` as a `BR-*`. `scenario.acceptance_refs` may contain only `AC-*` IDs. Never put
   an `AC-*` ID in `scenario.requirement_refs`. Together those two lists form the
   scenario-local allowlist; every surface `requirement_refs` entry must occur in one of them.
-- A scenario `open_question_refs` list must contain every open question whose `affects`
-  intersects the scenario-local allowlist, and must not contain unrelated questions.
+- Return every scenario `open_question_refs` as an empty list: Python fills it with the open
+  questions whose `affects` intersect the scenario-local allowlist.
 - Every scenario must contain exactly four surfaces: `ui`, `api`, `business_rule`, and `data`.
 
 Treat these as functional surfaces, not as claims that a particular file or technology already exists:
@@ -108,14 +117,17 @@ Surface classification rules:
 - Required surfaces describe one end-to-end scenario path, not separate independent features.
 
 - Each surface uses exactly one status: `required`, `not_applicable`, or `clarification_required`, plus a non-empty reason.
-- `required` means the product behavior must address that surface; it does not mean new code must be created. Reference the scenario-local behavior or acceptance criteria that justify it.
+- `required` means the product behavior must address that surface; it does not mean new code must be created. List in its `requirement_refs` every scenario-local behavior or acceptance criterion this surface takes part in realizing; an item may appear on several surfaces (for example a step the actor performs through the interface belongs to `ui` and to the surfaces it triggers). Design uses these lists as each surface's scope.
+- Never leave an item off a surface to keep an open question away from it: an attached question only means that surface's details may change with the answer.
 - `not_applicable` requires a reason and empty requirement/question references.
 - Use `clarification_required` only when the human answer can change whether that surface participates. It must reference affected behavior and an open question.
 - A known required surface may still list open questions about its detailed behavior without changing its status to `clarification_required`.
-- Map every scenario open question to at least one surface. Do not create file names, routes, classes, database tables, framework choices, or repository claims.
+- A `clarification_required` surface lists the open question that decides whether it participates.
+  When you leave an open question unmapped in a scenario, Python maps it to that scenario's
+  `required` surfaces whose `requirement_refs` it intersects; one surface per scenario is enough.
+  Do not create file names, routes, classes, database tables, framework choices, or repository claims.
 - Put a question in a surface `open_question_refs` only when that question's `affects`
-  intersects that surface's `requirement_refs`. Otherwise map it to the related surface;
-  never attach a question merely to satisfy the mapping requirement.
+  intersects that surface's `requirement_refs`.
 
 ## Exact encoding for unknown content
 
@@ -137,14 +149,17 @@ Surface classification rules:
 - Do not turn a failed source tool call, unread source, missing quote, or ungrounded claim
   into a human question. Use `source.search`/`source.read` and repair the evidence first.
 - Use `category="source_conflict"` only when at least two grounded evidence items state
-  incompatible facts that require a human choice. Cite both evidence IDs; source conflict
-  is always blocking.
+  incompatible facts that require a human choice; two clauses whose conditions can hold at
+  the same time but whose outcomes differ are incompatible. Cite both evidence IDs; source
+  conflict is always blocking.
 - All other open questions represent a missing business/product decision. Every question
   must cite source evidence showing the supported clause whose deciding detail is absent.
 - Never ask a human to repair a snapshot, catalog, fingerprint, tool argument, JSON shape,
   or validation error.
 
-## Required JSON shape
+## Required `requirement_model` shape
+
+Put this object inside the `complete` action described above.
 
 ```json
 {
@@ -192,7 +207,7 @@ Surface classification rules:
   "acceptance_criteria": [{"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["BR-1"]}],
   "quality_requirements": [],
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
-  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "multiple_choice", "options": [{"key": "option_a", "answer": "First user-facing answer", "implication": "Optional impact"}, {"key": "option_b", "answer": "Second user-facing answer", "implication": null}], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
+  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "multiple_choice", "options": [{"key": "option_a", "answer": "First user-facing answer", "implication": "Optional impact"}, {"key": "option_b", "answer": "Second user-facing answer", "implication": null}], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
   "decisions": [],
   "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}

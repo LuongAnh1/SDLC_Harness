@@ -19,6 +19,7 @@ from .reasonable_defaults_v1 import (
     EVALUATION_FIELD,
     validate_agent_reasonable_default_integrity,
 )
+from ...core.coerce import dict_items as _dict_items
 
 
 ARTIFACT_KEY = "requirement_assumption_challenge"
@@ -222,10 +223,6 @@ def _append_unique(item: dict[str, Any], field: str, value: str) -> None:
     if value not in values:
         values.append(value)
     item[field] = values
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

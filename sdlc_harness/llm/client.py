@@ -7,10 +7,13 @@ OpenAI.
 
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from dataclasses import dataclass, field
+import hashlib
 import http.client
 import json
+from pathlib import Path
 from typing import Any
 import urllib.error
 import urllib.request
@@ -182,6 +185,8 @@ class LlmClient:
             "total_tokens": 0,
         }
         self._usage_reported_calls = 0
+        # Logical provider calls this client started (transport retries of one call count once); U1.2 reads it.
+        self.provider_calls = 0
 
     def usage_summary(self) -> dict[str, object]:
         """Return aggregate provider usage without retaining prompts or completions."""
@@ -206,11 +211,25 @@ class LlmClient:
         model: str | None = None,
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
+        images: list[dict[str, object]] | tuple[dict[str, object], ...] = (),
+        accepts_images: bool = False,
     ) -> LlmCompletion:
         """Sinh completion và giữ finish_reason/usage cho structured-output flow."""
 
+        user_content: object = prompt
+        if images:
+            user_content = [
+                {"type": "text", "text": prompt},
+                *[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{item['base64']}"},
+                    }
+                    for item in _validated_images(images, accepts_images=accepts_images)
+                ],
+            ]
         return self.complete_messages(
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_content}],
             json_mode=json_mode,
             max_tokens=max_tokens,
             model=model,
@@ -221,7 +240,7 @@ class LlmClient:
     def complete_messages(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, object]],
         json_mode: bool = False,
         max_tokens: int | None = None,
         model: str | None = None,
@@ -245,6 +264,7 @@ class LlmClient:
             "json_mode": json_mode,
             "reasoning_effort": selected_effort or None,
         }
+        self.provider_calls += 1
         emit_current(
             category="llm",
             event_type="llm_call_started",
@@ -257,7 +277,7 @@ class LlmClient:
                 from .fake import fake_completion
 
                 prompt = next(
-                    (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                    (_message_text(item.get("content")) for item in reversed(messages) if item.get("role") == "user"),
                     "",
                 )
                 completion = LlmCompletion(content=fake_completion(prompt), finish_reason="fake")
@@ -306,22 +326,6 @@ class LlmClient:
             },
         )
         return completion
-
-    def _call_chat_completions(
-        self,
-        *,
-        system: str,
-        prompt: str,
-        json_mode: bool = False,
-        max_tokens: int | None = None,
-    ) -> LlmCompletion:
-        """Gọi API Chat Completions tương thích OpenAI bằng stdlib."""
-
-        return self._call_chat_completions_messages(
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            json_mode=json_mode,
-            max_tokens=max_tokens,
-        )
 
     def _call_chat_completions_messages(
         self,
@@ -427,6 +431,59 @@ class LlmClient:
 
 def _dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _validated_images(
+    images: list[dict[str, object]] | tuple[dict[str, object], ...],
+    *,
+    accepts_images: bool,
+) -> list[dict[str, object]]:
+    if not accepts_images:
+        raise HarnessError("llm_images_not_allowed", "This LLM call profile does not accept images.")
+    normalized: list[dict[str, object]] = []
+    for index, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
+            raise HarnessError("llm_image_invalid", f"Image {index} must be an object.")
+        label = str(image.get("label") or "").strip()
+        raw_path = str(image.get("path") or "").strip()
+        expected = str(image.get("sha256") or "").strip().lower()
+        if not label or not raw_path or len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+            raise HarnessError("llm_image_invalid", f"Image {index} needs label, path and a SHA-256 digest.")
+        path = Path(raw_path)
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise HarnessError("llm_image_invalid", f"Image {label!r} cannot be read: {exc}") from exc
+        if path.suffix.lower() != ".png" or not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HarnessError("llm_image_invalid", f"Image {label!r} is not a PNG file.")
+        actual = hashlib.sha256(payload).hexdigest()
+        if actual != expected:
+            raise HarnessError(
+                "llm_image_hash_mismatch",
+                f"Image {label!r} no longer matches its approved SHA-256 digest.",
+            )
+        normalized.append(
+            {
+                "label": label,
+                "path": str(path),
+                "sha256": actual,
+                "bytes": len(payload),
+                "base64": base64.b64encode(payload).decode("ascii"),
+            }
+        )
+    return normalized
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text" and str(item.get("text") or "")
+    )
 
 
 def _call_category(system: str) -> str:

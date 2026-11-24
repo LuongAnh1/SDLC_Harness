@@ -8,9 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from sdlc_harness.agents.designer import DesignDraft, DesignerAgent
 from sdlc_harness.agents.requirements import normalize_and_validate_requirement_model_v2
-from sdlc_harness.agents.validator import TraceabilityResult, ValidatorAgent, build_requirement_graph_v2
+from sdlc_harness.agents.validator import TraceabilityResult, build_requirement_graph_v2
 from sdlc_harness.artifacts import (
     CanonicalRequirementInput,
     read_approved_requirement_input,
@@ -20,7 +19,6 @@ from sdlc_harness.artifacts import (
 )
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.fake import fake_design_model
 from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
@@ -52,28 +50,6 @@ class CompleteTraceClient:
                 for item in requirements
             ]
         )
-
-
-class CanonicalRepairingDesigner:
-    def __init__(self) -> None:
-        self.draft_models = []
-        self.repair_models = []
-
-    def draft(self, *, requirement_packet: str, formal_use_case: str, canonical_requirement=None) -> DesignDraft:
-        self.draft_models.append(canonical_requirement)
-        return DesignDraft(analysis_report="V2 architecture", design_model=fake_design_model())
-
-    def update_design(
-        self,
-        *,
-        requirement_packet: str,
-        formal_use_case: str,
-        current_design: str,
-        audit_report: str,
-        canonical_requirement=None,
-    ) -> str:
-        self.repair_models.append(canonical_requirement)
-        return fake_design_model()
 
 
 class CanonicalRepairValidator:
@@ -325,32 +301,6 @@ class RequirementInputV2Test(unittest.TestCase):
             self.assertNotIn("GOAL-1", ids)
             self.assertNotIn("ACT-1", ids)
             self.assertEqual(graph["revision"], 1)
-
-    def test_designer_and_validator_use_canonical_v2_ids(self) -> None:
-        with TemporaryDirectory() as directory:
-            _, _, _, model = self._v2_bundle(directory)
-            designer_client = CaptureClient(["architecture", fake_design_model()])
-            DesignerAgent(designer_client).draft(
-                requirement_packet="review packet",
-                formal_use_case="review formal",
-                canonical_requirement=model,
-            )
-            prompt = designer_client.prompts[0]
-            self.assertLess(prompt.index("Canonical Requirement Model V2"), prompt.index("Requirement Packet"))
-            self.assertIn('"id": "MF-1"', prompt)
-
-            from sdlc_harness.agents.designer import parse_design_model
-
-            parsed = parse_design_model(fake_design_model())
-            trace = ValidatorAgent(CompleteTraceClient()).construct_traceability(
-                requirement_packet="ignored projection",
-                canonical_requirement=model,
-                class_graph=parsed.class_graph,
-                sequence_graph=parsed.sequence_graph,
-            )
-            self.assertTrue(trace.ok)
-            self.assertEqual(trace.mode, "traceability_v2")
-            self.assertEqual(trace.class_trace[0]["requirement"], "PRE-1")
 
 if __name__ == "__main__":
     unittest.main()

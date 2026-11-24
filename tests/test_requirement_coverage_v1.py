@@ -153,7 +153,49 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     assert "A named failure does not put other possible failures in scope" in prompt
     assert "Apply this counterfactual test" in prompt
     assert "exists only after adding a choice" in prompt
+    # Conduit UC1: undefined categories and a stricter deletion rule than the Refiner's made the reviewer guess.
+    assert "`integrations` means an external system" in prompt
+    assert "`placeholders` means model content still waiting for a decision" in prompt
+    assert "already captures a category's\n  source-scoped gap, mark that category `partial`" in prompt
+    assert "other records that the source names in relation to that\n  item is source-scoped" in prompt
+    # Conduit UC4 H-r1: "refused and nothing created" was judged testable at the request boundary.
+    assert "A refusal the source introduces is a source-scoped gap" in prompt
+    assert '`decision_category="api_contract"` that lists every such refusal' in prompt
+    # Silent interpretations are judged (accepted / needs_fix) and never become questions.
+    assert "## Interpretation check" in prompt
+    assert "An interpretation is never a question candidate" in prompt
+    assert '"interpretations": [{"requirement_ids"' in prompt
     assert result.analysis["review_mode"] == "hybrid"
+
+
+def test_interpretation_findings_are_checked_and_needs_fix_ones_are_selected() -> None:
+    from sdlc_harness.agents.requirements import needs_fix_interpretations
+
+    source_text = (ROOT / "fixtures/etour/UC2.txt").read_text(encoding="utf-8")
+    model = normalize_and_validate_requirement_model_v2(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8")),
+        {"SRC-1": source_text},
+    ).model
+    accepted = {"requirement_ids": ["BR-1"], "evidence_refs": [], "choice": "c", "verdict": "accepted", "reason": "r", "fix": None}
+    wrong = {**accepted, "requirement_ids": ["AC-2", "BR-1"], "verdict": "needs_fix", "fix": "Narrow AC-2."}
+    payload = _deterministic_analysis(model)
+    payload["interpretations"] = [accepted, wrong]
+
+    assert needs_fix_interpretations(_validate_analysis(payload, model)) == [wrong]
+
+    for broken, message in (
+        ({**wrong, "fix": " "}, "fix must say what to change"),
+        ({**accepted, "verdict": "maybe"}, "verdict must be accepted or needs_fix"),
+        ({**accepted, "requirement_ids": []}, "requirement_ids must not be empty"),
+        ({**accepted, "requirement_ids": ["BR-99"]}, "dangling refs: BR-99"),
+        ({**accepted, "reason": ""}, "non-empty choice and reason"),
+    ):
+        payload["interpretations"] = [broken]
+        with pytest.raises(HarnessError, match=message):
+            _validate_analysis(payload, model)
+    payload.pop("interpretations")
+    with pytest.raises(HarnessError, match="interpretations must be an array"):
+        _validate_analysis(payload, model)
 
 
 def test_semantic_candidate_expands_existing_open_question_refs_to_stable_requirements() -> None:
@@ -172,6 +214,7 @@ def test_semantic_candidate_expands_existing_open_question_refs_to_stable_requir
     result = _validate_analysis(payload, normalized.model)
 
     assert result["question_candidates"][0]["affects"] == question["affects"]
+    assert result["question_candidates"][0]["existing_question_id"] == question["id"]
     assert result["normalizations"] == [
         {
             "kind": "existing_open_question_affects_expanded",
@@ -312,6 +355,75 @@ def test_semantic_candidate_cannot_overwrite_or_cross_link_deterministic_branch_
 
     assert len(merged["question_candidates"]) == len(deterministic["question_candidates"])
     assert all(set(item["affects"]) != {"AF-1", "EF-2"} for item in merged["question_candidates"])
+
+
+def test_shared_acceptance_ref_does_not_merge_distinct_semantic_candidate() -> None:
+    model = RequirementModelV2.from_dict(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8"))
+    )
+    deterministic = _deterministic_analysis(model)
+    semantic = deepcopy(deterministic)
+    semantic["question_candidates"] = [
+        {
+            "category": "quality_attributes",
+            "question": "When should the cancellation controls become available again?",
+            "why_it_matters": "The answer changes the observable acceptance check.",
+            "answer_mode": "short",
+            "options": [],
+            "recommended_option": None,
+            "suggested_answer": None,
+            "proposed_disposition": "human_required",
+            "decision_category": "observable_behavior",
+            "why_it_is_safe": None,
+            "reversible": False,
+            "impact": "medium",
+            "uncertainty": "high",
+            "affects": ["AC-3"],
+            "evidence_refs": ["E-10"],
+        }
+    ]
+
+    merged = _merge_analysis(deterministic, semantic)
+
+    assert any(set(item["affects"]) == {"AC-3"} for item in merged["question_candidates"])
+
+
+def test_candidate_reuses_only_explicit_existing_question_id() -> None:
+    model = RequirementModelV2.from_dict(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8"))
+    )
+    deterministic = _deterministic_analysis(model)
+    branch_candidate = next(
+        item for item in deterministic["question_candidates"] if item.get("subject_ref") == "AF-1"
+    )
+    distinct_candidate = {
+        "category": "quality_attributes",
+        "question": "When should the cancellation controls become available again?",
+        "why_it_matters": "The answer changes the observable acceptance check.",
+        "answer_mode": "short",
+        "options": [],
+        "recommended_option": None,
+        "suggested_answer": None,
+        "proposed_disposition": "human_required",
+        "decision_category": "observable_behavior",
+        "why_it_is_safe": None,
+        "reversible": False,
+        "impact": "medium",
+        "uncertainty": "high",
+        "affects": ["AC-3"],
+        "evidence_refs": ["E-10"],
+    }
+
+    revised, added = _adopt_candidates(
+        model,
+        [branch_candidate, distinct_candidate],
+        max_new_questions=1,
+    )
+
+    assert branch_candidate["adopted_question_id"] == "Q-1"
+    assert added == ["Q-5"]
+    assert distinct_candidate["adopted_question_id"] == "Q-5"
+    assert len(revised.open_questions) == 5
 
 
 def test_candidates_outside_five_question_boundary_are_recorded_as_deferred() -> None:

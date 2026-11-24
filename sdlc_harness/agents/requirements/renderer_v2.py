@@ -9,6 +9,7 @@ from .clarification_policy_v1 import (
     DEFERRED_TO_DESIGN,
 )
 from .model_v2 import RequirementModelV2
+from ...core.coerce import dict_items as _dict_items
 
 
 def render_requirement_packet_v2(model: RequirementModelV2) -> str:
@@ -60,9 +61,8 @@ def render_formal_use_case_v2(model: RequirementModelV2) -> str:
         for item in main:
             action = _content(item, "action")
             actor = str(item.get("actor") or "").strip()
-            target = str(item.get("target") or "").strip()
-            text = " ".join(part for part in (actor, action, target) if part).strip()
-            lines.append(f"[{item.get('id', '')}] {text}")
+            text = " ".join(part for part in (actor, action) if part).strip()
+            lines.append(f"[{item.get('id', '')}] {text}{_target_suffix(item)}")
     else:
         lines.append("[NONE]")
     lines.append("Alternative Flows:")
@@ -109,11 +109,16 @@ def _packet_main_flow(lines: list[str], items: Any) -> None:
     lines.extend(["## Main Flow", ""])
     values = _dict_items(items)
     for item in values:
-        target = f" {item.get('target')}" if item.get("target") else ""
-        lines.append(f"- [{item.get('id', '')}] {item.get('actor', '')} {_content(item, 'action')}{target}".rstrip())
+        lines.append(f"- [{item.get('id', '')}] {item.get('actor', '')} {_content(item, 'action')}".rstrip() + _target_suffix(item))
     if not values:
         lines.append("- none")
     lines.append("")
+
+
+def _target_suffix(item: dict[str, object]) -> str:
+    # The action usually already names its object, so the target is labelled instead of appended to the sentence.
+    target = str(item.get("target") or "").strip()
+    return f" (target: {target})" if target else ""
 
 
 def _packet_branch_flows(lines: list[str], title: str, items: Any) -> None:
@@ -281,8 +286,3 @@ def _status_suffix(item: dict[str, Any]) -> str:
     status = str(item.get("status") or "")
     return f" _(status: {status})_" if status else ""
 
-
-def _dict_items(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]

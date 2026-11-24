@@ -1,0 +1,2339 @@
+{
+  "artifact_digest": "sha256:c4356ab9f7a07b1412f70941f3a7557601e3225e007efa1d80f4d9e37e9636c6",
+  "edges": [
+    {
+      "branch_group": "",
+      "from": "VDN-17b0bc2770432ef2",
+      "guard": "",
+      "id": "VDE-80a489e58a5b6d7f",
+      "kind": "calls",
+      "label": "Root forwards runtime inputs to AppShell",
+      "order": 1,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-b31b85277d1d8727"
+    },
+    {
+      "branch_group": "",
+      "from": "VDN-b31b85277d1d8727",
+      "guard": "",
+      "id": "VDE-31c47d879e1ee5f4",
+      "kind": "calls",
+      "label": "AppShell renders CulturalHeritageScreen with the available CulturalHeritage records for selection and elimination",
+      "order": 2,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-e05e8071615706e0"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [
+          {
+            "from": "agencyOperatorSession",
+            "required": true,
+            "to": "authenticated operator session"
+          }
+        ],
+        "consumer_operation": "Confirm and submit elimination of the selected CulturalHeritage",
+        "error_mapping": [
+          {
+            "from": "401 Unauthorized",
+            "required": true,
+            "to": "operator is not logged in, elimination not attempted"
+          },
+          {
+            "from": "409 Conflict",
+            "required": true,
+            "to": "confirmation absent, nothing deleted"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "DELETE /cultural-heritage/{culturalHeritageId}",
+        "response_mapping": [
+          {
+            "from": "204 No Content",
+            "required": true,
+            "to": "operator is notified of the successful elimination and the item is removed from the list"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-e05e8071615706e0",
+      "guard": "",
+      "id": "VDE-611d516003182d09",
+      "kind": "calls",
+      "label": "the operator's confirmed elimination is submitted to the DELETE cultural heritage request boundary",
+      "order": 3,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-9c276a1d75ac9f49"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritage",
+        "error_mapping": [
+          {
+            "from": "confirmation not supplied",
+            "required": true,
+            "to": "elimination rejected and the cultural choice kept"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageAfterConfirmation",
+        "response_mapping": [
+          {
+            "from": "cultural heritage deleted",
+            "required": true,
+            "to": "successful elimination reported to the deletion route"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-9c276a1d75ac9f49",
+      "guard": "",
+      "id": "VDE-e19a23f52c0239e0",
+      "kind": "calls",
+      "label": "the deletion route invokes the confirmation-gated elimination rule with the culturalHeritageId and the operator confirmation",
+      "order": 4,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-c08451c6db1f6af4"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritageAfterConfirmation",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageRecord",
+        "response_mapping": [
+          {
+            "from": "one CulturalHeritage record deleted",
+            "required": true,
+            "to": "confirmed cultural heritage deleted for the rule"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-c08451c6db1f6af4",
+      "guard": "",
+      "id": "VDE-c8df64f6b031285f",
+      "kind": "writes",
+      "label": "the confirmation-gated rule deletes the selected CulturalHeritage record by its identifier",
+      "order": 5,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-f972f22cbbcf1e2f"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritageAfterConfirmation",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageRecord",
+        "response_mapping": [
+          {
+            "from": "one CulturalHeritage record deleted",
+            "required": true,
+            "to": "confirmed cultural heritage deleted"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-f972f22cbbcf1e2f",
+      "guard": "",
+      "id": "VDE-18beb329b6b03994",
+      "kind": "returns",
+      "label": "persistence reports the deletion of the selected CulturalHeritage back to the rule",
+      "order": 6,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-c08451c6db1f6af4"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritage",
+        "error_mapping": [
+          {
+            "from": "confirmation not supplied",
+            "required": true,
+            "to": "elimination rejected and the cultural choice kept"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageAfterConfirmation",
+        "response_mapping": [
+          {
+            "from": "cultural heritage deleted",
+            "required": true,
+            "to": "successful elimination of the cultural reported to the caller"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-c08451c6db1f6af4",
+      "guard": "",
+      "id": "VDE-7301b1415d915ed3",
+      "kind": "returns",
+      "label": "the rule returns the successful elimination or the rejection to the deletion route",
+      "order": 7,
+      "scenario_id": "SC-1",
+      "terminal": false,
+      "to": "VDN-9c276a1d75ac9f49"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [
+          {
+            "from": "agencyOperatorSession",
+            "required": true,
+            "to": "authenticated operator session"
+          }
+        ],
+        "consumer_operation": "Handle elimination result and show success notice or rejection",
+        "error_mapping": [
+          {
+            "from": "401 Unauthorized",
+            "required": true,
+            "to": "operator is prompted to log in and the list is unchanged"
+          },
+          {
+            "from": "409 Conflict",
+            "required": true,
+            "to": "operator is informed that confirmation is required and the item stays listed"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "DELETE /cultural-heritage/{culturalHeritageId}",
+        "response_mapping": [
+          {
+            "from": "204 No Content",
+            "required": true,
+            "to": "the deleted cultural heritage is removed from the list and the system notifies the successful elimination"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-9c276a1d75ac9f49",
+      "guard": "",
+      "id": "VDE-c2174598b7b142f5",
+      "kind": "returns",
+      "label": "the request boundary returns the successful elimination (204) or the rejection (409) to the CulturalHeritage screen",
+      "order": 8,
+      "scenario_id": "SC-1",
+      "terminal": true,
+      "to": "VDN-e05e8071615706e0"
+    },
+    {
+      "branch_group": "",
+      "from": "VDN-8154a2b82dcbdedd",
+      "guard": "",
+      "id": "VDE-9ad7bfbafbad5893",
+      "kind": "depends_on",
+      "label": "SC-2 depends on SC-1",
+      "order": 1,
+      "scenario_id": "SC-2",
+      "terminal": false,
+      "to": "VDN-e05e8071615706e0"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "Confirm cancellation of the CulturalHeritage deletion from the open confirmation dialog",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "selectedCulturalHeritageId",
+            "required": true,
+            "to": "selectedCulturalHeritageId"
+          },
+          {
+            "from": "cancellationConfirmed",
+            "required": true,
+            "to": "cancellationConfirmed"
+          },
+          {
+            "from": "dialogOpen",
+            "required": true,
+            "to": "dialogOpen"
+          }
+        ],
+        "provider_operation": "confirmDeletionCancellation",
+        "response_mapping": [
+          {
+            "from": "cancellation confirmed before the deletion request is dispatched",
+            "required": true,
+            "to": "the deletion request is never dispatched and the selected cultural heritage stays unchanged with the cancellation confirmation announced"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-8154a2b82dcbdedd",
+      "guard": "",
+      "id": "VDE-63dff33432416583",
+      "kind": "calls",
+      "label": "the operator's confirmed cancellation from the open confirmation dialog is resolved by the cancellation rule",
+      "order": 2,
+      "scenario_id": "SC-2",
+      "terminal": false,
+      "to": "VDN-aebccf9fe2287c31"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "Show the cancellation confirmation and re-enable the screen controls",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "selectedCulturalHeritageId",
+            "required": true,
+            "to": "selectedCulturalHeritageId"
+          },
+          {
+            "from": "cancellationConfirmed",
+            "required": true,
+            "to": "cancellationConfirmed"
+          },
+          {
+            "from": "dialogOpen",
+            "required": true,
+            "to": "dialogOpen"
+          }
+        ],
+        "provider_operation": "confirmDeletionCancellation",
+        "response_mapping": [
+          {
+            "from": "cancellation confirmed before the deletion request is dispatched",
+            "required": true,
+            "to": "dialog closes, input controls are re-enabled, the deletion request was never dispatched, the selected cultural heritage stays listed and the cancellation confirmation is announced with no deletion-success notification"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-aebccf9fe2287c31",
+      "guard": "",
+      "id": "VDE-8a6d9f9989ffe699",
+      "kind": "returns",
+      "label": "the rule returns the never-dispatched deletion, the unchanged selection and the cancellation confirmation to the screen",
+      "order": 3,
+      "scenario_id": "SC-2",
+      "terminal": true,
+      "to": "VDN-8154a2b82dcbdedd"
+    },
+    {
+      "branch_group": "",
+      "from": "VDN-e56af334b66c19a6",
+      "guard": "",
+      "id": "VDE-15c3a950c5fc4aac",
+      "kind": "depends_on",
+      "label": "SC-3 depends on SC-1",
+      "order": 1,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-e05e8071615706e0"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [
+          {
+            "from": "agencyOperatorSession",
+            "required": true,
+            "to": "authenticated operator session"
+          }
+        ],
+        "consumer_operation": "Handle interrupted confirmed elimination of the selected CulturalHeritage",
+        "error_mapping": [
+          {
+            "from": "503 Service Unavailable",
+            "required": true,
+            "to": "deletion failed and rolled back; selected cultural heritage unchanged; operator informed connection interrupted and can retry"
+          },
+          {
+            "from": "401 Unauthorized",
+            "required": true,
+            "to": "operator not logged in; interruption failure not processed"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "DELETE /cultural-heritage/{culturalHeritageId}",
+        "response_mapping": [],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-e56af334b66c19a6",
+      "guard": "",
+      "id": "VDE-c01771968c035f59",
+      "kind": "calls",
+      "label": "the confirmation dialog forwards the interrupted confirmed elimination to the DELETE CulturalHeritage request boundary",
+      "order": 2,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-b2af0c88ed45e400"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritage",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          },
+          {
+            "from": "etourConnectionInterrupted",
+            "required": true,
+            "to": "etourConnectionInterrupted"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageAfterConfirmation",
+        "response_mapping": [
+          {
+            "from": "the in-progress deletion is rolled back and the selected cultural heritage remains unchanged",
+            "required": true,
+            "to": "API reports the connection interruption failure to the caller"
+          },
+          {
+            "from": "the connection-interruption failure is reported so the operation can be retried and no success notification is produced",
+            "required": true,
+            "to": "API reports the connection interruption failure to the caller"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-b2af0c88ed45e400",
+      "guard": "",
+      "id": "VDE-3997ca427492e037",
+      "kind": "calls",
+      "label": "the deletion boundary invokes the deletion rule with the selected CulturalHeritage identifier, the operator confirmation and the observed ETOUR connection interruption signal",
+      "order": 3,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-7591323b8e28fe0f"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritageAfterConfirmation",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "etourConnectionInterrupted",
+            "required": true,
+            "to": "etourConnectionInterrupted"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageRecord",
+        "response_mapping": [],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-7591323b8e28fe0f",
+      "guard": "",
+      "id": "VDE-b92cb5e27a9f7bc7",
+      "kind": "writes",
+      "label": "the interruption rollback rule attempts to delete the selected CulturalHeritage record by its identifier",
+      "order": 4,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-aebba2a693dbdd96"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritageAfterConfirmation",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "etourConnectionInterrupted",
+            "required": true,
+            "to": "etourConnectionInterrupted"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageRecord",
+        "response_mapping": [
+          {
+            "from": "the deletion is rolled back and the selected cultural heritage remains unchanged",
+            "required": true,
+            "to": "the interruption failure is reported so the operation can be retried"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-aebba2a693dbdd96",
+      "guard": "",
+      "id": "VDE-58263f60eea24ec4",
+      "kind": "returns",
+      "label": "persistence reports the rolled-back interruption failure and unchanged CulturalHeritage back to the rule",
+      "order": 5,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-7591323b8e28fe0f"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [],
+        "consumer_operation": "deleteCulturalHeritage",
+        "error_mapping": [],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          },
+          {
+            "from": "etourConnectionInterrupted",
+            "required": true,
+            "to": "etourConnectionInterrupted"
+          }
+        ],
+        "provider_operation": "deleteCulturalHeritageAfterConfirmation",
+        "response_mapping": [
+          {
+            "from": "the in-progress deletion is rolled back and the selected cultural heritage remains unchanged",
+            "required": true,
+            "to": "API reports the connection interruption failure to the caller"
+          },
+          {
+            "from": "the connection-interruption failure is reported so the operation can be retried and no success notification is produced",
+            "required": true,
+            "to": "API reports the connection interruption failure to the caller"
+          }
+        ],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-7591323b8e28fe0f",
+      "guard": "",
+      "id": "VDE-aa294e2d409bff3f",
+      "kind": "returns",
+      "label": "the rule reports the rolled-back interruption failure to the deletion boundary",
+      "order": 6,
+      "scenario_id": "SC-3",
+      "terminal": false,
+      "to": "VDN-b2af0c88ed45e400"
+    },
+    {
+      "boundary_contract": {
+        "auth_mapping": [
+          {
+            "from": "agencyOperatorSession",
+            "required": true,
+            "to": "authenticated operator session"
+          }
+        ],
+        "consumer_operation": "Handle connection interruption result and inform the Agency Operator",
+        "error_mapping": [
+          {
+            "from": "503 Service Unavailable",
+            "required": true,
+            "to": "the dialog alert region informs the Agency Operator that the connection was interrupted, the selected cultural heritage remains unchanged, no success notification is shown, and the operation can be retried"
+          },
+          {
+            "from": "401 Unauthorized",
+            "required": true,
+            "to": "operator is prompted to log in and no interruption result is shown"
+          }
+        ],
+        "input_mapping": [
+          {
+            "from": "culturalHeritageId",
+            "required": true,
+            "to": "culturalHeritageId"
+          },
+          {
+            "from": "confirmation",
+            "required": true,
+            "to": "confirmation"
+          }
+        ],
+        "provider_operation": "DELETE /cultural-heritage/{culturalHeritageId}",
+        "response_mapping": [],
+        "schema_version": "boundary_contract_v1"
+      },
+      "branch_group": "",
+      "from": "VDN-b2af0c88ed45e400",
+      "guard": "",
+      "id": "VDE-8ce120fc1da21f21",
+      "kind": "returns",
+      "label": "the request boundary reports the connection-interruption failure to the confirmation dialog for retry",
+      "order": 7,
+      "scenario_id": "SC-3",
+      "terminal": true,
+      "to": "VDN-e56af334b66c19a6"
+    }
+  ],
+  "nodes": [
+    {
+      "component_id": "web",
+      "contract": "Root forwards agencyOperatorSession, culturalHeritageRecords to the next component on composition_path.",
+      "disposition": "modify",
+      "evidence_reason": "",
+      "evidence_refs": [
+        "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+      ],
+      "id": "VDN-17b0bc2770432ef2",
+      "kind": "ui_interaction",
+      "name": "Root forwards runtime inputs",
+      "requirement_refs": [
+        "AC-4",
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "PRE-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/main.tsx",
+          "owner_ref": "RLA-1d33fe75847367a2",
+          "owner_symbol": "main",
+          "relation": "owned_by"
+        },
+        "evidence_refs": [
+          "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+          "RLA-1d33fe75847367a2"
+        ],
+        "runtime_kind": "entrypoint",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/main.tsx",
+          "symbol": "Root"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:web:wire:Root",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "ui",
+      "surface_contract": {
+        "entrypoint": "apps/web/src/main.tsx#Root",
+        "outcomes": [
+          "next component receives agencyOperatorSession, culturalHeritageRecords"
+        ],
+        "runtime_surface": {
+          "composition_path": [
+            "apps/web/src/main.tsx#Root"
+          ],
+          "entrypoint": "apps/web/src/main.tsx#Root",
+          "evidence_refs": [
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+          ],
+          "forwarded_inputs": [
+            {
+              "names": [
+                "agencyOperatorSession",
+                "culturalHeritageRecords"
+              ],
+              "screen_id": "culturalheritage-management",
+              "to": "apps/web/src/AppShell.tsx#AppShell"
+            }
+          ],
+          "required_inputs": [],
+          "role": "composition_wiring",
+          "runnable_status": "bound",
+          "schema_version": "runtime_surface_binding_v1",
+          "screen_id": "sc-1-wiring"
+        },
+        "schema_version": "design_surface_contract_v1",
+        "states": [
+          "forwarding"
+        ],
+        "surface": "ui",
+        "transitions": [
+          {
+            "action": "receive agencyOperatorSession, culturalHeritageRecords",
+            "from": "mounted",
+            "outcome": "next component receives agencyOperatorSession, culturalHeritageRecords",
+            "to": "forwarding"
+          }
+        ],
+        "validations": []
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "api",
+      "contract": "Idempotent interruption rollback rule for the confirmed CulturalHeritage deletion: it is invoked with culturalHeritageId, the operator confirmation and the etourConnectionInterrupted observation that the request boundary produced from its completed outbound idempotent DELETE to the ETOUR CulturalHeritage service. The rule uses the same culturalHeritageId-derived key as the boundary's deletion attempt. When etourConnectionInterrupted is true it reconciles the ETOUR-side attempt under that key, drives the attempt and the local persistence transaction to the not-committed state so the selected CulturalHeritage remains unchanged at the ETOUR boundary and in the store, produces no success notification, and reports the interruption failure for a safe idempotent retry. When etourConnectionInterrupted is false the confirmed deletion proceeds and commits.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the inspected api service symbols apps/api/src/health.ts#readHealth and apps/api/src/health.ts#HealthService only compute a health snapshot, so nothing decides that an ETOUR connection interruption before deletion completion must roll back the operation and report failure. This exception belongs to the same confirmed deletion rule planned for SC-1, so the branch projection reuses the SC-1 candidate runtime target apps/api/src/cultural-heritage.ts#deleteCulturalHeritageAfterConfirmation; only the EF-1/AC-3 interruption rollback behavior is declared here.",
+      "evidence_refs": [],
+      "id": "VDN-7591323b8e28fe0f",
+      "kind": "business_rule",
+      "name": "ETOUR connection interruption rollback rule",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/api/src/app.ts",
+          "owner_ref": "RLA-d7c79e1e9db02b0a",
+          "owner_symbol": "createApp",
+          "relation": "called_by"
+        },
+        "evidence_refs": [
+          "RLA-d7c79e1e9db02b0a",
+          "RLA-4e36cf13bc6a378c"
+        ],
+        "runtime_kind": "service",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "api",
+          "path": "apps/api/src/cultural-heritage.ts",
+          "symbol": "deleteCulturalHeritageAfterConfirmation"
+        }
+      },
+      "scenario_id": "SC-3",
+      "semantic_key": "SC-3:api:business_rule",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b",
+        "repo:apps/api/src/health.ts#L1@sha256:7a3cf4007bb609f4396a3b0e3f66b8114f233fb6680b7c49fbbff84674969a55"
+      ],
+      "surface": "business_rule",
+      "surface_contract": {
+        "decision": "On invocation with culturalHeritageId, confirmation and the etourConnectionInterrupted observation produced by the request boundary's outbound idempotent DELETE to ETOUR, the rule acts inside one culturalHeritageId-keyed idempotency/reconciliation scope covering both the ETOUR-side attempt and the local persistence write. When etourConnectionInterrupted is true, it reconciles the ETOUR attempt under that key and drives it to not-committed, rolls back the staged local deletion under the same key so the selected CulturalHeritage is unchanged at the ETOUR boundary and in persistence, produces no success notification, and reports the interruption failure so the Agency Operator can retry idempotently. When false, the confirmed deletion proceeds normally and commits.",
+        "inputs": [
+          "culturalHeritageId",
+          "confirmation",
+          "etourConnectionInterrupted"
+        ],
+        "outcomes": [
+          "the ETOUR-side deletion attempt and the local persistence write are both resolved to not-committed under the same culturalHeritageId key, so the selected cultural heritage remains unchanged at the ETOUR boundary and in persistence",
+          "the connection-interruption failure is reported so the operation can be retried idempotently and no success notification is produced"
+        ],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "business_rule"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "contract": "Alternative path where the Agency Operator confirms cancellation of the CulturalHeritage deletion while the elimination confirmation dialog is open: input controls are blocked while the cancellation is handled, the deletion request is never dispatched, the selected cultural heritage stays unchanged, the cancellation confirmation is shown, controls are re-enabled and no deletion-success notification appears.",
+      "disposition": "add",
+      "evidence_reason": "GAP: apps/web/src/AppShell.tsx#AppShell only renders a title heading and an API health line, so neither a confirmation dialog nor a cancel action exists in the frozen web application. This alternative branch is the cancel path of the same confirmation dialog confirmed in SC-1, so the branch projection reuses the exact SC-1 runtime target apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen (owned by the inspected AppShell composition owner) instead of inventing an independently mounted owner; only the cancel behaviour of AF-1/AC-2/AC-4 is declared here.",
+      "evidence_refs": [],
+      "id": "VDN-8154a2b82dcbdedd",
+      "kind": "ui_interaction",
+      "name": "CulturalHeritage deletion cancellation confirmation on the confirmation dialog",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2",
+        "AC-4"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/AppShell.tsx",
+          "owner_ref": "RLA-cc23cadb99a63259",
+          "owner_symbol": "AppShell",
+          "relation": "rendered_by"
+        },
+        "evidence_refs": [
+          "RLA-cc23cadb99a63259",
+          "RLA-1d33fe75847367a2"
+        ],
+        "runtime_kind": "ui_component",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/CulturalHeritageScreen.tsx",
+          "symbol": "CulturalHeritageScreen"
+        }
+      },
+      "scenario_id": "SC-2",
+      "semantic_key": "SC-2:web:ui",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "ui",
+      "surface_contract": {
+        "entrypoint": "apps/web/src/AppShell.tsx#AppShell rendering CulturalHeritageScreen while the elimination confirmation dialog for the selected cultural heritage is open",
+        "experience_contract": {
+          "accessibility": [
+            "The cancellation confirmation is announced through a polite status region and never moves keyboard focus.",
+            "The confirmation dialog keeps role=\"dialog\" with aria-modal=\"true\" labelled by its title heading, and the cancel action is reachable and operable from the keyboard.",
+            "While the cancellation is processed the cancel action is aria-disabled, so the operator cannot submit the cancellation twice.",
+            "The status notice region is a live region whose text states the cancellation, so no deletion-success wording is ever announced for this branch."
+          ],
+          "component_structure": [
+            "CulturalHeritageScreen: owns the list, the selection state and the confirmation dialog state of this screen.",
+            "CulturalHeritageList: keeps the selected cultural heritage row highlighted and unchanged while the cancellation is processed.",
+            "DeletionConfirmationDialog: modal dialog that restates the selected cultural heritage, offers the confirm action and offers the cancel action resolved by this branch.",
+            "DeletionResultNotice: the status notice region of the screen, which in this scenario announces the cancellation confirmation and never a deletion-success notice."
+          ],
+          "feedback": [
+            {
+              "response": "the cancel action shows an in-progress state and the dialog's other controls are blocked until the cancellation is handled",
+              "trigger": "operator activates the cancel action in the confirmation dialog"
+            },
+            {
+              "response": "the confirmation dialog closes, the deletion request is never dispatched, the selected cultural heritage stays listed and selected, input controls are re-enabled, and the status notice region announces the cancellation confirmation with no deletion-success message",
+              "trigger": "cancellation handling finishes"
+            }
+          ],
+          "focus_flow": [
+            "Focus sits on the dialog's cancel action when the operator activates it and stays there while the cancellation is processed.",
+            "When the dialog is removed focus returns to the still selected CulturalHeritage row (or the CulturalHeritage list heading when that row is no longer rendered) and the cancellation confirmation region is announced without taking focus."
+          ],
+          "focus_policies": [
+            {
+              "announcement": {
+                "moves_focus": false,
+                "target": "cancellation confirmation in the status notice region"
+              },
+              "event": "operator confirms cancellation and the confirmation dialog is removed",
+              "fallback_target": "CulturalHeritage list heading",
+              "primary_target": "selected CulturalHeritage row in the CulturalHeritage list",
+              "removed_element": "dialog cancel action",
+              "selection_strategy": "focus the surviving CulturalHeritage row that holds the unchanged selection once the dialog is removed, otherwise the list heading, and never the removed dialog cancel action",
+              "source_removed": true
+            }
+          ],
+          "guidance_refs": [
+            "uiux:sha256:a4864737030d7d3c6a5352e01ff5c4ecc0933f1552a3018242b63fd3dfb90cfa",
+            "uiux:sha256:590614b5e869dce857a58d26f6016c2f5282f013d4bbe80a290e98f348fa660a"
+          ],
+          "repo_evidence_refs": [
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+          ],
+          "responsive": [
+            "On small viewports the confirmation dialog stays a full-width sheet and the cancellation confirmation notice stacks directly under the CulturalHeritage list heading.",
+            "On large viewports the dialog stays a centered panel and the cancellation confirmation notice sits above the list."
+          ],
+          "runtime_states": {
+            "empty": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "error": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "loading": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "ready": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "success": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            }
+          },
+          "schema_version": "ui_experience_contract_v2",
+          "screen": {
+            "entry_condition": "A logged-in agency operator opens the application, which renders the entrypoint Root and AppShell and mounts the CulturalHeritage management screen with the elimination confirmation dialog available.",
+            "purpose": "Let the Agency Operator view CulturalHeritage items, select one, and delete it after an explicit confirmation.",
+            "screen_id": "culturalheritage-management"
+          },
+          "visual_contract": {
+            "color_and_tokens": [
+              "Selection uses a distinct surface token plus an outline rather than color alone.",
+              "The confirm action keeps the danger token; the cancellation confirmation uses the neutral info token and never the success token reserved for a deletion success."
+            ],
+            "focus_appearance": [
+              "A visible 2px focus ring with offset on list rows, the cancel action and the confirm action, plus a disabled appearance for the blocked cancel action while cancellation is processed."
+            ],
+            "hierarchy": [
+              "CulturalHeritage screen heading",
+              "CulturalHeritage list with the unchanged selection still highlighted",
+              "Status notice region announcing the cancellation confirmation",
+              "Confirmation dialog drawn above the page while the cancellation is pending"
+            ],
+            "layout": [
+              {
+                "content": "CulturalHeritage rows that keep the selected cultural heritage unchanged and highlighted while the cancellation is handled",
+                "layer": "page",
+                "region": "list region"
+              },
+              {
+                "content": "Notice that the deletion was cancelled and that the cultural heritage was not eliminated",
+                "layer": "page",
+                "region": "status notice region"
+              },
+              {
+                "content": "Selected cultural heritage summary with the confirm action and the cancel action being resolved, showing the blocked controls while the cancellation is processed",
+                "layer": "overlay",
+                "region": "confirmation dialog"
+              },
+              {
+                "content": "Message inside the dialog that the cancellation was handled and the controls are enabled again",
+                "layer": "overlay",
+                "region": "dialog alert region"
+              }
+            ],
+            "responsive_rules": [
+              "Below the small breakpoint rows stack vertically and the dialog becomes a full-width sheet with the cancellation notice underneath the list heading.",
+              "Above the small breakpoint rows use a table-like grid and the dialog is a centered panel."
+            ],
+            "style_target_policy": "new_stylesheet",
+            "style_target_reason": "ui_runtime_context.styles reports no stylesheet files and no style convention in the web application, so this screen projection keeps the SC-1 screen's profile-owned stylesheet target.",
+            "typography": [
+              "One heading scale for the screen heading and the list heading.",
+              "Row titles use body text with the cultural heritage name emphasized; dialog copy uses body text with a bold item name; the cancellation notice uses body text."
+            ]
+          }
+        },
+        "outcomes": [
+          "The deletion request is never dispatched and the selected cultural heritage remains unchanged in the CulturalHeritage list.",
+          "Input controls are re-enabled after the cancellation is handled and a cancellation confirmation is announced without any deletion-success notification."
+        ],
+        "runtime_surface": {
+          "composition_path": [
+            "apps/web/src/main.tsx#Root",
+            "apps/web/src/AppShell.tsx#AppShell",
+            "apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen"
+          ],
+          "entrypoint": "apps/web/src/main.tsx#Root",
+          "evidence_refs": [
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+          ],
+          "required_inputs": [
+            {
+              "binding": "MF-1",
+              "name": "culturalHeritageRecords",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "MF-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "loading",
+                "ready",
+                "empty",
+                "error"
+              ]
+            },
+            {
+              "binding": "PRE-1",
+              "name": "agencyOperatorSession",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "PRE-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "ready"
+              ]
+            }
+          ],
+          "runnable_status": "externally_blocked",
+          "schema_version": "runtime_surface_binding_v1",
+          "screen_id": "culturalheritage-management"
+        },
+        "schema_version": "design_surface_contract_v1",
+        "states": [
+          "confirmation dialog open",
+          "cancellation pending",
+          "cancellation confirmed"
+        ],
+        "surface": "ui",
+        "transitions": [
+          {
+            "action": "operator activates the cancel action in the elimination confirmation dialog",
+            "from": "confirmation dialog open",
+            "outcome": "the input controls of the dialog are blocked while the cancellation is processed and the cancel action shows its in-progress state",
+            "to": "cancellation pending"
+          },
+          {
+            "action": "cancellation handling finishes",
+            "from": "cancellation pending",
+            "outcome": "the deletion request is never dispatched, the selected cultural heritage stays unchanged and still listed, the confirmation dialog closes, input controls are re-enabled, the status notice region announces the cancellation confirmation, and no deletion-success notification is shown",
+            "to": "cancellation confirmed"
+          }
+        ],
+        "validations": [
+          "Cancellation is offered only while the elimination confirmation dialog for the selected cultural heritage is open.",
+          "Confirming cancellation never dispatches the deletion request and never removes the selected cultural heritage from the list."
+        ]
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "api",
+      "contract": "Authenticated request boundary for the Agency Operator's confirmed elimination of one selected CulturalHeritage; rejects the request without deleting anything when the explicit confirmation is not present, and otherwise returns 204 after the deletion succeeds.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the only inspected api composition owner apps/api/src/app.ts#createApp registers exactly one route, GET HEALTH_ENDPOINT, which returns a health snapshot; no request boundary exists that accepts an Agency Operator's confirmed elimination of a selected CulturalHeritage, so the actor-facing deletion of persisted domain state required by MF-4/BR-1/AC-1 must be added as a new profile-owned route registration owned by createApp. The cross-cutting login precondition PRE-1 has no authentication mechanism in the inspected api, so the new boundary declares an external authenticated-session requirement.",
+      "evidence_refs": [],
+      "id": "VDN-9c276a1d75ac9f49",
+      "kind": "api_contract",
+      "name": "DELETE CulturalHeritage request boundary",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/api/src/app.ts",
+          "owner_ref": "RLA-d7c79e1e9db02b0a",
+          "owner_symbol": "createApp",
+          "relation": "registered_by"
+        },
+        "evidence_refs": [
+          "RLA-d7c79e1e9db02b0a",
+          "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+        ],
+        "runtime_kind": "api_route",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "api",
+          "path": "apps/api/src/cultural-heritage-routes.ts",
+          "symbol": "registerCulturalHeritageRoutes"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:api:api",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+      ],
+      "surface": "api",
+      "surface_contract": {
+        "authentication": "The Agency Operator must be logged in per PRE-1; the request is accepted only within the operator's existing authenticated session.",
+        "authentication_evidence_refs": [],
+        "authentication_required": true,
+        "authentication_requirement_refs": [
+          "PRE-1"
+        ],
+        "authentication_source": "external_dependency",
+        "authorization": "No additional authorization scheme is stated by the active requirement slice; AC-1 only requires the Agency Operator to be logged in, so the route relies on that existing session and declares no role check.",
+        "authorization_required": false,
+        "method": "DELETE",
+        "operation_id": "deleteCulturalHeritage",
+        "path": "/cultural-heritage/{culturalHeritageId}",
+        "request_fields": [
+          {
+            "location": "path",
+            "name": "culturalHeritageId",
+            "type": "string"
+          },
+          {
+            "location": "body",
+            "name": "confirmation",
+            "type": "boolean"
+          }
+        ],
+        "responses": [
+          {
+            "outcome": "the selected cultural heritage is deleted and the successful elimination is reported back to the caller",
+            "status": "204"
+          },
+          {
+            "outcome": "the request is rejected because the agency operator is not logged in",
+            "status": "401"
+          },
+          {
+            "outcome": "the elimination is rejected and nothing is deleted because the operator confirmation is absent",
+            "status": "409"
+          }
+        ],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "api"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "database",
+      "contract": "Transaction-bound persistence for an interrupted confirmed CulturalHeritage deletion: deleteCulturalHeritageRecord is called with the selected culturalHeritageId and the etourConnectionInterrupted observation. It opens an explicit database transaction keyed by culturalHeritageId. When etourConnectionInterrupted is true the adapter performs no delete or rolls back the staged delete, leaves the CulturalHeritage record unchanged and returns the interruption failure; when false it deletes the CulturalHeritage and commits. No success state is persisted for an interrupted deletion.",
+      "disposition": "add",
+      "evidence_reason": "GAP: packages/db/prisma/schema.prisma declares only the SystemMetadata model and packages/db/src/client.ts exposes only createDatabaseClient, getDatabaseClient and closeDatabase; no CulturalHeritage delete persistence path exists. The SC-3 interruption branch occurs on the same confirmed delete operation planned for SC-1, so this branch projection reuses the exact SC-1 planned persistence target packages/db/src/cultural-heritage.ts#deleteCulturalHeritageRecord injected by getDatabaseClient instead of inventing an independent persistence owner; only the EF-1/AC-3 rollback behavior is declared here.",
+      "evidence_refs": [],
+      "id": "VDN-aebba2a693dbdd96",
+      "kind": "data_operation",
+      "name": "CulturalHeritage deletion interruption rollback persistence",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "packages/db/src/client.ts",
+          "owner_ref": "RLA-483f0d6b4d95070d",
+          "owner_symbol": "getDatabaseClient",
+          "relation": "injected_by"
+        },
+        "evidence_refs": [
+          "RLA-483f0d6b4d95070d",
+          "RLA-444a074e7648cc36"
+        ],
+        "runtime_kind": "persistence_adapter",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "database",
+          "path": "packages/db/src/cultural-heritage.ts",
+          "symbol": "deleteCulturalHeritageRecord"
+        }
+      },
+      "scenario_id": "SC-3",
+      "semantic_key": "SC-3:database:data",
+      "source_observation_refs": [
+        "repo:packages/db/prisma/schema.prisma#L1@sha256:0bdf612916adc114dace54c7f181dd8428ded72676b1bf9a8de3d77bd904cb50",
+        "repo:packages/db/src/client.ts#L1@sha256:3482e37942951373b6b089e72c44b989ddc045a398d329315033206388d69dac"
+      ],
+      "surface": "data",
+      "surface_contract": {
+        "constraints": [
+          "culturalHeritageId identifies exactly one CulturalHeritage record and is required for the delete attempt",
+          "deleteCulturalHeritageRecord executes within an explicit database transaction; the transaction is keyed by culturalHeritageId for the confirmed deletion attempt",
+          "when etourConnectionInterrupted is true, the staged delete is rolled back and the selected CulturalHeritage record remains unchanged; no success state is persisted",
+          "the transaction boundary makes interruption rollback conditional on a declared input rather than an independent delete plus an asserted rollback response"
+        ],
+        "entity": "CulturalHeritage",
+        "fields": [
+          {
+            "name": "culturalHeritageId",
+            "type": "string"
+          },
+          {
+            "name": "etourConnectionInterrupted",
+            "type": "boolean"
+          }
+        ],
+        "migration_intent": "no change: SC-3 reuses the CulturalHeritage model and delete persistence path planned for SC-1; only the conditional transaction boundary and interruption rollback semantics are declared, so no additional schema migration is introduced",
+        "operation": "transactional write: begin a database transaction keyed by culturalHeritageId for the selected CulturalHeritage record; when etourConnectionInterrupted is true, perform no delete or roll back the staged delete, return the interruption failure and leave the selected CulturalHeritage record unchanged; when etourConnectionInterrupted is false, perform the CulturalHeritage delete and commit the transaction. The unchanged-record outcome is produced by this declared conditional transaction boundary instead of being asserted by the persistence response.",
+        "relations": [],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "data"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "contract": "When the Agency Operator confirms cancellation while the elimination confirmation dialog for the selected CulturalHeritage is open, the deletion request is never dispatched, the selected CulturalHeritage stays unchanged, input controls stay blocked until the cancellation is handled and are then re-enabled, and only a cancellation confirmation is produced with no deletion-success notification.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the inspected web component apps/web/src/AppShell.tsx#AppShell only renders a title heading and an API health line and no rule exists anywhere in the web application that decides what happens when the Agency Operator confirms cancellation of a pending CulturalHeritage deletion. Because this branch has no approved api or data surface, the rule stays in the web application as a profile-owned module invoked by the screen, rather than adding a server endpoint.",
+      "evidence_refs": [],
+      "id": "VDN-aebccf9fe2287c31",
+      "kind": "business_rule",
+      "name": "Cancellation rule that cancels the CulturalHeritage deletion before the request is dispatched",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/AppShell.tsx",
+          "owner_ref": "RLA-cc23cadb99a63259",
+          "owner_symbol": "AppShell",
+          "relation": "called_by"
+        },
+        "evidence_refs": [
+          "RLA-cc23cadb99a63259"
+        ],
+        "runtime_kind": "service",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/cancel-deletion.ts",
+          "symbol": "confirmDeletionCancellation"
+        }
+      },
+      "scenario_id": "SC-2",
+      "semantic_key": "SC-2:web:business_rule",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "business_rule",
+      "surface_contract": {
+        "decision": "If cancellationConfirmed is exactly true while the elimination confirmation dialog is open for the selectedCulturalHeritageId, cancel the operation before any deletion request is dispatched: the deletion request is never sent, the selected CulturalHeritage stays unchanged and listed, input controls stay blocked until the cancellation is handled and are then re-enabled, and only a cancellation confirmation is emitted; no deletion-success notification is emitted for a cancelled operation.",
+        "inputs": [
+          "selectedCulturalHeritageId",
+          "cancellationConfirmed",
+          "dialogOpen"
+        ],
+        "outcomes": [
+          "the deletion request is never dispatched, the selected cultural heritage stays unchanged and listed, input controls are re-enabled, and a cancellation confirmation is provided to the screen",
+          "no deletion-success notification is produced for the cancelled operation"
+        ],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "business_rule"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "api",
+      "contract": "Idempotent request boundary for a confirmed CulturalHeritage deletion: the boundary issues the confirmed deletion to the ETOUR CulturalHeritage service as an outbound idempotent DELETE keyed by culturalHeritageId and synchronously observes its outcome to produce etourConnectionInterrupted. When the connection is interrupted before the deletion commits, the boundary reconciles the same attempt under that key and invokes the deletion rule under the same key, so the ETOUR-side attempt and the local persistence transaction resolve together, the selected CulturalHeritage remains unchanged at the ETOUR boundary and in the persistence store, no success is reported, and the Agency Operator can retry idempotently; it returns 503 with that failure. When the Agency Operator is not logged in it returns 401.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the inspected composition owner apps/api/src/app.ts#createApp registers only GET HEALTH_ENDPOINT, so no request boundary handles a confirmed CulturalHeritage deletion that is interrupted by the ETOUR connection. This exception occurs on the same DELETE route planned for SC-1, so the branch projection reuses the SC-1 candidate runtime target apps/api/src/cultural-heritage-routes.ts#registerCulturalHeritageRoutes instead of inventing an independently mounted API; only the EF-1 interruption rollback/failure behavior is declared here.",
+      "evidence_refs": [],
+      "id": "VDN-b2af0c88ed45e400",
+      "kind": "api_contract",
+      "name": "Interrupted CulturalHeritage deletion request boundary",
+      "requirement_refs": [
+        "EF-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/api/src/app.ts",
+          "owner_ref": "RLA-d7c79e1e9db02b0a",
+          "owner_symbol": "createApp",
+          "relation": "registered_by"
+        },
+        "evidence_refs": [
+          "RLA-d7c79e1e9db02b0a",
+          "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+        ],
+        "runtime_kind": "api_route",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "api",
+          "path": "apps/api/src/cultural-heritage-routes.ts",
+          "symbol": "registerCulturalHeritageRoutes"
+        }
+      },
+      "scenario_id": "SC-3",
+      "semantic_key": "SC-3:api:api",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b",
+        "repo:apps/api/src/health.ts#L1@sha256:7a3cf4007bb609f4396a3b0e3f66b8114f233fb6680b7c49fbbff84674969a55"
+      ],
+      "surface": "api",
+      "surface_contract": {
+        "authentication": "The Agency Operator must be logged in per PRE-1; the interruption handling is only reachable within the operator's existing authenticated session.",
+        "authentication_evidence_refs": [],
+        "authentication_required": true,
+        "authentication_requirement_refs": [
+          "PRE-1"
+        ],
+        "authentication_source": "external_dependency",
+        "authorization": "No additional role or permission policy is stated; the route relies on the existing authenticated Agency Operator session.",
+        "authorization_required": false,
+        "method": "DELETE",
+        "operation_id": "deleteCulturalHeritage",
+        "path": "/cultural-heritage/{culturalHeritageId}",
+        "request_fields": [
+          {
+            "location": "path",
+            "name": "culturalHeritageId",
+            "type": "string"
+          },
+          {
+            "location": "body",
+            "name": "confirmation",
+            "type": "boolean"
+          }
+        ],
+        "responses": [
+          {
+            "outcome": "the boundary's outbound idempotent DELETE to the ETOUR CulturalHeritage service is interrupted before the confirmed deletion commits; the boundary reconciles the attempt under the culturalHeritageId-derived idempotency key, the deletion rule rolls back the local persistence transaction under the same key, so the selected cultural heritage remains unchanged at the ETOUR boundary and in persistence, no success is reported, and retry with the same key is safe",
+            "status": "503"
+          },
+          {
+            "outcome": "the request is rejected because the agency operator is not logged in",
+            "status": "401"
+          }
+        ],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "api"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "contract": "AppShell forwards agencyOperatorSession, culturalHeritageRecords to the next component on composition_path.",
+      "disposition": "modify",
+      "evidence_reason": "",
+      "evidence_refs": [
+        "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "id": "VDN-b31b85277d1d8727",
+      "kind": "ui_interaction",
+      "name": "AppShell forwards runtime inputs",
+      "requirement_refs": [
+        "AC-4",
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "PRE-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/main.tsx",
+          "owner_ref": "apps/web/src/main.tsx#Root",
+          "owner_symbol": "Root",
+          "relation": "rendered_by"
+        },
+        "evidence_refs": [
+          "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+        ],
+        "runtime_kind": "ui_component",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/AppShell.tsx",
+          "symbol": "AppShell"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:web:wire:AppShell",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "ui",
+      "surface_contract": {
+        "entrypoint": "apps/web/src/AppShell.tsx#AppShell",
+        "outcomes": [
+          "next component receives agencyOperatorSession, culturalHeritageRecords"
+        ],
+        "runtime_surface": {
+          "composition_path": [
+            "apps/web/src/main.tsx#Root",
+            "apps/web/src/AppShell.tsx#AppShell"
+          ],
+          "entrypoint": "apps/web/src/main.tsx#Root",
+          "evidence_refs": [
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+          ],
+          "forwarded_inputs": [
+            {
+              "names": [
+                "agencyOperatorSession",
+                "culturalHeritageRecords"
+              ],
+              "screen_id": "culturalheritage-management",
+              "to": "apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen"
+            }
+          ],
+          "required_inputs": [
+            {
+              "binding": "apps/web/src/main.tsx#Root",
+              "name": "title",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [],
+              "source": "existing_runtime",
+              "states": []
+            },
+            {
+              "binding": "apps/web/src/main.tsx#Root",
+              "name": "health",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [],
+              "source": "existing_runtime",
+              "states": []
+            }
+          ],
+          "role": "composition_wiring",
+          "runnable_status": "bound",
+          "schema_version": "runtime_surface_binding_v1",
+          "screen_id": "sc-1-wiring"
+        },
+        "schema_version": "design_surface_contract_v1",
+        "states": [
+          "forwarding"
+        ],
+        "surface": "ui",
+        "transitions": [
+          {
+            "action": "receive agencyOperatorSession, culturalHeritageRecords",
+            "from": "mounted",
+            "outcome": "next component receives agencyOperatorSession, culturalHeritageRecords",
+            "to": "forwarding"
+          }
+        ],
+        "validations": []
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "api",
+      "contract": "Applies deletion of the selected CulturalHeritage only after the Agency Operator has explicitly confirmed the operation; without that confirmation the operation is rejected and no cultural choice is removed.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the only api service symbols inspected, apps/api/src/health.ts#readHealth and apps/api/src/health.ts#HealthService, compute a health snapshot; nothing decides whether a CulturalHeritage may be deleted after the Agency Operator confirms the operation, so BR-1/MF-3/MF-4 require a new profile-owned rule callable invoked by the deletion route registered in apps/api/src/app.ts#createApp.",
+      "evidence_refs": [],
+      "id": "VDN-c08451c6db1f6af4",
+      "kind": "business_rule",
+      "name": "Confirmation-gated CulturalHeritage elimination rule",
+      "requirement_refs": [
+        "BR-1",
+        "MF-3",
+        "MF-4",
+        "AC-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/api/src/app.ts",
+          "owner_ref": "RLA-d7c79e1e9db02b0a",
+          "owner_symbol": "createApp",
+          "relation": "called_by"
+        },
+        "evidence_refs": [
+          "RLA-d7c79e1e9db02b0a",
+          "RLA-4e36cf13bc6a378c"
+        ],
+        "runtime_kind": "service",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "api",
+          "path": "apps/api/src/cultural-heritage.ts",
+          "symbol": "deleteCulturalHeritageAfterConfirmation"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:api:business_rule",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+      ],
+      "surface": "business_rule",
+      "surface_contract": {
+        "decision": "If confirmation is exactly true for the selected culturalHeritageId, delete that cultural heritage; otherwise reject the operation and leave the cultural choice untouched.",
+        "inputs": [
+          "culturalHeritageId",
+          "confirmation"
+        ],
+        "outcomes": [
+          "the confirmed cultural heritage is deleted and the successful elimination of the cultural is reported",
+          "the operation is rejected without deleting the cultural choice because the confirmation was not supplied"
+        ],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "business_rule"
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "contract": "Screen where the Agency Operator views the CulturalHeritage list, selects a cultural heritage, activates elimination, confirms the operation, and then sees the deleted item gone from the list with a notice of the successful elimination.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the only inspected web screen owner apps/web/src/AppShell.tsx#AppShell renders a title heading and an API health status line only; it has no CulturalHeritage list, no item selection, no elimination action and no confirmation step. The MF-1/MF-2/MF-3 interaction therefore needs a new profile-owned component rendered by the existing AppShell composition owner, so the surface is added rather than reused.",
+      "evidence_refs": [],
+      "id": "VDN-e05e8071615706e0",
+      "kind": "ui_interaction",
+      "name": "CulturalHeritage deletion screen with confirmation dialog and success notice",
+      "requirement_refs": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "AC-4"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/AppShell.tsx",
+          "owner_ref": "RLA-cc23cadb99a63259",
+          "owner_symbol": "AppShell",
+          "relation": "rendered_by"
+        },
+        "evidence_refs": [
+          "RLA-cc23cadb99a63259",
+          "RLA-1d33fe75847367a2"
+        ],
+        "runtime_kind": "ui_component",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/CulturalHeritageScreen.tsx",
+          "symbol": "CulturalHeritageScreen"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:web:ui",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "ui",
+      "surface_contract": {
+        "entrypoint": "apps/web/src/AppShell.tsx#AppShell rendering CulturalHeritageScreen for an already logged-in agency operator",
+        "experience_contract": {
+          "accessibility": [
+            "The confirmation dialog uses role=\"dialog\" with aria-modal=\"true\" and is labelled by its title heading.",
+            "The success notice is a polite status region so it is announced without moving keyboard focus.",
+            "List rows expose their selection state through aria-selected and are operable from the keyboard.",
+            "The elimination action has an accessible name that includes the cultural heritage title."
+          ],
+          "component_structure": [
+            "CulturalHeritageScreen: owns the list, the selection state, the confirmation dialog state and the success notice for this screen.",
+            "CulturalHeritageList: renders one row per cultural heritage with a selection control and the per-row elimination action.",
+            "DeletionConfirmationDialog: modal dialog that restates the selected cultural heritage and offers the confirm action for the operation.",
+            "DeletionResultNotice: status region announcing the successful elimination of the cultural."
+          ],
+          "feedback": [
+            {
+              "response": "the row is visibly highlighted and the elimination action for it becomes enabled",
+              "trigger": "operator selects a CulturalHeritage row"
+            },
+            {
+              "response": "a confirmation dialog appears naming the selected cultural heritage",
+              "trigger": "operator activates the elimination action"
+            },
+            {
+              "response": "the dialog shows that the confirmed elimination is in progress",
+              "trigger": "operator confirms the operation"
+            },
+            {
+              "response": "the dialog closes, the row disappears from the list and a status notice reports the successful elimination",
+              "trigger": "elimination completes successfully"
+            },
+            {
+              "response": "an alert region inside the dialog reports the failure and offers to retry the confirmed operation",
+              "trigger": "elimination fails"
+            }
+          ],
+          "focus_flow": [
+            "Focus enters the screen at the CulturalHeritage list heading once the list is ready.",
+            "Activating elimination moves focus to the dialog title heading and the dialog keeps focus within itself until it closes.",
+            "After a successful elimination focus returns to the refreshed CulturalHeritage list heading while the success status region is announced without taking focus."
+          ],
+          "focus_policies": [
+            {
+              "announcement": {
+                "moves_focus": true,
+                "target": "dialog title heading"
+              },
+              "event": "confirmation dialog opens after the elimination action is activated",
+              "fallback_target": "dialog container",
+              "primary_target": "dialog title heading",
+              "removed_element": "",
+              "selection_strategy": "always focus the dialog title heading first, then allow tabbing to the confirm action",
+              "source_removed": false
+            },
+            {
+              "announcement": {
+                "moves_focus": false,
+                "target": "success status notice"
+              },
+              "event": "successful elimination closes the confirmation dialog",
+              "fallback_target": "CulturalHeritage screen heading",
+              "primary_target": "CulturalHeritage list heading",
+              "removed_element": "dialog confirm action",
+              "selection_strategy": "focus the refreshed CulturalHeritage list heading once the dialog is removed, never the removed dialog action",
+              "source_removed": true
+            }
+          ],
+          "guidance_refs": [
+            "uiux:sha256:a4864737030d7d3c6a5352e01ff5c4ecc0933f1552a3018242b63fd3dfb90cfa",
+            "uiux:sha256:590614b5e869dce857a58d26f6016c2f5282f013d4bbe80a290e98f348fa660a"
+          ],
+          "repo_evidence_refs": [
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+          ],
+          "responsive": [
+            "On small viewports each row stacks as a card with a full-width elimination action and the dialog spans the viewport width.",
+            "On large viewports rows render in a table-like layout and the dialog is a centered panel with a bounded max width."
+          ],
+          "runtime_states": {
+            "empty": {
+              "presentation": "The list region states that there are no cultural heritage records to delete and no elimination action is offered.",
+              "trigger": "the available CulturalHeritage result set contains zero records"
+            },
+            "error": {
+              "presentation": "An alert region inside the dialog reports that the elimination could not be completed and offers a retry of the confirmed operation while the item stays selected.",
+              "trigger": "the elimination of the confirmed cultural heritage fails"
+            },
+            "loading": {
+              "presentation": "The list region shows a loading placeholder and no elimination action is offered yet.",
+              "trigger": "the screen is mounted while the CulturalHeritage records are still being loaded"
+            },
+            "ready": {
+              "presentation": "The CulturalHeritage list is shown with selectable rows and an enabled elimination action for the selected item.",
+              "trigger": "the CulturalHeritage records are available and at least one row exists"
+            },
+            "success": {
+              "presentation": "The confirmation dialog is closed, the deleted cultural heritage is gone from the list and a status notice notifies the successful elimination of the cultural.",
+              "trigger": "the operator confirmed the operation and the elimination finished successfully"
+            }
+          },
+          "schema_version": "ui_experience_contract_v2",
+          "screen": {
+            "entry_condition": "A logged-in agency operator opens the application, which renders the entrypoint Root and AppShell and mounts the CulturalHeritage management screen.",
+            "purpose": "Let the Agency Operator view CulturalHeritage items, select one, and delete it after an explicit confirmation.",
+            "screen_id": "culturalheritage-management"
+          },
+          "visual_contract": {
+            "color_and_tokens": [
+              "Selection uses a distinct surface token plus an outline rather than color alone.",
+              "The confirm action uses the danger token; the success notice uses the success token."
+            ],
+            "focus_appearance": [
+              "A visible 2px focus ring with offset on list rows, the elimination action and the dialog actions."
+            ],
+            "hierarchy": [
+              "CulturalHeritage screen heading",
+              "CulturalHeritage list with selection state and per-row elimination action",
+              "Status notice reporting the successful elimination",
+              "Confirmation dialog drawn above the page while the operation is pending"
+            ],
+            "layout": [
+              {
+                "content": "CulturalHeritage rows with a selection control and a per-row elimination action",
+                "layer": "page",
+                "region": "list region"
+              },
+              {
+                "content": "Notice that the elimination of the cultural was successful",
+                "layer": "page",
+                "region": "status notice region"
+              },
+              {
+                "content": "Selected cultural heritage summary and the confirm action for the elimination",
+                "layer": "overlay",
+                "region": "confirmation dialog"
+              },
+              {
+                "content": "Failure message and retry of the confirmed operation shown inside the dialog",
+                "layer": "overlay",
+                "region": "dialog alert region"
+              }
+            ],
+            "responsive_rules": [
+              "Below the small breakpoint rows stack vertically and the dialog becomes a full-width sheet.",
+              "Above the small breakpoint rows use a table-like grid and the dialog is a centered panel."
+            ],
+            "style_target_policy": "new_stylesheet",
+            "style_target_reason": "ui_runtime_context.styles reports no stylesheet files and no style convention in the web application, so the new screen needs its own profile-owned stylesheet target.",
+            "typography": [
+              "One heading scale for the screen heading and the list heading.",
+              "Row titles use body text with the cultural heritage name emphasized; dialog copy uses body text with a bold item name."
+            ]
+          }
+        },
+        "outcomes": [
+          "The selected cultural heritage is removed from the CulturalHeritage list after the operator confirms the operation.",
+          "The system notifies the successful elimination of the cultural heritage through a status notice on the screen."
+        ],
+        "runtime_surface": {
+          "composition_path": [
+            "apps/web/src/main.tsx#Root",
+            "apps/web/src/AppShell.tsx#AppShell",
+            "apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen"
+          ],
+          "entrypoint": "apps/web/src/main.tsx#Root",
+          "evidence_refs": [
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+          ],
+          "required_inputs": [
+            {
+              "binding": "MF-1",
+              "name": "culturalHeritageRecords",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "MF-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "loading",
+                "ready",
+                "empty",
+                "error"
+              ]
+            },
+            {
+              "binding": "PRE-1",
+              "name": "agencyOperatorSession",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "PRE-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "ready"
+              ]
+            }
+          ],
+          "runnable_status": "externally_blocked",
+          "schema_version": "runtime_surface_binding_v1",
+          "screen_id": "culturalheritage-management"
+        },
+        "schema_version": "design_surface_contract_v1",
+        "states": [
+          "list loading",
+          "list ready",
+          "confirmation dialog open",
+          "deletion pending",
+          "success notice after deletion"
+        ],
+        "surface": "ui",
+        "transitions": [
+          {
+            "action": "CulturalHeritage records become available",
+            "from": "list loading",
+            "outcome": "the CulturalHeritage list is displayed with selectable rows and a per-row elimination action",
+            "to": "list ready"
+          },
+          {
+            "action": "operator selects a CulturalHeritage row",
+            "from": "list ready",
+            "outcome": "the selected row is visibly highlighted and the elimination action is enabled for that item",
+            "to": "list ready"
+          },
+          {
+            "action": "operator activates the elimination action",
+            "from": "list ready",
+            "outcome": "a confirmation dialog appears naming the selected cultural heritage and asking the operator to confirm the deletion",
+            "to": "confirmation dialog open"
+          },
+          {
+            "action": "operator confirms the operation",
+            "from": "confirmation dialog open",
+            "outcome": "the dialog reports that the confirmed elimination is in progress",
+            "to": "deletion pending"
+          },
+          {
+            "action": "elimination completes",
+            "from": "deletion pending",
+            "outcome": "the confirmation dialog closes, the deleted cultural heritage is no longer listed, and the system notifies the successful elimination of the cultural through a status notice",
+            "to": "success notice after deletion"
+          }
+        ],
+        "validations": [
+          "The elimination action stays disabled until exactly one CulturalHeritage row is selected.",
+          "The confirmation dialog requires an explicit second operator action before the elimination is requested."
+        ]
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "contract": "Exception projection on the CulturalHeritage deletion confirmation dialog: when the connection to the ETOUR server is interrupted before the confirmed deletion completes, the deletion is treated as failed, the selected cultural heritage stays unchanged and listed, no success notification is shown, and the dialog alert region informs the Agency Operator that the connection was interrupted so the confirmed operation can be retried.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the only inspected web screen owner apps/web/src/AppShell.tsx#AppShell renders a title heading and an API health line only, so no CulturalHeritage confirmation dialog, no interruption alert region and no retry action exist in the frozen web application. This exception branch happens while the same confirmation dialog introduced in SC-1 is pending the confirmed elimination, so the branch projection reuses the exact SC-1 runtime target apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen (owned by the inspected AppShell composition owner) instead of inventing an independently mounted owner/entrypoint; only the connection-interruption behaviour of EF-1/AC-3 is declared here and the API, business-rule and data surfaces of this scenario stay with their own partitions.",
+      "evidence_refs": [],
+      "id": "VDN-e56af334b66c19a6",
+      "kind": "ui_interaction",
+      "name": "CulturalHeritage deletion connection-interruption error on the confirmation dialog",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "apps/web/src/AppShell.tsx",
+          "owner_ref": "RLA-cc23cadb99a63259",
+          "owner_symbol": "AppShell",
+          "relation": "rendered_by"
+        },
+        "evidence_refs": [
+          "RLA-cc23cadb99a63259",
+          "RLA-1d33fe75847367a2"
+        ],
+        "runtime_kind": "ui_component",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "web",
+          "path": "apps/web/src/CulturalHeritageScreen.tsx",
+          "symbol": "CulturalHeritageScreen"
+        }
+      },
+      "scenario_id": "SC-3",
+      "semantic_key": "SC-3:web:ui",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "surface": "ui",
+      "surface_contract": {
+        "entrypoint": "apps/web/src/AppShell.tsx#AppShell rendering CulturalHeritageScreen while the elimination confirmation dialog for the selected cultural heritage waits for the confirmed deletion",
+        "experience_contract": {
+          "accessibility": [
+            "The interruption message is rendered in an alert region (role=\"alert\") inside the confirmation dialog so it is announced without moving keyboard focus.",
+            "The confirmation dialog keeps role=\"dialog\" with aria-modal=\"true\" labelled by its title heading and keeps focus inside itself while it remains open.",
+            "The retry action is keyboard operable and its accessible name includes the cultural heritage title.",
+            "The selected cultural heritage row keeps aria-selected=\"true\" so the unchanged selection is exposed while the interruption is handled."
+          ],
+          "component_structure": [
+            "CulturalHeritageScreen: owns the list, the selection state, the confirmation dialog state and the interruption alert state for this screen.",
+            "CulturalHeritageList: keeps the selected cultural heritage row highlighted and unchanged while the interruption is handled.",
+            "DeletionConfirmationDialog: stays open, restates the selected cultural heritage and hosts the retry action for the interrupted confirmed operation.",
+            "DeletionInterruptionAlert: alert region inside the dialog reporting that the connection to the ETOUR server was interrupted and that the deletion can be retried.",
+            "DeletionResultNotice: the screen status notice region, which in this scenario never announces a successful elimination."
+          ],
+          "feedback": [
+            {
+              "response": "the confirmation dialog stays open, the row and its selection stay unchanged, the dialog alert region states that the connection was interrupted and offers a retry, and no success notice appears",
+              "trigger": "the connection to the ETOUR server is interrupted before the confirmed elimination completes"
+            },
+            {
+              "response": "the alert region clears and the dialog shows the confirmed elimination as in progress again while the cultural heritage stays selected",
+              "trigger": "the Agency Operator activates the retry of the interrupted elimination"
+            },
+            {
+              "response": "the selected cultural heritage row and the retry action remain available and the alert text is still readable",
+              "trigger": "the Agency Operator moves focus away from the alert"
+            }
+          ],
+          "focus_flow": [
+            "Focus stays within the open confirmation dialog while the interruption alert is announced.",
+            "When the interruption alert appears focus moves to the retry action of the same dialog, never to the announced alert region.",
+            "The alert region is announced without taking focus and the dialog remains open so focus never falls back to the page."
+          ],
+          "focus_policies": [
+            {
+              "announcement": {
+                "moves_focus": false,
+                "target": "dialog alert region"
+              },
+              "event": "the confirmed elimination fails because the connection to the ETOUR server is interrupted",
+              "fallback_target": "dialog title heading",
+              "primary_target": "retry the interrupted elimination action inside the confirmation dialog",
+              "removed_element": "",
+              "selection_strategy": "focus the retry action of the failed confirmed operation once the alert is rendered; when the retry action is unavailable keep focus on the dialog title heading and never on the announced alert region",
+              "source_removed": false
+            }
+          ],
+          "guidance_refs": [
+            "uiux:sha256:a4864737030d7d3c6a5352e01ff5c4ecc0933f1552a3018242b63fd3dfb90cfa",
+            "uiux:sha256:590614b5e869dce857a58d26f6016c2f5282f013d4bbe80a290e98f348fa660a"
+          ],
+          "repo_evidence_refs": [
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+          ],
+          "responsive": [
+            "On small viewports the confirmation dialog stays a full-width sheet and the interruption alert sits directly above the retry action.",
+            "On large viewports the dialog stays a centered panel with the interruption alert above the retry action inside the same panel."
+          ],
+          "runtime_states": {
+            "empty": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "error": {
+              "presentation": "The confirmation dialog stays open with the selected cultural heritage unchanged and still listed, and its alert region states that the connection to the ETOUR server was interrupted and offers a retry of the confirmed operation; no success notification is shown.",
+              "trigger": "the connection to the ETOUR server is interrupted before the confirmed elimination completes"
+            },
+            "loading": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "ready": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            },
+            "success": {
+              "not_applicable": true,
+              "reason": "owned by SC-1"
+            }
+          },
+          "schema_version": "ui_experience_contract_v2",
+          "screen": {
+            "entry_condition": "A logged-in agency operator (PRE-1) opens the application, which renders the entrypoint Root and AppShell and mounts the CulturalHeritage management screen with the elimination confirmation dialog open while the confirmed deletion is in progress.",
+            "purpose": "Let the Agency Operator view CulturalHeritage items, select one, and delete it after an explicit confirmation.",
+            "screen_id": "culturalheritage-management"
+          },
+          "visual_contract": {
+            "color_and_tokens": [
+              "The interruption alert uses the warning/error token and never the success token reserved for a completed elimination.",
+              "The retry action uses the danger token of the confirmed elimination; selection keeps the distinct surface token plus outline."
+            ],
+            "focus_appearance": [
+              "A visible 2px focus ring with offset on the retry action and on the selected cultural heritage row."
+            ],
+            "hierarchy": [
+              "CulturalHeritage screen heading",
+              "Confirmation dialog title naming the selected cultural heritage",
+              "Interruption alert stating the connection was interrupted",
+              "Retry action for the confirmed elimination",
+              "CulturalHeritage list with the unchanged selection still highlighted"
+            ],
+            "layout": [
+              {
+                "content": "CulturalHeritage rows keeping the selected cultural heritage highlighted and unchanged while the interruption is handled",
+                "layer": "page",
+                "region": "list region"
+              },
+              {
+                "content": "No successful-elimination notice is shown for the interrupted deletion; the region stays neutral while the dialog remains open",
+                "layer": "page",
+                "region": "status notice region"
+              },
+              {
+                "content": "Selected cultural heritage summary with the interrupted confirmed operation and its retry action",
+                "layer": "overlay",
+                "region": "confirmation dialog"
+              },
+              {
+                "content": "Alert that the connection to the ETOUR server was interrupted and that the deletion can be retried",
+                "layer": "overlay",
+                "region": "dialog alert region"
+              }
+            ],
+            "responsive_rules": [
+              "Below the small breakpoint the dialog becomes a full-width sheet with the alert above the retry action.",
+              "Above the small breakpoint the dialog is a centered panel with the alert above the retry action."
+            ],
+            "style_target_policy": "new_stylesheet",
+            "style_target_reason": "ui_runtime_context.styles reports no stylesheet files and no style convention in the web application, so this screen projection keeps the SC-1 screen's profile-owned stylesheet target.",
+            "typography": [
+              "One heading scale for the screen heading and the dialog title.",
+              "Dialog copy uses body text with the cultural heritage name emphasized; the interruption alert uses body text with the connection message emphasized."
+            ]
+          }
+        },
+        "outcomes": [
+          "The interrupted deletion is treated as failed and the selected cultural heritage remains unchanged and still listed.",
+          "No success notification is shown; the Agency Operator is informed in the dialog alert region that the connection was interrupted so the operation can be retried."
+        ],
+        "runtime_surface": {
+          "composition_path": [
+            "apps/web/src/main.tsx#Root",
+            "apps/web/src/AppShell.tsx#AppShell",
+            "apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen"
+          ],
+          "entrypoint": "apps/web/src/main.tsx#Root",
+          "evidence_refs": [
+            "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+            "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+          ],
+          "required_inputs": [
+            {
+              "binding": "MF-1",
+              "name": "culturalHeritageRecords",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "MF-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "loading",
+                "ready",
+                "empty",
+                "error"
+              ]
+            },
+            {
+              "binding": "PRE-1",
+              "name": "agencyOperatorSession",
+              "provided_by": "apps/web/src/main.tsx#Root",
+              "requirement_refs": [
+                "PRE-1"
+              ],
+              "source": "external_use_case",
+              "states": [
+                "ready"
+              ]
+            }
+          ],
+          "runnable_status": "externally_blocked",
+          "schema_version": "runtime_surface_binding_v1",
+          "screen_id": "culturalheritage-management"
+        },
+        "schema_version": "design_surface_contract_v1",
+        "states": [
+          "deletion pending",
+          "connection interruption error with retry offered"
+        ],
+        "surface": "ui",
+        "transitions": [
+          {
+            "action": "the connection to the ETOUR server is interrupted before the confirmed elimination completes",
+            "from": "deletion pending",
+            "outcome": "the confirmed elimination is treated as failed: the confirmation dialog stays open with the selected cultural heritage unchanged and still listed, the dialog alert region informs the Agency Operator that the connection was interrupted and offers a retry of the confirmed operation, and no success notification is shown",
+            "to": "connection interruption error with retry offered"
+          },
+          {
+            "action": "the Agency Operator activates the retry of the interrupted elimination",
+            "from": "connection interruption error with retry offered",
+            "outcome": "the alert region clears and the confirmation dialog again reports the confirmed elimination as in progress while the selected cultural heritage stays unchanged and listed",
+            "to": "deletion pending"
+          }
+        ],
+        "validations": [
+          "The retry action is offered only for the interrupted confirmed elimination and only while the confirmation dialog for that cultural heritage is still open.",
+          "No success notification is displayed for an interrupted elimination."
+        ]
+      },
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "database",
+      "contract": "Deletes the single CulturalHeritage record identified by culturalHeritageId from persistent storage and reports whether one record was removed.",
+      "disposition": "add",
+      "evidence_reason": "GAP: the inspected database schema packages/db/prisma/schema.prisma declares exactly one model, SystemMetadata (key, value, createdAt, updatedAt), and the inspected composition owner packages/db/src/client.ts exposes only createDatabaseClient, getDatabaseClient and closeDatabase; no CulturalHeritage record type and no delete operation on it exist anywhere in the database package, so MF-4/BR-1/AC-1 cannot remove the selected cultural choice. A new profile-owned persistence adapter callable is added in packages/db/src and injected with the shared Prisma client from getDatabaseClient, because the existing anchors (systemMetadata.count / systemMetadata.findUnique on SystemMetadata) only read a system metadata row and cannot host the deletion of a CulturalHeritage.",
+      "evidence_refs": [],
+      "id": "VDN-f972f22cbbcf1e2f",
+      "kind": "data_operation",
+      "name": "CulturalHeritage record deletion persistence",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "runtime_binding": {
+        "attachment": {
+          "owner_path": "packages/db/src/client.ts",
+          "owner_ref": "RLA-483f0d6b4d95070d",
+          "owner_symbol": "getDatabaseClient",
+          "relation": "injected_by"
+        },
+        "evidence_refs": [
+          "RLA-483f0d6b4d95070d",
+          "RLA-444a074e7648cc36"
+        ],
+        "runtime_kind": "persistence_adapter",
+        "schema_version": "runtime_binding_v1",
+        "target": {
+          "component_id": "database",
+          "path": "packages/db/src/cultural-heritage.ts",
+          "symbol": "deleteCulturalHeritageRecord"
+        }
+      },
+      "scenario_id": "SC-1",
+      "semantic_key": "SC-1:database:data",
+      "source_observation_refs": [
+        "repo:packages/db/prisma/schema.prisma#L1@sha256:0bdf612916adc114dace54c7f181dd8428ded72676b1bf9a8de3d77bd904cb50",
+        "repo:packages/db/src/client.ts#L1@sha256:3482e37942951373b6b089e72c44b989ddc045a398d329315033206388d69dac"
+      ],
+      "surface": "data",
+      "surface_contract": {
+        "constraints": [
+          "culturalHeritageId identifies exactly one CulturalHeritage record and is required for the delete",
+          "no CulturalHeritage record is removed when the identifier matches no stored record"
+        ],
+        "entity": "CulturalHeritage",
+        "fields": [
+          {
+            "name": "culturalHeritageId",
+            "type": "string"
+          }
+        ],
+        "migration_intent": "add: introduce a new CulturalHeritage model together with its delete persistence path in the database package; no existing SystemMetadata table or migration is altered",
+        "operation": "write: delete the CulturalHeritage record selected by culturalHeritageId and report whether one record was removed",
+        "relations": [],
+        "schema_version": "design_surface_contract_v1",
+        "surface": "data"
+      },
+      "use_case_id": "UC-1"
+    }
+  ],
+  "partitions": [
+    {
+      "component_id": "api",
+      "coverage": {
+        "api": "covered",
+        "business_rule": "covered"
+      },
+      "scenario_id": "SC-1",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "database",
+      "coverage": {
+        "data": "covered"
+      },
+      "scenario_id": "SC-1",
+      "source_observation_refs": [
+        "repo:packages/db/prisma/schema.prisma#L1@sha256:0bdf612916adc114dace54c7f181dd8428ded72676b1bf9a8de3d77bd904cb50",
+        "repo:packages/db/src/client.ts#L1@sha256:3482e37942951373b6b089e72c44b989ddc045a398d329315033206388d69dac"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "coverage": {
+        "ui": "covered"
+      },
+      "scenario_id": "SC-1",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "coverage": {
+        "business_rule": "covered",
+        "ui": "covered"
+      },
+      "scenario_id": "SC-2",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "api",
+      "coverage": {
+        "api": "covered",
+        "business_rule": "covered"
+      },
+      "scenario_id": "SC-3",
+      "source_observation_refs": [
+        "repo:apps/api/src/app.ts#L1@sha256:0a8c70696a2f1e39733ff7d4cdecbb7bf268ea36be150dbb2c0b007a8eec566b"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "database",
+      "coverage": {
+        "data": "covered"
+      },
+      "scenario_id": "SC-3",
+      "source_observation_refs": [
+        "repo:packages/db/src/client.ts#L1@sha256:3482e37942951373b6b089e72c44b989ddc045a398d329315033206388d69dac"
+      ],
+      "use_case_id": "UC-1"
+    },
+    {
+      "component_id": "web",
+      "coverage": {
+        "ui": "covered"
+      },
+      "scenario_id": "SC-3",
+      "source_observation_refs": [
+        "repo:apps/web/src/AppShell.tsx#L1@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "use_case_id": "UC-1"
+    }
+  ],
+  "revision": 15,
+  "run_id": "run_20261102_100240_755e94d0",
+  "schema_version": "vertical_design_graph_v2",
+  "snapshot_binding": {
+    "base_sha": "db07a7e66f006d0cc5ed73ff6449b02f8d935ad7",
+    "designer_ui_contract_version": "ui_experience_contract_v2",
+    "designer_ui_layout_contract": "layered_layout_v1",
+    "designer_uiux_contract_version": "uiux_pro_max_search_v1",
+    "designer_uiux_mode": "enforce",
+    "language_profile_id": "typescript_v1",
+    "language_profile_schema": "language_profile_v1",
+    "project_profile_id": "typescript_fullstack_v1",
+    "project_profile_schema": "project_profile_v1",
+    "repo_codegraph_snapshot_artifact_ref": ".runtime/l3.10-controlled-20261102-r9/runs/run_20261102_100240_755e94d0/artifacts/repo_codegraph_snapshot_v1.json",
+    "repo_codegraph_snapshot_digest": "sha256:40a90350a02cbac79d078c2f08d66dfaca5061b1b2fd7af5b62ae59778856106",
+    "repo_landscape_artifact_ref": ".runtime/l3.10-controlled-20261102-r9/runs/run_20261102_100240_755e94d0/artifacts/repo_landscape_v1.json",
+    "repo_landscape_digest": "sha256:552e8f0f88dc644f219a80b38965255a99a9c308802d4cb640edb7bb7691412e",
+    "requirement_artifact_ref": ".runtime/l3.10-controlled-20261102-r9/runs/run_20261102_100240_755e94d0/artifacts/requirement_model_v2_r1.json",
+    "requirement_contract_version": "v2",
+    "requirement_digest": "sha256:0674cd973a04f989e75b32301b79aa2da00adca476b3ba2dd59fd26dc8f7f3fb",
+    "requirement_reference_ids": [
+      "AC-1",
+      "AC-2",
+      "AC-3",
+      "AC-4",
+      "AF-1",
+      "BR-1",
+      "D-1",
+      "D-2",
+      "D-3",
+      "E-1",
+      "E-10",
+      "E-11",
+      "E-12",
+      "E-2",
+      "E-3",
+      "E-4",
+      "E-5",
+      "E-6",
+      "E-7",
+      "E-8",
+      "E-9",
+      "EF-1",
+      "MF-1",
+      "MF-2",
+      "MF-3",
+      "MF-4",
+      "POST-1",
+      "PRE-1",
+      "Q-1",
+      "Q-2",
+      "Q-3",
+      "QR-1"
+    ],
+    "requirement_revision": 1,
+    "target_manifest_digest": "sha256:0d4d25230fa1523c431357e990fa0df25dad3641ce1b5e5eb2bcd2c17fcef8ba",
+    "ui_repo_context": {
+      "artifact_digest": "sha256:58c8c221026bb4339018d819edd10ef938b21e8ac7e53c9cc59458b6550bbd46",
+      "auth": {
+        "evidence_paths": [],
+        "present": false
+      },
+      "components": {
+        "apps/web/src/AppShell.tsx#AppShell": {
+          "evidence_ref": "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+          "path": "apps/web/src/AppShell.tsx",
+          "props": [
+            {
+              "has_default": false,
+              "name": "title",
+              "optional": false
+            },
+            {
+              "has_default": false,
+              "name": "health",
+              "optional": false
+            }
+          ],
+          "symbol": "AppShell"
+        },
+        "apps/web/src/main.tsx#Root": {
+          "evidence_ref": "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+          "path": "apps/web/src/main.tsx",
+          "props": [],
+          "symbol": "Root"
+        }
+      },
+      "composition_chain": [
+        {
+          "evidence_ref": "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8",
+          "passes_props": {
+            "apps/web/src/AppShell.tsx#AppShell": [
+              "health",
+              "title"
+            ]
+          },
+          "path": "apps/web/src/main.tsx",
+          "ref": "apps/web/src/main.tsx#Root",
+          "renders": [
+            "apps/web/src/AppShell.tsx#AppShell"
+          ],
+          "symbol": "Root"
+        },
+        {
+          "evidence_ref": "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+          "passes_props": {},
+          "path": "apps/web/src/AppShell.tsx",
+          "ref": "apps/web/src/AppShell.tsx#AppShell",
+          "renders": [],
+          "symbol": "AppShell"
+        }
+      ],
+      "data_clients": [
+        {
+          "path": "apps/web/src/health-client.ts",
+          "ref": "apps/web/src/health-client.ts#fetchHealth",
+          "symbol": "fetchHealth"
+        }
+      ],
+      "entrypoint": {
+        "path": "apps/web/src/main.tsx",
+        "ref": "apps/web/src/main.tsx#Root",
+        "symbol": "Root"
+      },
+      "evidence_refs": [
+        "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547",
+        "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+      ],
+      "project_profile_id": "typescript_fullstack_v1",
+      "schema_version": "ui_repo_experience_context_v1",
+      "styles": {
+        "class_name_attributes": 0,
+        "convention": "none",
+        "inline_style_attributes": 0,
+        "stylesheet_digests": {},
+        "stylesheet_files": []
+      },
+      "uncertainty": [],
+      "verification": {
+        "active_stage_ids": [
+          "typecheck",
+          "unit"
+        ],
+        "browser_stage_active": false,
+        "dom_capable": false,
+        "unit_environment": "node"
+      },
+      "web_roots": [
+        "apps/web/src"
+      ]
+    },
+    "workspace_ref": "run_workspace_v1"
+  },
+  "unresolved_items": []
+}

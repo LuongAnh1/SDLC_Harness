@@ -2,8 +2,6 @@ import json
 
 import pytest
 
-from sdlc_harness.agents.developer import DeveloperPlanAgent
-from sdlc_harness.agents.validator import ImplementationPlanValidator
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import fake_completion
 from sdlc_harness.profiles import (
@@ -138,19 +136,8 @@ def test_policy_routes_typescript_components_and_test_suffixes():
             expected_path,
             expected_component,
         )
-    assert (
-        policy.test_path_for_source("apps/web/src/HeritagePage.tsx", "HeritagePage")
-        == "apps/web/src/HeritagePage.test.tsx"
-    )
-    assert (
-        policy.test_path_for_source("packages/db/src/HeritageRepository.ts", "HeritageRepository")
-        == "packages/db/src/HeritageRepository.test.ts"
-    )
     assert policy.normalize_mapping_path("apps/web/src/health-client.ts") == (
         "apps/web/src/health-client.ts"
-    )
-    assert policy.test_path_for_source("apps/web/src/health-client.ts", "health-client") == (
-        "apps/web/src/health-client.test.ts"
     )
     assert policy.source_path_for_test("apps/web/src/health-client.test.ts") == (
         "apps/web/src/health-client.ts"
@@ -215,203 +202,25 @@ def test_policy_accepts_only_profile_owned_file_kinds():
     assert all(policy.normalize_editable_path(path) == "" for path in rejected)
 
 
-def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_paths():
-    class_graph, sequence_graph = _graphs()
+def test_policy_accepts_ui_stylesheets_as_non_source_web_targets():
     policy = _policy()
-    verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent(_HostilePlanningLlm()).plan(
-        run_id="run_profiled",
-        source_ref="fixture:profiled",
-        issue_key="SDLC-1",
-        requirement_packet="requirement",
-        design_artifact="design",
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        target_repo_path=".",
-        target_repo_remote="remote",
-        target_base_branch="main",
-        planned_branch="feature/profiled",
-        target_files=[],
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-
-    assert draft.structured["planning_profile"] == policy.metadata()
-    assert draft.structured["verification_stage_ids"] == list(verification_policy.stage_ids)
-    assert all("command" not in item for item in draft.structured["test_intents"])
-    mappings = draft.structured["design_mappings"]
-    assert not any(".java" in str(item["planned_code_target"]) for item in mappings)
-    service = next(item for item in mappings if item["design_element_id"] == "class:DeleteHeritageService")
-    assert service["planned_code_target"] == "apps/api/src/DeleteHeritageService.ts"
-    assert service["component_id"] == "api"
-    assert not any(item["design_element_id"] == "class:InventedService" for item in mappings)
-
-    proposed = draft.structured["proposed_files"]
-    paths = {item["path"] for item in proposed}
-    assert "src/main/java/DeleteHeritageService.java" not in paths
-    assert "package.json" not in paths
-    assert "apps/api/src/DeleteHeritageService.ts" in paths
-    assert "packages/db/src/HeritageRepository.test.ts" in paths
-    assert all(item["component_id"] == policy.component_for_path(item["path"]) for item in proposed)
-    assert draft.structured["implementation_steps"][0]["files"] == [
-        "apps/api/src/DeleteHeritageService.ts"
-    ]
+    for path in ("apps/web/src/Screen.css", "apps/web/src/screens/Screen.css"):
+        assert policy.normalize_editable_path(path) == path
+        assert policy.is_stylesheet_path(path)
+        assert policy.component_for_path(path) == "web"
+        assert policy.normalize_mapping_path(path) == ""
+        assert not policy.is_test_path(path)
+    for path in ("apps/api/src/Service.css", "packages/contracts/src/x.css", "Screen.css"):
+        assert policy.normalize_editable_path(path) == ""
+        assert not policy.is_stylesheet_path(path)
+    assert policy.prompt_context()["special_roots"]["ui_stylesheets"] == {
+        "root": "apps/web/src",
+        "suffixes": [".css"],
+    }
 
 
-def test_profiled_validator_rejects_wrong_profile_path_and_component():
-    class_graph, sequence_graph = _graphs()
-    policy = _policy()
-    verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
-        run_id="run_profiled",
-        source_ref="fixture:profiled",
-        issue_key="SDLC-1",
-        requirement_packet="requirement",
-        design_artifact="design",
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        target_repo_path=".",
-        target_repo_remote="remote",
-        target_base_branch="main",
-        planned_branch="feature/profiled",
-        target_files=[],
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-    tampered = dict(draft.structured)
-    tampered["design_mappings"] = [dict(item) for item in draft.structured["design_mappings"]]
-    tampered["design_mappings"][0]["planned_code_target"] = "src/main/java/HeritagePage.java"
-    tampered["design_mappings"][1]["component_id"] = "database"
-    tampered["proposed_files"] = [*draft.structured["proposed_files"], {"path": "package.json"}]
+def test_verification_prompt_context_states_active_stage_capabilities():
+    context = _verification_policy().prompt_context()
+    assert set(context["stage_capabilities"]) == set(context["stage_ids"])
+    assert "no DOM" in context["stage_capabilities"]["unit"]
 
-    review = ImplementationPlanValidator().review_rules(
-        structured_plan=tampered,
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        requirement_contract_version="v1",
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-
-    assert not review.ok
-    assert any("outside approved planning roots" in issue for issue in review.executability_issues)
-    assert any("Mapping component does not match" in issue for issue in review.executability_issues)
-
-
-def test_profiled_validator_accepts_prisma_and_e2e_files_with_correct_owners():
-    class_graph, sequence_graph = _graphs()
-    policy = _policy()
-    verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
-        run_id="run_profiled",
-        source_ref="fixture:profiled",
-        issue_key="SDLC-1",
-        requirement_packet="requirement",
-        design_artifact="design",
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        target_repo_path=".",
-        target_repo_remote="remote",
-        target_base_branch="main",
-        planned_branch="feature/profiled",
-        target_files=[],
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-    structured = dict(draft.structured)
-    structured["proposed_files"] = [
-        *draft.structured["proposed_files"],
-        {"path": "packages/db/prisma/schema.prisma", "component_id": "database"},
-        {"path": "packages/db/prisma/migrations/001_delete.sql", "component_id": "database"},
-        {"path": "tests/e2e/delete-heritage.spec.ts", "component_id": "e2e"},
-    ]
-    structured["implementation_steps"] = [
-        *draft.structured["implementation_steps"],
-        {
-            "order": 3,
-            "title": "Schema and browser coverage",
-            "description": "Apply the approved persistence and E2E changes.",
-            "files": [
-                "packages/db/prisma/schema.prisma",
-                "packages/db/prisma/migrations/001_delete.sql",
-                "tests/e2e/delete-heritage.spec.ts",
-            ],
-            "design_refs": [],
-        },
-    ]
-
-    review = ImplementationPlanValidator().review_rules(
-        structured_plan=structured,
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        requirement_contract_version="v1",
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-
-    assert review.ok, review.issues
-
-
-@pytest.mark.parametrize(
-    ("mutation", "expected_issue"),
-    (
-        ("raw_command", "must not contain execution field"),
-        ("missing_stage", "missing stage_id"),
-        ("unknown_stage", "unsupported verification stage"),
-        ("reordered_stages", "do not match the frozen project profile"),
-        ("wrong_version", "version must be"),
-    ),
-)
-def test_profiled_validator_fails_closed_for_invalid_verification_contract(
-    mutation: str,
-    expected_issue: str,
-):
-    class_graph, sequence_graph = _graphs()
-    policy = _policy()
-    verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
-        run_id="run_profiled",
-        source_ref="fixture:profiled",
-        issue_key="SDLC-1",
-        requirement_packet="requirement",
-        design_artifact="design",
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        target_repo_path=".",
-        target_repo_remote="remote",
-        target_base_branch="main",
-        planned_branch="feature/profiled",
-        target_files=[],
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-    structured = json.loads(json.dumps(draft.structured))
-    if mutation == "raw_command":
-        structured["test_intents"][0]["command"] = "npm test"
-    elif mutation == "missing_stage":
-        structured["test_intents"][0].pop("stage_id")
-    elif mutation == "unknown_stage":
-        structured["test_intents"][0]["stage_id"] = "llm_invented_stage"
-    elif mutation == "reordered_stages":
-        structured["verification_stage_ids"].reverse()
-    else:
-        structured["version"] = "implementation_plan_structured_v1"
-
-    review = ImplementationPlanValidator().review_rules(
-        structured_plan=structured,
-        requirement_design_trace={},
-        class_graph=class_graph,
-        sequence_graph=sequence_graph,
-        requirement_contract_version="v1",
-        planning_policy=policy,
-        verification_policy=verification_policy,
-    )
-
-    assert not review.ok
-    assert any(expected_issue in issue for issue in review.executability_issues)

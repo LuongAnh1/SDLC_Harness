@@ -100,15 +100,18 @@ class ConfigApiTests(unittest.TestCase):
         self.assertEqual(profile_field["source"], "default")
         self.assertEqual(profile_field["options"], ["typescript_fullstack_v1"])
         validation_section = next(section for section in payload["sections"] if section["id"] == "validation")
+        validation_names = {field["name"] for field in validation_section["fields"]}
+        self.assertNotIn("SDLC_IMPLEMENTATION_VALIDATION_TRIALS", validation_names)
+        self.assertIn("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED", validation_names)
         self.assertNotIn(
             "SDLC_DESIGNER_LOOP_ENABLED",
             {field["name"] for field in validation_section["fields"]},
         )
-        vertical_trace_field = next(
-            field for field in validation_section["fields"] if field["name"] == "SDLC_VERTICAL_TRACE_MODE"
+        # Design contracts are fixed, so the dashboard offers no version or mode switch for them.
+        self.assertFalse(
+            {"SDLC_VERTICAL_TRACE_MODE", "SDLC_DESIGNER_CONTRACT_VERSION", "SDLC_DESIGN_SEMANTIC_REVIEW_MODE"}
+            & {field["name"] for field in validation_section["fields"]}
         )
-        self.assertEqual(vertical_trace_field["value"], "enforce")
-        self.assertEqual(vertical_trace_field["source"], "default")
         design_step_review_field = next(
             field
             for field in validation_section["fields"]

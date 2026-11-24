@@ -23,6 +23,7 @@ from sdlc_harness.sync.github import (
 )
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
+from sdlc_harness.workflows.phase4_browser import _worktree_fingerprint
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import GitRepositoryTemplate, create_fast_run_workspace, populate_typescript_target
 
@@ -365,7 +366,44 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "github_publish_unexpected_changes")
         self.assertEqual(self._git_output(target, "rev-list", "--count", "HEAD"), "1")
 
-    def test_workflow_publishes_qa_tested_run_and_writes_artifact(self) -> None:
+    def test_publisher_leaves_evidence_only_paths_uncommitted_and_still_blocks_others(self) -> None:
+        target, remote = self._target_with_bare_remote()
+        source_path = "src/main/java/example/Feature.java"
+        evidence_path = "tests/e2e/sdlc-browser-capture.spec.ts"
+        (target / source_path).write_text("final class Feature {}\n", encoding="utf-8")
+        (target / evidence_path).parent.mkdir(parents=True, exist_ok=True)
+        (target / evidence_path).write_text("// Harness-rendered\n", encoding="utf-8")
+        body_path = self.root / "pr-body.md"
+        body_path.write_text("# Review\n", encoding="utf-8")
+        arguments = {
+            "target_path": target,
+            "expected_remote": str(remote),
+            "repository": "example/target",
+            "branch": "feature/sdlc-1-implementation",
+            "base_branch": "main",
+            "issue_key": "SDLC-1",
+            "run_id": "run_evidence_only",
+            "publication_paths": [source_path],
+            "pr_title": "[SDLC-1] Implement approved use case",
+            "pr_body_path": body_path,
+        }
+        (target / "notes.txt").write_text("not owned by the run\n", encoding="utf-8")
+
+        with self.assertRaises(GitHubPublishError) as context:
+            GitHubCodeReviewPublisher(gh_runner=FakeGh()).publish(**arguments, evidence_only_paths=[evidence_path])
+        self.assertIn("notes.txt", context.exception.message)
+        self.assertNotIn(evidence_path, context.exception.message)
+
+        (target / "notes.txt").unlink()
+        result = GitHubCodeReviewPublisher(gh_runner=FakeGh()).publish(
+            **arguments, evidence_only_paths=[evidence_path]
+        ).to_dict()
+
+        self.assertEqual(result["commit"]["staged_paths"], [source_path])
+        self.assertEqual(result["evidence_only_paths"], [evidence_path])
+        self.assertEqual(self._git_output(target, "ls-files", "--others", "--exclude-standard"), evidence_path)
+
+    def test_workflow_publishes_approved_run_and_writes_artifact(self) -> None:
         settings, store, run_id = self._workflow_fixture()
         publisher = RecordingPublisher()
         workflow = PhaseFourWorkflow(settings)
@@ -620,14 +658,18 @@ class GitHubSyncTest(unittest.TestCase):
             path = artifacts / f"{name}_v1{suffix}"
             path.write_text(value + "\n", encoding="utf-8")
             latest[name] = store.relative(path)
+        documentation = artifacts / "documentation_closure_v1.json"
+        documentation.write_text(json.dumps({"context": {}}) + "\n", encoding="utf-8")
         store.write_state(
             {
                 "ok": True,
                 "run_id": run_id,
                 "source_ref": "jira_issue:SDLC-1",
-                "current_phase": "qa_testing",
-                "status": "qa_tested",
+                "current_phase": "code_review_publishing",
+                "status": "publication_approved",
                 "latest_artifacts": latest,
+                "documentation_closure": {"mode": "enforce", "artifact": store.relative(documentation)},
+                "final_verification": {"worktree_sha256": _worktree_fingerprint(worktree)["sha256"]},
                 "profile_snapshot": profile_snapshot,
                 "quality_reports": {
                     "implementation_traceability": {

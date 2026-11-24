@@ -8,15 +8,15 @@ dữ kiện để Phase 4 sửa code an toàn.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from typing import Any
 
 from ...core.config import phase3_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
+from ...llm.step_review import LlmStepReviewRequired
 from ...profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     LanguagePromptDirective,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -26,136 +26,39 @@ from ...profiles import (
     profiled_plan_contract_issues,
     resolve_language_prompt_directive,
 )
+from ...core.coerce import dict_items as _dict_items, string_items as _string_items
+from ...core.coerce import dict_value as _dict_value
 
 
-def _expected_design_elements(
-    *,
-    class_graph: dict[str, object],
-    sequence_graph: dict[str, object],
-) -> dict[str, dict[str, str]]:
-    expected: dict[str, dict[str, str]] = {}
-    for node in _dict_items(class_graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        if not class_name:
-            continue
-        expected[f"class:{class_name}"] = {"type": "class", "name": class_name}
-        for method in _dict_items(node.get("methods")):
-            method_name = str(method.get("name") or "").strip()
-            if method_name:
-                full_name = f"{class_name}.{method_name}"
-                expected[f"method:{full_name}"] = {"type": "method", "name": full_name}
-
-    for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):
-        diagram_id = str(diagram.get("id") or "sequence_diagram").strip()
-        for index, message in enumerate(_dict_items(diagram.get("messages")), start=1):
-            source = str(message.get("from") or "").strip()
-            target = str(message.get("to") or "").strip()
-            text = str(message.get("message") or "").strip()
-            if text:
-                name = f"{source}->{target}: {text}"
-                expected[f"sequence:{diagram_id}:{index}"] = {
-                    "type": "sequence_message",
-                    "name": name,
-                    "message_type": str(message.get("type") or "synchronous").strip().lower(),
-                    "message": text,
-                }
-    return expected
-
-
-def _traceability_issues(
-    *,
-    requirement_design_trace: dict[str, object],
-    mapped_names: set[str],
-    allowed_names: set[str],
-) -> list[str]:
-    issues: list[str] = []
-    for trace_key in ("class_trace", "sequence_trace"):
-        for item in _dict_items(requirement_design_trace.get(trace_key)):
-            requirement = str(item.get("requirement") or "").strip()
-            for link in _dict_items(item.get("links")):
-                target = str(link.get("target") or "").strip()
-                if not target:
-                    continue
-                if target in allowed_names and target not in mapped_names:
-                    issues.append(f"Trace target `{target}` for {requirement} is not reflected in the plan.")
-    return issues
-
-
-def _requirement_coverage_issues(
-    *,
-    structured_plan: dict[str, object],
-    requirement_graph: dict[str, object],
-    requirement_design_trace: dict[str, object],
-) -> list[str]:
-    """Hard-gate the canonical V2 requirement coverage produced by Python."""
-
-    issues: list[str] = []
-    contract = structured_plan.get("requirement_contract")
-    contract = contract if isinstance(contract, dict) else {}
-    if contract.get("version") != "v2":
-        issues.append("Structured plan requirement contract version must be v2.")
-    if contract.get("revision") != requirement_graph.get("revision"):
-        issues.append("Structured plan requirement revision does not match the canonical graph.")
-    artifact_refs = contract.get("artifact_refs")
-    artifact_refs = artifact_refs if isinstance(artifact_refs, dict) else {}
-    for key in ("requirement_model", "requirement_packet", "formal_use_case"):
-        if not str(artifact_refs.get(key) or "").strip():
-            issues.append(f"Structured plan requirement contract is missing artifact ref: {key}")
-    requirements = _dict_items(requirement_graph.get("requirements"))
-    expected_ids = [str(item.get("id") or "").strip() for item in requirements]
-    expected_ids = [item for item in expected_ids if item]
-    expected_set = set(expected_ids)
-    coverage = _dict_items(structured_plan.get("requirement_coverage"))
-    actual_ids = [str(item.get("requirement_id") or "").strip() for item in coverage]
-    actual_set = {item for item in actual_ids if item}
-
-    if len(actual_ids) != len(actual_set):
-        issues.append("Requirement coverage contains duplicate requirement IDs.")
-    for requirement_id in sorted(expected_set - actual_set):
-        issues.append(f"Missing requirement coverage for canonical ID: {requirement_id}")
-    for requirement_id in sorted(actual_set - expected_set):
-        issues.append(f"Requirement coverage invented unknown canonical ID: {requirement_id}")
-
-    allowed_targets: dict[str, set[str]] = {requirement_id: set() for requirement_id in expected_set}
-    for trace_key in ("class_trace", "sequence_trace"):
-        for trace_item in _dict_items(requirement_design_trace.get(trace_key)):
-            requirement_id = str(trace_item.get("requirement") or "").strip()
-            if requirement_id not in allowed_targets:
-                continue
-            for link in _dict_items(trace_item.get("links")):
-                target = str(link.get("target") or "").strip()
-                if target:
-                    allowed_targets[requirement_id].add(target)
-
-    for item in coverage:
-        requirement_id = str(item.get("requirement_id") or "").strip()
-        if requirement_id not in expected_set:
-            continue
-        targets = set(_string_items(item.get("design_targets")))
-        if targets != allowed_targets[requirement_id]:
-            extra = sorted(targets - allowed_targets[requirement_id])
-            missing = sorted(allowed_targets[requirement_id] - targets)
-            if extra:
-                issues.append(
-                    f"Requirement {requirement_id} references design targets outside its approved trace: {extra}"
-                )
-            if missing:
-                issues.append(f"Requirement {requirement_id} omits approved design targets: {missing}")
-        if not _string_items(item.get("design_element_ids")):
-            issues.append(f"Requirement {requirement_id} has no resolved design element IDs.")
-        if not _string_items(item.get("planned_code_targets")):
-            issues.append(f"Requirement {requirement_id} has no planned code target.")
-        if not _string_items(item.get("test_intents")):
-            issues.append(f"Requirement {requirement_id} has no test intent.")
-    return issues
+_PLAN_FINDING_CATEGORIES = {
+    "coverage",
+    "requirement_coverage",
+    "traceability",
+    "implementation_quality",
+    "test",
+    "scope",
+}
+_PLAN_FINDING_SEVERITIES = {"blocking", "warning"}
+_PLAN_FINDING_FIELDS = {
+    "coverage": "coverage_issues",
+    "requirement_coverage": "requirement_coverage_issues",
+    "traceability": "traceability_issues",
+    "implementation_quality": "implementation_quality_issues",
+    "test": "test_issues",
+    "scope": "scope_issues",
+}
 
 
 def _component_requirement_coverage_issues(
     *,
     structured_plan: dict[str, object],
     requirement_graph: dict[str, object],
+    design_graph: dict[str, object] | None = None,
+    trace_graph: dict[str, object] | None = None,
 ) -> list[str]:
-    """Validate exact canonical IDs while Vertical Trace owns V4 design identity."""
+    """Validate exact canonical IDs while Vertical Trace owns V5 design identity."""
+
+    from ..developer.component_plan import requirement_existing_coverage
 
     issues: list[str] = []
     contract = structured_plan.get("requirement_contract")
@@ -189,6 +92,16 @@ def _component_requirement_coverage_issues(
             continue
         if str(item.get("content") or "").strip() != expected[requirement_id]:
             issues.append(f"Requirement {requirement_id} coverage content is stale.")
+        if str(item.get("coverage_kind") or ""):
+            # Existing-code and precondition rows carry no new code; the graphs must agree on that.
+            facts = requirement_existing_coverage(
+                requirement_id, design_graph=design_graph or {}, trace_graph=trace_graph or {}
+            )
+            if not facts or any(item.get(key) != value for key, value in facts.items()):
+                issues.append(
+                    f"Requirement {requirement_id} existing-code coverage does not match the approved Design."
+                )
+            continue
         design_ids = set(_string_items(item.get("design_element_ids")))
         if not design_ids or not design_ids.issubset(allowed_design_ids):
             issues.append(f"Requirement {requirement_id} has missing or unapproved design element IDs.")
@@ -196,158 +109,6 @@ def _component_requirement_coverage_issues(
             issues.append(f"Requirement {requirement_id} has no planned code target.")
         if not _string_items(item.get("test_intents")):
             issues.append(f"Requirement {requirement_id} has no test intent.")
-    return issues
-
-
-def _executability_issues(
-    *,
-    structured_plan: dict[str, object],
-    mappings: list[dict[str, Any]],
-    class_graph: dict[str, object] | None = None,
-    planning_policy: PlanningPathPolicy | None = None,
-    verification_policy: VerificationStagePolicy | None = None,
-) -> list[str]:
-    issues: list[str] = []
-    repo = structured_plan.get("target_repository")
-    if not isinstance(repo, dict):
-        issues.append("Target repository block is missing.")
-        repo = {}
-    for key in ("local_path", "remote", "base_branch", "planned_branch"):
-        if not str(repo.get(key) or "").strip():
-            issues.append(f"Target repository `{key}` is missing.")
-
-    if planning_policy and not verification_policy:
-        planning_profile = structured_plan.get("planning_profile")
-        planning_profile = planning_profile if isinstance(planning_profile, dict) else {}
-        if planning_profile != planning_policy.metadata():
-            issues.append("Structured plan planning_profile does not match the frozen run profile.")
-
-    if not mappings:
-        issues.append("Implementation plan has no design mappings.")
-    for item in mappings:
-        target = str(item.get("planned_code_target") or "").strip()
-        if not target:
-            issues.append(f"Mapping `{item.get('design_element_id')}` has no planned code target.")
-            continue
-        path = target.split("#", 1)[0]
-        normalized = _normalized_plan_path(path, planning_policy=planning_policy, mapping_only=True)
-        if not normalized:
-            issues.append(f"Planned code target is outside approved planning roots: {target}")
-        elif planning_policy:
-            component_id = str(item.get("component_id") or "").strip()
-            expected_component = planning_policy.component_for_path(normalized, mapping_only=True)
-            if component_id != expected_component:
-                issues.append(
-                    f"Mapping component does not match target path: {item.get('design_element_id')} "
-                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
-                )
-        if not str(item.get("test_intent") or "").strip():
-            issues.append(f"Mapping `{item.get('design_element_id')}` has no test intent.")
-
-    test_intents = _dict_items(structured_plan.get("test_intents"))
-    if verification_policy:
-        if planning_policy is None:
-            issues.append("Profiled implementation plan is missing its planning path policy.")
-        else:
-            issues.extend(
-                profiled_plan_contract_issues(
-                    structured_plan,
-                    planning_policy=planning_policy,
-                    verification_policy=verification_policy,
-                    class_graph=class_graph,
-                )
-            )
-    else:
-        if not test_intents:
-            issues.append("Implementation plan has no test intent block.")
-        for item in test_intents:
-            if not str(item.get("command") or "").strip():
-                issues.append("A test intent is missing the command.")
-
-    proposed = _dict_items(structured_plan.get("proposed_files"))
-    proposed_paths = {
-        _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
-        for item in proposed
-    }
-    proposed_paths.discard("")
-    for item in proposed:
-        path = _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
-        if not path:
-            issues.append(f"Proposed file is outside approved planning roots: {item.get('path')}")
-        elif planning_policy:
-            component_id = str(item.get("component_id") or "").strip()
-            expected_component = planning_policy.component_for_path(path)
-            if component_id != expected_component:
-                issues.append(
-                    f"Proposed file component does not match its path: {path} "
-                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
-                )
-    step_paths: set[str] = set()
-    for step in _dict_items(structured_plan.get("implementation_steps")):
-        raw_files = step.get("files") if isinstance(step.get("files"), list) else []
-        for raw_path in raw_files:
-            path = _normalized_plan_path(raw_path, planning_policy=planning_policy)
-            if not path:
-                issues.append(f"Implementation step file is outside approved planning roots: {raw_path}")
-                continue
-            step_paths.add(path)
-    for path in sorted(step_paths - proposed_paths):
-        issues.append(f"Implementation step file is missing from proposed_files: {path}")
-    mapping_paths = {
-        _normalized_plan_path(
-            str(item.get("planned_code_target") or "").split("#", 1)[0],
-            planning_policy=planning_policy,
-            mapping_only=True,
-        )
-        for item in mappings
-    }
-    mapping_paths.discard("")
-    for path in sorted(mapping_paths - proposed_paths):
-        issues.append(f"Design mapping file is missing from proposed_files: {path}")
-
-    class_targets = {
-        str(item.get("design_element_name") or ""): str(item.get("planned_code_target") or "").split("#", 1)[0]
-        for item in mappings
-        if item.get("design_element_type") == "class"
-    }
-    if any(item.get("design_element_type") == "sequence_message" for item in mappings):
-        controller = next(
-            (
-                (name, path)
-                for name, path in class_targets.items()
-                if name.endswith("Controller") or (planning_policy and name.endswith("Boundary"))
-            ),
-            None,
-        )
-        if controller:
-            name, main_path = controller
-            if planning_policy:
-                test_stem = name.removesuffix("Controller").removesuffix("Boundary") + "Flow"
-                expected_flow_test = planning_policy.test_path_for_source(main_path, test_stem)
-            else:
-                parent = main_path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
-                expected_flow_test = f"{parent}/{name.removesuffix('Controller')}FlowTest.java"
-            if expected_flow_test not in proposed_paths:
-                issues.append(f"Approved sequence flow has no editable flow-test path: {expected_flow_test}")
-
-    if planning_policy:
-        repository = next(
-            ((name, path) for name, path in class_targets.items() if name.endswith("Repository")),
-            None,
-        )
-        if repository:
-            name, main_path = repository
-            expected_repository_test = planning_policy.test_path_for_source(main_path, name)
-            if expected_repository_test not in proposed_paths:
-                issues.append(
-                    f"Approved repository has no editable test path: {expected_repository_test}"
-                )
-
-    for adjustment in _dict_items(structured_plan.get("design_adjustments")):
-        if adjustment.get("action") == "unresolved" or adjustment.get("status") == "conflict":
-            issues.append(
-                f"Design/repository conflict is unresolved: {adjustment.get('design_element_id')}"
-            )
     return issues
 
 
@@ -372,102 +133,6 @@ def _resolve_verification_policy(
     return verification_policy
 
 
-def _mapping_contract_issues(
-    *,
-    mappings: list[dict[str, Any]],
-    expected: dict[str, dict[str, str]],
-    class_graph: dict[str, object],
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[str]:
-    issues: list[str] = []
-    ids = [str(item.get("design_element_id") or "").strip() for item in mappings]
-    if len([item for item in ids if item]) != len(set(item for item in ids if item)):
-        issues.append("Implementation plan contains duplicate design mapping IDs.")
-    class_methods: dict[str, set[str]] = {}
-    for node in _dict_items(class_graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        class_methods[class_name] = {
-            str(method.get("name") or "").strip()
-            for method in _dict_items(node.get("methods"))
-            if str(method.get("name") or "").strip()
-        }
-    allowed_policies = {
-        "synchronous": {"direct_symbol", "boundary_interaction"},
-        "return": {"direct_symbol", "return_behavior", "semantic_side_effect"},
-        "lost_or_exception": {"exception_path"},
-        "exception": {"exception_path"},
-        "lost": {"exception_path"},
-    }
-    for mapping in mappings:
-        element_id = str(mapping.get("design_element_id") or "").strip()
-        expected_item = expected.get(element_id)
-        if not expected_item:
-            continue
-        if str(mapping.get("design_element_type") or "") != expected_item["type"]:
-            issues.append(f"Mapping type does not match approved graph: {element_id}")
-        if str(mapping.get("design_element_name") or "") != expected_item["name"]:
-            issues.append(f"Mapping name does not match approved graph: {element_id}")
-        if expected_item["type"] == "method":
-            if mapping.get("implementation_status") == "waived_by_design_adjustment":
-                continue
-            target = str(mapping.get("planned_code_target") or "").strip()
-            if "#" not in target:
-                issues.append(f"Method mapping does not target an approved method symbol: {element_id}")
-            else:
-                path, symbol = target.split("#", 1)
-                owner = _symbol_owner(path, planning_policy=planning_policy)
-                if symbol not in class_methods.get(owner, set()):
-                    issues.append(f"Method target is not an approved class method: {target}")
-            continue
-        if expected_item["type"] != "sequence_message":
-            continue
-        message_type = str(mapping.get("message_type") or "").strip().lower()
-        trace_policy = str(mapping.get("trace_policy") or "").strip()
-        if message_type != expected_item.get("message_type"):
-            issues.append(f"Sequence message type does not match approved graph: {element_id}")
-        if trace_policy not in allowed_policies.get(message_type, set()):
-            issues.append(f"Sequence trace policy `{trace_policy}` is invalid for {message_type}: {element_id}")
-        target = str(mapping.get("planned_code_target") or "").strip()
-        if "#" not in target or trace_policy != "direct_symbol":
-            continue
-        path, symbol = target.split("#", 1)
-        owner = _symbol_owner(path, planning_policy=planning_policy)
-        if symbol not in class_methods.get(owner, set()):
-            issues.append(f"Direct sequence target is not an approved class method: {target}")
-    return issues
-
-
-def _normalized_java_path(value: object) -> str:
-    path = str(value or "").strip().replace("\\", "/")
-    return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
-
-
-def _normalized_plan_path(
-    value: object,
-    *,
-    planning_policy: PlanningPathPolicy | None,
-    mapping_only: bool = False,
-) -> str:
-    if planning_policy:
-        return (
-            planning_policy.normalize_mapping_path(value)
-            if mapping_only
-            else planning_policy.normalize_editable_path(value)
-        )
-    return _normalized_java_path(value)
-
-
-def _symbol_owner(path: str, *, planning_policy: PlanningPathPolicy | None) -> str:
-    if planning_policy:
-        return planning_policy.symbol_owner(path)
-    return path.rsplit("/", 1)[-1].removesuffix(".java")
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
 @dataclass(frozen=True)
 class ImplementationPlanReview:
     """Quality report của Validator.review_plan."""
@@ -487,6 +152,9 @@ class ImplementationPlanReview:
     llm_review: dict[str, object] | None = None
     repair_iterations: int = 0
     requirement_contract_version: str = "v2"
+    affected_unit_ids: list[str] = field(default_factory=list)
+    # Provider output was empty, truncated or unparsable: no repair, no checkpoint.
+    inconclusive: bool = False
 
     @property
     def issues(self) -> list[str]:
@@ -517,7 +185,9 @@ class ImplementationPlanReview:
             "llm_review": self.llm_review or {},
             "repair_iterations": self.repair_iterations,
             "requirement_contract_version": self.requirement_contract_version,
+            "affected_unit_ids": self.affected_unit_ids,
             "issue_count": len(self.issues),
+            **({"inconclusive": True} if self.inconclusive else {}),
         }
 
 
@@ -548,6 +218,7 @@ class ImplementationPlanValidator:
         vertical_trace_graph: dict[str, object] | None = None,
         repo_landscape: dict[str, object] | None = None,
         component_plan_inputs: dict[str, object] | None = None,
+        previous_round: dict[str, object] | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
 
@@ -590,12 +261,27 @@ class ImplementationPlanValidator:
             verification_policy=verification_policy,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
+            previous_round=previous_round,
         )
-        return _hybrid_review(
+        if llm_payload.get("inconclusive"):
+            return ImplementationPlanReview(
+                ok=False,
+                mode=f"implementation_plan_review_hybrid_{rule_review.requirement_contract_version}",
+                summary=f"Implementation plan review was inconclusive: {llm_payload.get('reason')}",
+                rule_review=rule_review.to_dict(),
+                llm_review=llm_payload,
+                repair_iterations=repair_iterations,
+                requirement_contract_version=rule_review.requirement_contract_version,
+                inconclusive=True,
+            )
+        review = _hybrid_review(
             rule_review=rule_review,
             llm_payload=llm_payload,
             repair_iterations=repair_iterations,
         )
+        # Repair input contains blocking findings only; warnings stay in llm_review for audit.
+        review = replace(review, developer_feedback="\n".join(review.issues))
+        return review
 
     def review_rules(
         self,
@@ -619,128 +305,64 @@ class ImplementationPlanValidator:
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )
-        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-            requirement_coverage_issues = (
-                _component_requirement_coverage_issues(
-                    structured_plan=structured_plan,
-                    requirement_graph=requirement_graph or {},
-                )
-                if requirement_contract_version == "v2"
-                else []
-            )
-            if planning_policy is None or verification_policy is None:
-                issues = ["Component-aware plan requires frozen planning and verification policies."]
-            else:
-                from ..developer.component_plan import (
-                    build_component_work_units,
-                    component_plan_issues,
-                )
-
-                expected_units = build_component_work_units(
-                    design_graph=vertical_design_graph or {},
-                    trace_graph=vertical_trace_graph or {},
-                    repo_landscape=repo_landscape or {},
-                    planning_policy=planning_policy,
-                )
-                issues = component_plan_issues(
-                    structured_plan=structured_plan,
-                    expected_units=expected_units,
-                    expected_inputs=component_plan_inputs or {},
-                    planning_policy=planning_policy,
-                    verification_stage_ids=list(verification_policy.stage_ids),
-                    design_graph=vertical_design_graph or {},
-                    trace_graph=vertical_trace_graph or {},
-                    repo_landscape=repo_landscape or {},
-                )
-                issues.extend(
-                    profiled_plan_contract_issues(
-                        structured_plan,
-                        planning_policy=planning_policy,
-                        verification_policy=verification_policy,
-                        class_graph=class_graph,
-                    )
-                )
-            repo = structured_plan.get("target_repository")
-            if not isinstance(repo, dict):
-                issues.append("Target repository block is missing.")
-            else:
-                for key in ("local_path", "remote", "base_branch", "planned_branch"):
-                    if not str(repo.get(key) or "").strip():
-                        issues.append(f"Target repository `{key}` is missing.")
-            issues = list(dict.fromkeys(issues))
-            ok = not issues and not requirement_coverage_issues
-            return ImplementationPlanReview(
-                ok=ok,
-                mode="implementation_plan_rule_review_v4",
-                requirement_coverage_issues=requirement_coverage_issues,
-                executability_issues=issues,
-                summary="Rule review passed." if ok else "Rule review found blocking issues.",
-                requirement_contract_version=requirement_contract_version,
-            )
-        expected = _expected_design_elements(
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-        )
-        mappings = _dict_items(structured_plan.get("design_mappings"))
-        mapped_ids = {str(item.get("design_element_id") or "") for item in mappings}
-        mapped_names = {str(item.get("design_element_name") or "") for item in mappings}
-        allowed_ids = set(expected)
-        allowed_names = {item["name"] for item in expected.values()}
-
-        coverage_issues = [
-            f"Missing implementation mapping for design element: {item['name']} ({element_id})"
-            for element_id, item in expected.items()
-            if element_id not in mapped_ids
-        ]
-        traceability_issues = _traceability_issues(
-            requirement_design_trace=requirement_design_trace,
-            mapped_names=mapped_names,
-            allowed_names=allowed_names,
-        )
-        executability_issues = _executability_issues(
-            structured_plan=structured_plan,
-            mappings=mappings,
-            class_graph=class_graph,
-            planning_policy=planning_policy,
-            verification_policy=verification_policy,
-        )
-        executability_issues.extend(
-            _mapping_contract_issues(
-                mappings=mappings,
-                expected=expected,
-                class_graph=class_graph,
-                planning_policy=planning_policy,
-            )
-        )
-        scope_issues = [
-            f"Plan references design element outside approved graph: {element_id}"
-            for element_id in sorted(mapped_ids)
-            if element_id and element_id not in allowed_ids
-        ]
         requirement_coverage_issues = (
-            _requirement_coverage_issues(
+            _component_requirement_coverage_issues(
                 structured_plan=structured_plan,
                 requirement_graph=requirement_graph or {},
-                requirement_design_trace=requirement_design_trace,
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
             )
-            if requirement_contract_version == "v2"
-            else []
         )
-        ok = not (
-            coverage_issues
-            or requirement_coverage_issues
-            or traceability_issues
-            or executability_issues
-            or scope_issues
-        )
+        if planning_policy is None or verification_policy is None:
+            issues = ["Component-aware plan requires frozen planning and verification policies."]
+        else:
+            from ..developer.component_plan import (
+                build_component_work_units,
+                component_plan_issues,
+            )
+
+            expected_units = build_component_work_units(
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+                planning_policy=planning_policy,
+            )
+            issues = component_plan_issues(
+                structured_plan=structured_plan,
+                expected_units=expected_units,
+                expected_inputs=component_plan_inputs or {},
+                planning_policy=planning_policy,
+                verification_stage_ids=list(verification_policy.stage_ids),
+                verification_stage_ownership={
+                    stage_id: verification_policy.owner_for_stage(stage_id)
+                    for stage_id in verification_policy.stage_ids
+                },
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+            )
+            issues.extend(
+                profiled_plan_contract_issues(
+                    structured_plan,
+                    planning_policy=planning_policy,
+                    verification_policy=verification_policy,
+                    class_graph=class_graph,
+                )
+            )
+        repo = structured_plan.get("target_repository")
+        if not isinstance(repo, dict):
+            issues.append("Target repository block is missing.")
+        else:
+            for key in ("local_path", "remote", "base_branch", "planned_branch"):
+                if not str(repo.get(key) or "").strip():
+                    issues.append(f"Target repository `{key}` is missing.")
+        issues = list(dict.fromkeys(issues))
+        ok = not issues and not requirement_coverage_issues
         return ImplementationPlanReview(
             ok=ok,
-            mode=f"implementation_plan_rule_review_{requirement_contract_version}",
-            coverage_issues=coverage_issues,
+            mode="implementation_plan_rule_review_v4",
             requirement_coverage_issues=requirement_coverage_issues,
-            traceability_issues=traceability_issues,
-            executability_issues=executability_issues,
-            scope_issues=scope_issues,
+            executability_issues=issues,
             summary="Rule review passed." if ok else "Rule review found blocking issues.",
             requirement_contract_version=requirement_contract_version,
         )
@@ -762,6 +384,7 @@ class ImplementationPlanValidator:
         verification_policy: VerificationStagePolicy | None = None,
         vertical_design_graph: dict[str, object] | None = None,
         vertical_trace_graph: dict[str, object] | None = None,
+        previous_round: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Nhờ LLM đánh giá plan theo ngữ nghĩa requirement/design đã duyệt."""
 
@@ -785,46 +408,68 @@ class ImplementationPlanValidator:
             verification_policy=verification_policy,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
+            previous_round=previous_round,
         )
         system = (
             "You are SDLC Harness Validator.review_plan. Return JSON only. "
-            "Be strict about requirement/design coverage, implementation clarity, and tests."
+            "Treat approved Requirement and Design as immutable, review the final merged Plan "
+            "state once, and be strict about implementation clarity and tests."
         )
-        complete_with_metadata = getattr(client, "complete_with_metadata", None)
-        if callable(complete_with_metadata):
-            settings = getattr(client, "settings", None)
-            fallback_max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
-            completion = complete_with_metadata(
-                system=system,
-                prompt=prompt,
-                json_mode=True,
-                **phase3_llm_call_options(
-                    settings,
-                    "plan_validator",
-                    fallback_max_tokens=fallback_max_tokens,
-                ),
-            )
-            raw = str(completion.content)
-        else:
-            raw = client.complete(system=system, prompt=prompt)
-        try:
-            return _parse_llm_review_payload(raw)
-        except HarnessError as exc:
-            return {
-                "ok": False,
-                "summary": "Implementation plan LLM review did not return parseable JSON.",
-                "coverage_issues": [],
-                "requirement_coverage_issues": [],
-                "traceability_issues": [],
-                "implementation_quality_issues": [exc.message],
-                "test_issues": [],
-                "scope_issues": [],
-                "developer_feedback": (
-                    "Rewrite the implementation plan with clearer implementation steps, code targets, "
-                    "and test intents so the next review can evaluate it."
-                ),
-                "parse_error": exc.message,
-            }
+        contract_error = ""
+        for attempt in range(2):
+            request_prompt = prompt
+            if contract_error:
+                request_prompt += (
+                    "\n\nYour previous answer broke the review contract:\n"
+                    f"{contract_error}\n"
+                    "Return one corrected JSON object only. Copy exact IDs from the supplied artifacts."
+                )
+            try:
+                complete_with_metadata = getattr(client, "complete_with_metadata", None)
+                if callable(complete_with_metadata):
+                    settings = getattr(client, "settings", None)
+                    fallback_max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
+                    completion = complete_with_metadata(
+                        system=system,
+                        prompt=request_prompt,
+                        json_mode=True,
+                        **phase3_llm_call_options(
+                            settings,
+                            "plan_validator",
+                            fallback_max_tokens=fallback_max_tokens,
+                        ),
+                    )
+                    raw = str(completion.content or "")
+                    finish_reason = str(getattr(completion, "finish_reason", "") or "")
+                else:
+                    raw = str(client.complete(system=system, prompt=request_prompt) or "")
+                    finish_reason = ""
+            except LlmStepReviewRequired:
+                raise
+            except HarnessError as exc:
+                if exc.error_code not in {"llm_transport_failed", "requirement_refiner_failed"}:
+                    raise
+                return {"ok": False, "inconclusive": True, "reason": exc.message}
+
+            # Empty, truncated or unparsable output is inconclusive: it never becomes a repair.
+            if finish_reason == "length":
+                return {"ok": False, "inconclusive": True, "reason": "provider output was truncated (finish_reason=length)."}
+            if not raw.strip():
+                return {"ok": False, "inconclusive": True, "reason": "provider output was empty."}
+            try:
+                return _parse_v4_llm_review_payload(
+                    raw,
+                    structured_plan=structured_plan,
+                    canonical_requirement=canonical_requirement or {},
+                    vertical_design_graph=vertical_design_graph or {},
+                    vertical_trace_graph=vertical_trace_graph or {},
+                )
+            except HarnessError as exc:
+                if exc.error_code == "implementation_plan_review_contract_invalid" and attempt == 0:
+                    contract_error = exc.message
+                    continue
+                return {"ok": False, "inconclusive": True, "reason": exc.message, "parse_error": exc.message}
+        raise AssertionError("unreachable")
 
 
 def _hybrid_review(
@@ -833,6 +478,12 @@ def _hybrid_review(
     llm_payload: dict[str, object],
     repair_iterations: int,
 ) -> ImplementationPlanReview:
+    if isinstance(llm_payload.get("findings"), list):
+        return _structured_hybrid_review(
+            rule_review=rule_review,
+            llm_payload=llm_payload,
+            repair_iterations=repair_iterations,
+        )
     coverage = [
         *rule_review.coverage_issues,
         *_string_items(llm_payload.get("coverage_issues")),
@@ -882,6 +533,63 @@ def _hybrid_review(
     )
 
 
+def _structured_hybrid_review(
+    *,
+    rule_review: ImplementationPlanReview,
+    llm_payload: dict[str, object],
+    repair_iterations: int,
+) -> ImplementationPlanReview:
+    semantic_issues = {field: [] for field in _PLAN_FINDING_FIELDS.values()}
+    affected_unit_ids: set[str] = set()
+    for finding in _dict_items(llm_payload.get("findings")):
+        if finding.get("severity") != "blocking":
+            continue
+        category = str(finding.get("category") or "")
+        units = _string_items(finding.get("unit_ids"))
+        refs = _string_items(finding.get("refs"))
+        affected_unit_ids.update(units)
+        semantic_issues[_PLAN_FINDING_FIELDS[category]].append(
+            f"[{category}] Units: {', '.join(units)}. Refs: {', '.join(refs)}. "
+            f"Issue: {finding['issue']} Expected: {finding['expected_change']}"
+        )
+
+    coverage = [*rule_review.coverage_issues, *semantic_issues["coverage_issues"]]
+    requirement_coverage = [
+        *rule_review.requirement_coverage_issues,
+        *semantic_issues["requirement_coverage_issues"],
+    ]
+    traceability = [*rule_review.traceability_issues, *semantic_issues["traceability_issues"]]
+    scope = [*rule_review.scope_issues, *semantic_issues["scope_issues"]]
+    implementation_quality = semantic_issues["implementation_quality_issues"]
+    test_issues = semantic_issues["test_issues"]
+    ok = rule_review.ok and not (
+        coverage
+        or requirement_coverage
+        or traceability
+        or rule_review.executability_issues
+        or scope
+        or implementation_quality
+        or test_issues
+    )
+    return ImplementationPlanReview(
+        ok=ok,
+        mode=f"implementation_plan_review_hybrid_{rule_review.requirement_contract_version}",
+        coverage_issues=coverage,
+        requirement_coverage_issues=requirement_coverage,
+        traceability_issues=traceability,
+        executability_issues=list(rule_review.executability_issues),
+        scope_issues=scope,
+        implementation_quality_issues=implementation_quality,
+        test_issues=test_issues,
+        summary=str(llm_payload.get("summary") or rule_review.summary).strip(),
+        rule_review=rule_review.to_dict(),
+        llm_review=llm_payload,
+        repair_iterations=repair_iterations,
+        requirement_contract_version=rule_review.requirement_contract_version,
+        affected_unit_ids=sorted(affected_unit_ids),
+    )
+
+
 def _llm_review_prompt(
     *,
     structured_plan: dict[str, object],
@@ -897,36 +605,202 @@ def _llm_review_prompt(
     verification_policy: VerificationStagePolicy | None = None,
     vertical_design_graph: dict[str, object] | None = None,
     vertical_trace_graph: dict[str, object] | None = None,
+    previous_round: dict[str, object] | None = None,
 ) -> str:
     verification_policy = _resolve_verification_policy(
         planning_policy=planning_policy,
         verification_policy=verification_policy,
     )
+    # Provenance and source evidence trace the Requirement back to its source; the review judges
+    # the Requirement itself, so they are left out (and the JSON is compact) to bound the prompt.
     canonical_section = (
         "Canonical Requirement V2 (source of truth; stable IDs are authoritative):\n"
-        + json.dumps(canonical_requirement, ensure_ascii=False, indent=2)
+        + json.dumps(
+            {
+                key: value
+                for key, value in canonical_requirement.items()
+                if key not in {"provenance_ledger", "source", "evidence", "run_id", "validation"}
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         if canonical_requirement
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
-    compact_plan = {
+    # V5 projections are rendered from work_units and checked by the rule review; unit contract
+    # copies duplicate the Vertical Design nodes/edges below.
+    omitted = {"requirement_coverage", "repair_history", "repo_context"} | (
+        {
+            "implementation_steps",
+            "proposed_files",
+            "design_mappings",
+            "test_intents",
+            "qa_test_intents",
+        }
+    )
+    compact_plan = {key: value for key, value in structured_plan.items() if key not in omitted}
+    # The review judges runtime configuration from `inputs`; the other repository facts feed only the
+    # Planner prompt and the Harness rules.
+    compact_plan["inputs"] = {
         key: value
-        for key, value in structured_plan.items()
-        if key not in {"requirement_coverage", "repair_history", "repo_context"}
+        for key, value in _dict_value(structured_plan.get("inputs")).items()
+        if key
+        not in {
+            "repo_symbol_kinds",
+            "repo_target_callers",
+            "repo_target_tests",
+            "repo_unit_test_environment",
+            "repo_after_mount_middleware",
+        }
     }
-    compact_trace = {
-        key: requirement_design_trace.get(key, [])
-        for key in ("version", "class_trace", "sequence_trace")
+    from ..developer.component_plan import unit_write_scope
+
+    design_nodes = {
+        str(item.get("id") or ""): item
+        for item in _dict_items((vertical_design_graph or {}).get("nodes"))
     }
-    vertical_context = {
-        "design": {
-            key: (vertical_design_graph or {}).get(key)
-            for key in ("schema_version", "artifact_digest", "nodes", "edges")
-        },
-        "trace": {
-            key: (vertical_trace_graph or {}).get(key)
-            for key in ("schema_version", "artifact_digest", "nodes", "edges")
-        },
+    design_edges = {
+        str(item.get("id") or ""): item
+        for item in _dict_items((vertical_design_graph or {}).get("edges"))
     }
+    compact_plan["work_units"] = [
+        {
+            **{
+                key: value
+                for key, value in unit.items()
+                if key not in {"surface_contracts", "boundary_contracts", "ui_obligations"}
+            },
+            # The Validator sees what the Planner may touch, so its expected changes stay doable.
+            **(
+                {"write_scope": unit_write_scope(unit, planning_policy)}
+                if planning_policy and unit_write_scope(unit, planning_policy)
+                else {}
+            ),
+            "approved_design_contracts": {
+                "nodes": [
+                    {
+                        key: node.get(key)
+                        for key in (
+                            "id",
+                            "scenario_id",
+                            "component_id",
+                            "kind",
+                            "surface",
+                            "name",
+                            "contract",
+                            "surface_contract",
+                        )
+                        if key in node
+                    }
+                    for design_id in _string_items(unit.get("design_node_ids"))
+                    if (node := design_nodes.get(design_id)) is not None
+                ],
+                "edges": [
+                    {
+                        key: edge.get(key)
+                        for key in (
+                            "id",
+                            "scenario_id",
+                            "from",
+                            "to",
+                            "kind",
+                            "label",
+                            "guard",
+                            "terminal",
+                            "branch_group",
+                            "order",
+                            "boundary_contract",
+                        )
+                        if key in edge
+                    }
+                    for design_id in _string_items(unit.get("design_edge_ids"))
+                    if (edge := design_edges.get(design_id)) is not None
+                ],
+            },
+        }
+        for unit in structured_plan.get("work_units", [])
+        if isinstance(unit, dict)
+    ]
+    # Complete one-line facts for every approved node replace a cut excerpt of the Design document,
+    # so the review never mistakes a reused node for a missing one.
+    unit_by_node = {
+        node_id: str(unit.get("unit_id") or "")
+        for unit in _dict_items(structured_plan.get("work_units"))
+        for node_id in _string_items(unit.get("design_node_ids"))
+    }
+    index_rows = [
+        " | ".join(
+            [
+                node_id,
+                str(node.get("scenario_id") or ""),
+                f"{node.get('component_id') or ''}/{node.get('surface') or ''}",
+                str(node.get("disposition") or ""),
+                unit_by_node.get(node_id) or "no work unit",
+                str(node.get("name") or ""),
+            ]
+        )
+        for node_id, node in design_nodes.items()
+    ]
+    index_rows.extend(
+        f"Not exercised: {item.get('scenario_id')} {item.get('surface')}"
+        for item in _dict_items((vertical_design_graph or {}).get("surface_not_exercised"))
+    )
+    index_rows.extend(
+        f"Placed: {item.get('scenario_id')} {item.get('surface')} runs in {item.get('component_id')}"
+        for item in _dict_items((vertical_design_graph or {}).get("surface_placements"))
+    )
+    covered_without_unit = [
+        f"{row.get('requirement_id')}: "
+        + (
+            "precondition"
+            if str(row.get("coverage_kind") or "") == "precondition"
+            else "existing code " + ", ".join(_string_items(row.get("existing_code_targets")))
+        )
+        for row in _dict_items(structured_plan.get("requirement_coverage"))
+        if str(row.get("coverage_kind") or "")
+    ]
+    design_section = (
+        "Vertical Design node index (every approved node: id | scenario | component/surface | "
+        "disposition | work unit | name):\n"
+        + "\n".join(index_rows)
+        + (
+            "\nRequirements covered without a work unit (Harness-derived from the approved graphs):\n"
+            + "\n".join(covered_without_unit)
+            if covered_without_unit
+            else ""
+        )
+        if design_nodes
+        else "Approved design artifact:\n" + _excerpt(design_artifact, limit=6000)
+    )
+    requirement_section = (
+        ""
+        if canonical_requirement
+        else "Approved requirement packet:\n" + _excerpt(requirement_packet, limit=6000) + "\n\n"
+    )
+    previous_round_section = (
+        """Previous review round (check it first):
+- For each blocking issue below, decide whether this plan now resolves it and keep every
+  unresolved one as a blocking issue.
+- Then review what the repair changed (`changed_unit_ids`, `changed_plan_fields`) for new gaps.
+  Content that did not change was reviewed in that round; raise a new blocking issue there
+  only when it breaks approved Requirement or Vertical Design behavior.
+"""
+        + json.dumps(previous_round, ensure_ascii=False, indent=2)
+        + "\n\n"
+        if previous_round
+        else ""
+    )
+    # V5 binds Design to code through work units and Harness-owned signature targets, so the
+    # legacy trace and class/sequence graphs are not semantic review input.
+    legacy_trace_section = (
+        ""
+    )
+    legacy_graph_section = (
+        ""
+    )
+    vertical_section = (
+        ""
+    )
     if planning_policy:
         if prompt_directive is None:
             prompt_directive = resolve_language_prompt_directive(
@@ -941,66 +815,163 @@ def _llm_review_prompt(
     else:
         language_context = {"prompt_directive_id": "legacy_compatibility"}
     verification_context = (
-        verification_policy.prompt_context()
+        # Same repository test-environment facts the Planner saw, so both judge one capability.
+        verification_policy.prompt_context(
+            _dict_value(structured_plan.get("inputs")).get("repo_unit_test_environment")
+        )
         if verification_policy
         else {"policy_version": "legacy_command_compatibility_v1"}
     )
-    v4_boundaries = (
+    v5_boundaries = (
         """
-Component-aware V4 boundaries:
+Component-aware V5 boundaries:
+- Approved Requirement and Design are immutable inputs for this review. Do not reopen,
+  reinterpret or request changes to them. Create a Plan finding only when Planner-owned
+  objectives, targets, migration decisions, tests, evidence, signatures or runtime
+  configuration can make the final implementation satisfy those approved inputs.
+- Read every Requirement item in full: a response, message or outcome it names applies to every
+  case it lists (for example both edit and delete). When an approved Design contract states
+  less than a Requirement item its behavior realizes (for example a refusal without the error
+  message the Requirement demands, or a case the Design traces to another scenario only), the
+  plan must still satisfy the Requirement through Planner-owned fields; a plan that follows only
+  the narrower contract is a blocker citing the Requirement and the Design ids.
 - Vertical Design nodes define the complete approved work-unit/component scope.
-  Do not invent a new business component or work unit. Supporting artifacts in an
-  existing repository component are allowed when repo evidence makes them necessary
-  for an executable approved flow.
-- Work-unit identity, membership, dependency, and order are Harness-owned. Do not
-  ask Developer.plan to change them. Review only Planner-owned objectives, targets,
+  Do not invent a new business component or work unit. Each unit's `write_scope` lists the
+  files it may target; supporting code belongs inside those files, plus shared contracts,
+  data schema/migration artifacts and UI stylesheets. Ask for an in-file seam (exported
+  helper, injected dependency) rather than a new support file, which the rule review rejects.
+- Work-unit identity, membership, dependency, order, runtime_bindings, requirement_refs,
+  acceptance_refs and code_entities are Harness-owned. Do not ask Developer.plan to change
+  them; a wrong ref is a Design trace issue, not a plan repair. Review only Planner-owned objectives, targets,
   migration decisions, tests, evidence, and signature content.
-- Compatibility fields are projections, not a second plan. Fail them only when they
-  contradict canonical work-unit targets or signatures; feedback must be repairable
-  through Planner-owned fields.
+- `code_entities` marks units that edit the same code symbol in implementation order.
+  Review the final merged repository state, not each unit as an isolated final version.
+  Earlier test intents remain part of that final state unless a later unit explicitly updates, replaces or
+  removes them. When a later unit changes a shared signature or behavior, require that later
+  unit's Planner-owned objective/tests to reconcile every affected earlier test; do not reopen
+  Design or debate alternative architectures. Each unit implements and tests only the behavior of
+  its own design_node_ids: never block an earlier unit for behavior that only a later unit's
+  contract in the same code entity states. A runtime binding with `attachment_wired_by` is
+  already attached by that earlier unit, so the later unit needs its owner file only when its
+  own change requires it there. A seeded attachment owner whose existing code already reaches
+  the target (for example it mounts the router that registers the handler) may need no change;
+  accept an objective that says so.
+- When the verification policy has an active `browser_e2e` stage, Phase 4 Browser QA plans and
+  runs browser journeys for every UI contract item from the approved Design and demo seed, so the
+  Plan has no browser tests or test data: never ask for them. `unit` intents cite in
+  `obligation_refs` the items their `unit` stage capability observes. Without that stage, the rule review
+  checked that every UI contract item is in a test intent's `obligation_refs` or in
+  `unverified_obligations` with a reason; do not re-audit that mapping item by item, and block an
+  `unverified_obligations` entry only when its reason is false because an active stage could
+  observe it.
+- For each approved Design `runtime_surface.required_inputs` item whose source is
+  `external_use_case`, verify that the plan keeps the production dependency external: no planned
+  target introduces or alters a production provider, endpoint, entrypoint, global, history-state
+  contract, runtime config, or Design seam to supply its data.
+- An objective may state `Reading of <Design ID>: ...` for an approved contract behavior that
+  lists no outcome or response. Judge whether that reading satisfies the Requirement within the
+  approved outcomes; block it only when it adds a status, field, endpoint or response the
+  contract does not list, or when it contradicts the Requirement.
+- A listed response that existing code outside the unit already produces (for example a
+  validation middleware on the route) stays there; do not require the planned target to
+  re-implement or unit-test it. A planned target keeps the responses its own existing code
+  already produces unless its approved contract changes them.
+- `existing_test_paths` are the Harness-listed existing tests of a unit's write_scope files; the
+  unit's Developer may update them and a `unit` test intent may target them. An existing test
+  that still asserts behavior the unit replaces must be updated by a test intent of that unit.
+- The Vertical Design node index lists every approved node. A node marked `no work unit` keeps
+  existing code, and a requirement listed as covered without a work unit is satisfied by that
+  existing code or is a precondition: no work unit plans it by design, so never report it as
+  unplanned or missing.
+- Compatibility projections (steps, proposed files, design mappings, top-level test
+  intents) are rendered from work_units and checked by the rule review, so they are omitted
+  below. Each unit's `approved_design_contracts` contains only the exact Vertical Design
+  nodes and edges named by its design ids. Review every listed contract against that unit's
+  objective, targets and tests before producing findings. Feedback must be repairable through
+  Planner-owned fields.
+- Do not infer that a boundary call, external client call or retry is implemented or tested
+  from a reducer transition or final-state assertion alone. Require the plan to name the
+  relevant stimulus, call and observable outcome when an active stage can verify them.
 - A `unit` intent targets a test file. A `typecheck` intent targets a non-test source
   file already owned by the same work unit.
-- The legacy Class graph supplies signature trace identity, not callable type authority.
-  Require parameters and returns that make the approved Vertical Design behavior
-  callable and testable; reject placeholder-only `(): void` contracts when the flow
-  accepts input, returns data/status, persists identity, or renders UI.
+- Enforce `stage_ownership` from the verification policy: Developer `test_intents` use only
+  `developer_intent`; `qa_intent` and `harness_global` stages are run by the Harness and never
+  appear in the Plan.
+- Harness binds every signature target. Require parameters and returns that make the
+  approved Vertical Design behavior callable and testable; reject placeholder-only
+  `(): void` contracts when the flow accepts input, returns data/status, persists
+  identity, or renders UI.
 - When repo evidence shows an existing shared-contract, client-adapter, or migration
   convention, require the plan to use it if otherwise Web/API/data boundaries would
-  have to invent incompatible shapes. Attach supporting files to an approved unit;
-  require upstream Design change only when no approved unit can own them.
-- For every UI surface, verify that the objective, exact code targets, and test intents
-  cover every non-empty experience-contract category: component structure, feedback,
-  accessibility, responsive behavior, and focus flow. CSS class names without owned or
-  verified style rules do not implement responsive behavior; static markup alone does not
-  verify interaction or focus navigation.
+  have to invent incompatible shapes. Attach supporting code to an approved unit's files;
+  never request an upstream Design change from this review.
+- For every UI surface, verify that the objective and exact code targets implement every
+  non-empty experience-contract category: component structure, feedback, accessibility,
+  responsive behavior, and focus flow, and that `unit` intents test what the `unit` stage
+  capability observes. CSS class names without owned or verified style rules do not
+  implement responsive behavior; static markup alone does not verify interaction or focus
+  navigation, which Phase 4 Browser QA verifies when the `browser_e2e` stage is active. A UI unit
+  may own a stylesheet under the policy's `ui_stylesheets` root.
+- Judge each test intent against the verification policy's `stage_capabilities`. Block a
+  test intent that claims a stage verifies behavior outside its capability, and block
+  contract decisions the planned code could expose to a capable stage but leaves untested.
+  Do not block behavior that only the browser can observe when Phase 4 Browser QA covers it.
+  Without a browser stage, do not block because behavior needs a stage the profile does not
+  activate when the unit objective states that it stays unverified; at most report one concise
+  warning finding and do not repeat obligations already recorded in `unverified_obligations`
+  with a true reason.
 - Verify that required boundary auth/input mappings and runtime attachments have an explicit
   owner/caller target. A dependency ID without its component, surfaces, and produced artifacts
   is not sufficient evidence that downstream wiring is executable.
+- Judge `runtime_config_impact` against `inputs.repo_runtime_config`. Block when planned code
+  needs an environment-specific value (such as the base URL of an external system), a package
+  no workspace manifest lists, or a service the product itself runs that the compose file
+  lacks, without a declared change. An external system is reached through its configured URL;
+  do not require a compose service or stub for it. Block a declared change that approved
+  behavior does not need or a default that is a secret.
+  Configuration is decided here, never in Design.
 - A required migration needs a concrete migration artifact, not only a schema file.
   Only approved Requirement/Vertical Design behavior and established repo conventions
   may create a blocker.
+- Return one finding per distinct confirmed issue. Copy complete `WU-...` ids and stable
+  Requirement or Vertical Design ids exactly from the supplied artifacts; never abbreviate or invent ids.
+  Review each listed contract once, record the decision, then output JSON immediately
+  after the complete pass. Do not reopen a recorded decision unless a later supplied contract
+  directly contradicts it, and do not keep exploring alternatives after identifying a repairable
+  `expected_change`. `reviewed_design_ids` must list every design node and edge id from every work
+  unit after checking its approved contract, including ids that have findings.
+- A blocking finding must cite at least one affected unit. `expected_change` states what must
+  become true through Planner-owned objectives, targets, migration decisions, tests, evidence,
+  signatures or runtime configuration. It must not prescribe changes to Harness-owned fields.
+- Warnings remain audit context only. They never stand in for a blocker and never feed repair.
 """.strip()
-        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-        else ""
     )
-    return f"""Implementation Plan LLM Review v1
+    output_contract = (
+        """Return JSON only with this shape:
+{
+  "summary": "short review summary",
+  "reviewed_design_ids": ["every exact VDN/VDE id from all work units"],
+  "findings": [
+    {
+      "category": "coverage|requirement_coverage|traceability|implementation_quality|test|scope",
+      "severity": "blocking|warning",
+      "unit_ids": ["one or more exact WU ids for a blocker"],
+      "refs": ["exact stable Requirement or Vertical Design ids"],
+      "issue": "what is wrong in the current plan",
+      "expected_change": "what must become true in Planner-owned fields"
+    }
+  ]
+}
+
+Do not return `ok` or `developer_feedback`; Harness derives both from validated findings."""
+    )
+    return f"""Implementation Plan LLM Review V5
 
 You must compare the implementation plan against the approved requirement and design.
 The deterministic rule review already passed basic graph/schema checks. Your job is
 to catch semantic gaps that rules cannot see.
 
-Return JSON only with this shape:
-{{
-  "ok": true,
-  "summary": "short review summary",
-  "coverage_issues": [],
-  "requirement_coverage_issues": [],
-  "traceability_issues": [],
-  "implementation_quality_issues": [],
-  "test_issues": [],
-  "scope_issues": [],
-  "developer_feedback": "actionable feedback for Developer.plan if repair is needed"
-}}
+{output_contract}
 
 Fail the review when:
 - the plan does not explain how approved design elements will become code;
@@ -1017,7 +988,7 @@ Review boundaries:
   when the approved requirement/design explicitly defines those semantics. Do not
   invent a broader system contract as a reason to reject the plan.
 
-{v4_boundaries}
+{v5_boundaries}
 
 Language prompt directive:
 {json.dumps(language_context, ensure_ascii=False, indent=2)}
@@ -1025,85 +996,155 @@ Language prompt directive:
 Verification stage policy:
 {json.dumps(verification_context, ensure_ascii=False, indent=2)}
 
-Approved requirement packet:
-{_excerpt(requirement_packet, limit=6000)}
+{requirement_section}{canonical_section}
 
-{canonical_section}
+{design_section}
 
-Approved design artifact:
-{_excerpt(design_artifact, limit=6000)}
-
-Requirement-design trace JSON:
-{json.dumps(compact_trace, ensure_ascii=False, separators=(",", ":"))}
-
-Vertical Design/Trace JSON (authoritative for V4 plans):
-{json.dumps(vertical_context, ensure_ascii=False, separators=(",", ":"))}
-
-Class graph JSON:
-{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}
-
-Sequence graph JSON:
-{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))}
-
-Structured implementation plan JSON:
+{legacy_trace_section}{vertical_section}{legacy_graph_section}Structured implementation plan JSON:
 {json.dumps(compact_plan, ensure_ascii=False, separators=(",", ":"))}
 
+{previous_round_section}
 Rule review JSON:
 {json.dumps(rule_review.to_dict(), ensure_ascii=False, indent=2)}
 """.strip()
 
 
-def _parse_llm_review_payload(raw: str) -> dict[str, object]:
+def _parse_v4_llm_review_payload(
+    raw: str,
+    *,
+    structured_plan: dict[str, object],
+    canonical_requirement: dict[str, object],
+    vertical_design_graph: dict[str, object],
+    vertical_trace_graph: dict[str, object],
+) -> dict[str, object]:
     try:
-        parsed = _parse_first_json_object(raw, expected_keys={"ok", "summary", "developer_feedback"})
+        parsed = _parse_first_json_object(raw, expected_keys=set())
     except json.JSONDecodeError as exc:
         raise HarnessError(
             "implementation_plan_llm_review_failed",
             "Implementation plan LLM review did not return valid JSON.",
         ) from exc
-    if not isinstance(parsed, dict):
-        raise HarnessError(
-            "implementation_plan_llm_review_failed",
-            "Implementation plan LLM review must return a JSON object.",
-        )
-    payload = {
-        "ok": parsed.get("ok") if isinstance(parsed.get("ok"), bool) else False,
-        "summary": str(parsed.get("summary") or "").strip(),
-        "coverage_issues": _string_items(parsed.get("coverage_issues")),
-        "requirement_coverage_issues": _string_items(parsed.get("requirement_coverage_issues")),
-        "traceability_issues": _string_items(parsed.get("traceability_issues")),
-        "implementation_quality_issues": _string_items(parsed.get("implementation_quality_issues")),
-        "test_issues": _string_items(parsed.get("test_issues")),
-        "scope_issues": _string_items(parsed.get("scope_issues")),
-        "developer_feedback": str(parsed.get("developer_feedback") or "").strip(),
+
+    allowed_unit_ids = {
+        str(unit.get("unit_id") or "").strip()
+        for unit in _dict_items(structured_plan.get("work_units"))
+        if str(unit.get("unit_id") or "").strip()
     }
-    if payload["ok"] and any(
-        payload[key]
-        for key in (
-            "coverage_issues",
-            "requirement_coverage_issues",
-            "traceability_issues",
-            "implementation_quality_issues",
-            "test_issues",
-            "scope_issues",
+    expected_design_ids = {
+        design_id
+        for unit in _dict_items(structured_plan.get("work_units"))
+        for field in ("design_node_ids", "design_edge_ids")
+        for design_id in _string_items(unit.get(field))
+    }
+    allowed_refs = _stable_ids(canonical_requirement)
+    allowed_refs.update(
+        str(item.get("id") or "").strip()
+        for item in [
+            *_dict_items(vertical_design_graph.get("nodes")),
+            *_dict_items(vertical_design_graph.get("edges")),
+            *_dict_items(vertical_trace_graph.get("nodes")),
+        ]
+        if str(item.get("id") or "").strip()
+    )
+
+    errors: list[str] = []
+    summary = parsed.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        errors.append("`summary` must be a non-empty string")
+    raw_findings = parsed.get("findings")
+    if not isinstance(raw_findings, list):
+        errors.append("`findings` must be an array")
+        raw_findings = []
+    reviewed_design_ids = _strict_string_list(
+        parsed.get("reviewed_design_ids"),
+        field="reviewed_design_ids",
+        errors=errors,
+    )
+    missing_reviewed_ids = sorted(expected_design_ids - set(reviewed_design_ids))
+    unknown_reviewed_ids = sorted(set(reviewed_design_ids) - expected_design_ids)
+    if missing_reviewed_ids:
+        errors.append(f"`reviewed_design_ids` is missing ids: {', '.join(missing_reviewed_ids)}")
+    if unknown_reviewed_ids:
+        errors.append(f"`reviewed_design_ids` contains unknown ids: {', '.join(unknown_reviewed_ids)}")
+
+    findings: list[dict[str, object]] = []
+    for index, raw_finding in enumerate(raw_findings):
+        label = f"findings[{index}]"
+        if not isinstance(raw_finding, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        category = str(raw_finding.get("category") or "").strip()
+        severity = str(raw_finding.get("severity") or "").strip()
+        issue = str(raw_finding.get("issue") or "").strip()
+        expected_change = str(raw_finding.get("expected_change") or "").strip()
+        unit_ids = _strict_string_list(raw_finding.get("unit_ids"), field=f"{label}.unit_ids", errors=errors)
+        refs = _strict_string_list(raw_finding.get("refs"), field=f"{label}.refs", errors=errors)
+        if category not in _PLAN_FINDING_CATEGORIES:
+            errors.append(f"{label}.category `{category}` is invalid")
+        if severity not in _PLAN_FINDING_SEVERITIES:
+            errors.append(f"{label}.severity `{severity}` is invalid")
+        if severity == "blocking" and not unit_ids:
+            errors.append(f"{label} is blocking and must cite at least one unit id")
+        unknown_units = sorted(set(unit_ids) - allowed_unit_ids)
+        if unknown_units:
+            errors.append(f"{label}.unit_ids contains unknown ids: {', '.join(unknown_units)}")
+        if not refs:
+            errors.append(f"{label}.refs must cite at least one stable Requirement or Design id")
+        unknown_refs = sorted(set(refs) - allowed_refs)
+        if unknown_refs:
+            errors.append(f"{label}.refs contains unknown ids: {', '.join(unknown_refs)}")
+        if not issue:
+            errors.append(f"{label}.issue must be non-empty")
+        if not expected_change:
+            errors.append(f"{label}.expected_change must be non-empty")
+        findings.append(
+            {
+                "category": category,
+                "severity": severity,
+                "unit_ids": list(dict.fromkeys(unit_ids)),
+                "refs": list(dict.fromkeys(refs)),
+                "issue": issue,
+                "expected_change": expected_change,
+            }
         )
-    ):
-        payload["ok"] = False
-    if not payload["ok"] and not any(
-        payload[key]
-        for key in (
-            "coverage_issues",
-            "requirement_coverage_issues",
-            "traceability_issues",
-            "implementation_quality_issues",
-            "test_issues",
-            "scope_issues",
+
+    if errors:
+        details = "; ".join(errors[:12])
+        if len(errors) > 12:
+            details += f"; and {len(errors) - 12} more error(s)"
+        raise HarnessError(
+            "implementation_plan_review_contract_invalid",
+            f"Implementation plan review contract is invalid: {details}.",
         )
-    ):
-        payload["implementation_quality_issues"] = ["LLM review rejected the plan without issue details."]
-    if not payload["summary"]:
-        payload["summary"] = "LLM review did not provide a summary."
-    return payload
+    return {
+        "ok": not any(item["severity"] == "blocking" for item in findings),
+        "summary": summary.strip(),
+        "reviewed_design_ids": list(dict.fromkeys(reviewed_design_ids)),
+        "findings": findings,
+    }
+
+
+def _strict_string_list(value: object, *, field: str, errors: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        errors.append(f"`{field}` must be an array of strings")
+        return []
+    if any(not isinstance(item, str) for item in value):
+        errors.append(f"`{field}` must contain only strings")
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _stable_ids(value: object) -> set[str]:
+    result: set[str] = set()
+    if isinstance(value, dict):
+        stable_id = value.get("id")
+        if isinstance(stable_id, str) and stable_id.strip():
+            result.add(stable_id.strip())
+        for item in value.values():
+            result.update(_stable_ids(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.update(_stable_ids(item))
+    return result
 
 
 def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, object]:
@@ -1132,12 +1173,6 @@ def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, 
 
 def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
     return expected_keys.issubset(candidate.keys())
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _excerpt(content: str, *, limit: int) -> str:

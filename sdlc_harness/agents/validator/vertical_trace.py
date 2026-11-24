@@ -8,16 +8,18 @@ import json
 from typing import Any
 
 from ...core.errors import HarnessError
-from ..designer.graph import GRAPH_VERSION_V2, SUPPORTED_GRAPH_VERSIONS, validate_vertical_design_graph
+from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..requirements import RequirementModelV2
 from .design_validation import DesignFinding
+from ...core.coerce import dict_copies as _dicts
 
 
 VERTICAL_TRACE_GRAPH_VERSION = "vertical_trace_graph_v1"
 VERTICAL_TRACE_VALIDATION_VERSION = "vertical_trace_validation_v1"
 VERTICAL_TRACE_STATE_KEY = "vertical_trace_contract_version"
 VERTICAL_TRACE_MODE_STATE_KEY = "vertical_trace_mode"
-VERTICAL_TRACE_MODES = frozenset({"shadow", "enforce"})
+# Trace findings always block (owner decision 2026-11-18); the report keeps its mode field.
+VERTICAL_TRACE_MODES = frozenset({"enforce"})
 TRACE_LAYERS = frozenset({"requirement", "design", "implementation", "verification"})
 TRACE_NODE_KINDS = frozenset(
     {
@@ -61,7 +63,7 @@ class VerticalTraceValidationResult:
     blocking_findings: list[DesignFinding] = field(default_factory=list)
     warnings: list[DesignFinding] = field(default_factory=list)
     coverage: dict[str, int] = field(default_factory=dict)
-    mode: str = "shadow"
+    mode: str = "enforce"
 
     @property
     def ok(self) -> bool:
@@ -73,7 +75,7 @@ class VerticalTraceValidationResult:
             "contract_version": VERTICAL_TRACE_GRAPH_VERSION,
             "mode": self.mode,
             "ok": self.ok,
-            "would_block": self.mode == "shadow" and bool(self.blocking_findings),
+            "would_block": False,
             "graph_digest": self.graph.get("artifact_digest"),
             "coverage": dict(self.coverage),
             "blocking_count": len(self.blocking_findings),
@@ -127,6 +129,10 @@ def build_vertical_trace_graph(
         str(item.get("id") or ""): _strings(item.get("acceptance_refs"))
         for item in scenarios
     }
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or "")): item
+        for item in _dicts(design_graph.get("surface_not_exercised"))
+    }
     for scenario in scenarios:
         scenario_id = str(scenario.get("id") or "")
         nodes.append(
@@ -164,6 +170,17 @@ def build_vertical_trace_graph(
                     "reason": str(contract.get("reason") or ""),
                     "requirement_refs": _strings(contract.get("requirement_refs")),
                     "evidence_refs": _strings(contract.get("evidence_refs")),
+                    # The Designer declared that this scenario runs nothing on the surface (semantic review judges it).
+                    **(
+                        {
+                            "design_not_exercised": {
+                                key: not_exercised[(scenario_id, surface)].get(key)
+                                for key in ("reason", "evidence_refs", "declared_in_partition")
+                            }
+                        }
+                        if (scenario_id, surface) in not_exercised
+                        else {}
+                    ),
                 }
             )
             edges.append(_edge(scenario_id, surface_id, "requires_surface", scenario_id=scenario_id))
@@ -272,7 +289,7 @@ def validate_vertical_trace_graph(
     if value.get("phase_gate") != "design" or not isinstance(value.get("revision"), int):
         raise HarnessError("vertical_trace_graph_invalid", "Vertical trace phase/revision is invalid.", run_id=run_id)
     binding = _dict(value.get("binding"))
-    if str(binding.get("design_contract_version") or "") not in SUPPORTED_GRAPH_VERSIONS:
+    if str(binding.get("design_contract_version") or "") != GRAPH_VERSION:
         raise HarnessError("vertical_trace_graph_invalid", "Vertical trace Design contract binding is invalid.", run_id=run_id)
     if expected_requirement_digest and binding.get("requirement_digest") != expected_requirement_digest:
         raise HarnessError("vertical_trace_binding_stale", "Vertical trace Requirement binding is stale.", run_id=run_id)
@@ -364,7 +381,7 @@ def validate_vertical_trace_coverage(
         realized = [edge for edge in edges if edge.get("from") == surface_id and edge.get("kind") == "realizes"]
         if status == "required":
             required_surface_count += 1
-            if realized:
+            if realized or surface_node.get("design_not_exercised"):
                 covered_surface_count += 1
             else:
                 blockers.append(_finding("required_surface_missing", surface_id, "Required scenario surface has no Design element.", requirement_ids=_strings(surface_node.get("requirement_refs"))))
@@ -439,71 +456,70 @@ def validate_vertical_trace_coverage(
             blockers.append(_finding("cross_scenario_design_edge", str(edge.get("id") or ""), "Design interaction edge crosses unrelated scenario partitions.", design_ids=[str(source.get("id") or ""), str(target.get("id") or "")]))
 
     valid_branch_parent_count = 0
-    if str(_dict(graph.get("binding")).get("design_contract_version") or "") == GRAPH_VERSION_V2:
-        branch_scenarios = [
-            item
-            for item in scenarios
-            if str(item.get("scenario_kind") or "") in {"alternative", "exception"}
-        ]
-        for branch in branch_scenarios:
-            branch_id = str(branch.get("id") or "")
-            related = []
-            valid = []
-            for edge in design_edges:
-                if str(edge.get("kind") or "") != "depends_on":
-                    continue
-                source = by_id[str(edge.get("from") or "")]
-                target = by_id[str(edge.get("to") or "")]
-                source_scenario_id = str(source.get("scenario_id") or "")
-                target_scenario_id = str(target.get("scenario_id") or "")
-                endpoint_ids = {source_scenario_id, target_scenario_id}
-                endpoint_kinds = {
-                    str(_dict(by_id.get(source_scenario_id)).get("scenario_kind") or ""),
-                    str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or ""),
-                }
-                if branch_id not in endpoint_ids or "main" not in endpoint_kinds:
-                    continue
-                related.append(edge)
-                if (
-                    source_scenario_id == branch_id
-                    and str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or "") == "main"
-                    and str(edge.get("scenario_id") or "") == branch_id
-                ):
-                    valid.append(edge)
-            if len(valid) == 1:
-                valid_branch_parent_count += 1
-            elif len(valid) > 1:
-                blockers.append(
-                    _finding(
-                        "branch_parent_ambiguous",
-                        branch_id,
-                        f"Branch scenario {branch_id} has more than one branch-to-main parent dependency.",
-                        requirement_ids=[branch_id],
-                        design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in valid],
-                    )
+    branch_scenarios = [
+        item
+        for item in scenarios
+        if str(item.get("scenario_kind") or "") in {"alternative", "exception"}
+    ]
+    for branch in branch_scenarios:
+        branch_id = str(branch.get("id") or "")
+        related = []
+        valid = []
+        for edge in design_edges:
+            if str(edge.get("kind") or "") != "depends_on":
+                continue
+            source = by_id[str(edge.get("from") or "")]
+            target = by_id[str(edge.get("to") or "")]
+            source_scenario_id = str(source.get("scenario_id") or "")
+            target_scenario_id = str(target.get("scenario_id") or "")
+            endpoint_ids = {source_scenario_id, target_scenario_id}
+            endpoint_kinds = {
+                str(_dict(by_id.get(source_scenario_id)).get("scenario_kind") or ""),
+                str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or ""),
+            }
+            if branch_id not in endpoint_ids or "main" not in endpoint_kinds:
+                continue
+            related.append(edge)
+            if (
+                source_scenario_id == branch_id
+                and str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or "") == "main"
+                and str(edge.get("scenario_id") or "") == branch_id
+            ):
+                valid.append(edge)
+        if len(valid) == 1:
+            valid_branch_parent_count += 1
+        elif len(valid) > 1:
+            blockers.append(
+                _finding(
+                    "branch_parent_ambiguous",
+                    branch_id,
+                    f"Branch scenario {branch_id} has more than one branch-to-main parent dependency.",
+                    requirement_ids=[branch_id],
+                    design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in valid],
                 )
-            elif related:
-                blockers.append(
-                    _finding(
-                        "branch_parent_invalid",
-                        branch_id,
-                        (
-                            f"Branch scenario {branch_id} must declare depends_on from a branch node "
-                            "to one main-scenario node with edge.scenario_id set to the branch."
-                        ),
-                        requirement_ids=[branch_id],
-                        design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in related],
-                    )
+            )
+        elif related:
+            blockers.append(
+                _finding(
+                    "branch_parent_invalid",
+                    branch_id,
+                    (
+                        f"Branch scenario {branch_id} must declare depends_on from a branch node "
+                        "to one main-scenario node with edge.scenario_id set to the branch."
+                    ),
+                    requirement_ids=[branch_id],
+                    design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in related],
                 )
-            else:
-                blockers.append(
-                    _finding(
-                        "branch_parent_missing",
-                        branch_id,
-                        f"Branch scenario {branch_id} has no branch-to-main depends_on parent edge.",
-                        requirement_ids=[branch_id],
-                    )
+            )
+        else:
+            blockers.append(
+                _finding(
+                    "branch_parent_missing",
+                    branch_id,
+                    f"Branch scenario {branch_id} has no branch-to-main depends_on parent edge.",
+                    requirement_ids=[branch_id],
                 )
+            )
 
     blockers = [
         replace(item, snapshot_fingerprint=str(graph.get("artifact_digest") or ""))
@@ -668,10 +684,6 @@ def _graph_digest(graph: dict[str, object]) -> str:
 
 def _dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

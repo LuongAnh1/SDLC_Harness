@@ -335,6 +335,10 @@ class RequirementClarificationUpdater:
             raise HarnessError("requirement_answer_update_failed", "Every clarification update must be an object.")
         if any(not isinstance(item, dict) for item in surface_updates):
             raise HarnessError("requirement_answer_update_failed", "Every surface update must be an object.")
+        # Requirements outside `affects` that the answer contradicts; the LLM judges which, Python checks the shape.
+        related_updates = proposal.get("related_updates", [])
+        if not isinstance(related_updates, list) or any(not isinstance(item, dict) for item in related_updates):
+            raise HarnessError("requirement_answer_update_failed", "related_updates must be a list of objects.")
         model_data = model.to_dict()
         required_surface_targets = _clarification_surface_targets(model_data, question.id)
         allowed_surface_targets = _question_surface_targets(model_data, question.id)
@@ -344,7 +348,7 @@ class RequirementClarificationUpdater:
                     "requirement_answer_update_failed",
                     "Insufficient answer requires a non-empty follow_up_text.",
                 )
-            if updates or surface_updates:
+            if updates or surface_updates or related_updates:
                 raise HarnessError(
                     "requirement_answer_update_failed",
                     "Insufficient answer must not mutate requirements or surfaces.",
@@ -360,6 +364,17 @@ class RequirementClarificationUpdater:
                 raise HarnessError(
                     "requirement_answer_update_failed",
                     "Accepted answer must update exactly the current question affects IDs.",
+                )
+            related_ids = [str(item.get("requirement_id") or "") for item in related_updates]
+            if len(related_ids) != len(set(related_ids)) or set(related_ids).intersection(question.affects):
+                raise HarnessError(
+                    "requirement_answer_update_failed",
+                    "related_updates must name each other requirement once and never an affects ID (those go in updates).",
+                )
+            if any(not str(item.get("reason") or "").strip() for item in related_updates):
+                raise HarnessError(
+                    "requirement_answer_update_failed",
+                    "Every related update needs a reason naming its conflict with the answer.",
                 )
             proposed_surface_targets = [
                 (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
@@ -388,11 +403,20 @@ class RequirementClarificationUpdater:
             "answer": answer,
             "answered_by": answered_by,
             "answered_at": answered_at,
-            "affected_requirement_ids": list(question.affects) if resolution == "accepted" else [],
+            "affected_requirement_ids": (
+                [*question.affects, *(str(item.get("requirement_id")) for item in related_updates)]
+                if resolution == "accepted"
+                else []
+            ),
             "status": resolution,
             "supersedes_decision_id": previous.get("id") if previous is not None else None,
             "submission_hash": clarification_submission_hash(question.id, answer),
         }
+        if related_updates:
+            decision["related_updates"] = [
+                {"requirement_id": str(item.get("requirement_id")), "reason": str(item.get("reason")).strip()}
+                for item in related_updates
+            ]
         decisions = data.get("decisions")
         if not isinstance(decisions, list):
             decisions = []
@@ -403,7 +427,7 @@ class RequirementClarificationUpdater:
         if resolution == "insufficient":
             question_data["question"] = str(follow_up).strip()
         else:
-            for update in updates:
+            for update in [*updates, *related_updates]:
                 requirement_id = str(update.get("requirement_id") or "")
                 fields = update.get("fields")
                 if not isinstance(fields, dict):

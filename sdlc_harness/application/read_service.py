@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 DEFAULT_RUN_LIMIT = 50
 MAX_RUN_LIMIT = 200
 MAX_ARTIFACT_BYTES = 1024 * 1024
+MAX_EVIDENCE_IMAGE_BYTES = 16 * 1024 * 1024
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 _WINDOWS_PATH = re.compile(r"(?i)(?<![A-Za-z0-9])(?:[a-z]:[\\/][^\s`\"']+)")
 _SENSITIVE_KEYS = {
@@ -87,6 +89,11 @@ PUBLIC_ARTIFACT_KEYS = frozenset(
         "github_code_review",
         "github_code_review_approval",
         "tool_sync_report",
+        "browser_baseline_evidence_manifest",
+        "ui_polish_contract",
+        "ui_polish_contract_review",
+        "ui_polish_contract_checkpoint",
+        "ui_polish_visual_profile",
     }
 )
 
@@ -131,7 +138,6 @@ class ApplicationReadService:
             "created_at",
             "updated_at",
             "implementation_repair_iterations",
-            "qa_repair_iterations",
         ):
             if key not in payload and key in state:
                 payload[key] = state[key]
@@ -218,6 +224,69 @@ class ApplicationReadService:
             "size_bytes": size_bytes,
             "content": self._sanitize(content),
         }
+
+    def read_browser_evidence_image(
+        self,
+        *,
+        run_id: str,
+        manifest_key: str,
+        capture_key: str,
+    ) -> dict[str, object]:
+        """Read one PNG only through a published manifest record under this run directory."""
+
+        run_id = _validated_identifier(run_id, kind="run id")
+        manifest_key = _validated_identifier(manifest_key, kind="manifest key")
+        if not capture_key or "/" in capture_key or "\\" in capture_key or len(capture_key) > 240:
+            raise HarnessError("artifact_not_found", "Browser evidence image is not publicly available.", run_id=run_id)
+        state = self.store.read_state(run_id)
+        manifest_path = self._resolve_public_artifact(
+            state=state,
+            run_id=run_id,
+            artifact_key=manifest_key,
+        )
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError("artifact_corrupted", "Browser evidence manifest is unreadable.", run_id=run_id) from exc
+        records = manifest.get("records") if isinstance(manifest, dict) else None
+        record = next(
+            (
+                item
+                for item in records or []
+                if isinstance(item, dict) and str(item.get("capture_key") or "") == capture_key
+            ),
+            None,
+        )
+        screenshot = record.get("screenshot") if isinstance(record, dict) else None
+        evidence_dir = str(manifest.get("evidence_dir") or "") if isinstance(manifest, dict) else ""
+        filename = str(screenshot.get("file") or "") if isinstance(screenshot, dict) else ""
+        expected_sha = str(screenshot.get("sha256") or "") if isinstance(screenshot, dict) else ""
+        relative_dir = Path(evidence_dir)
+        if (
+            record is None
+            or not evidence_dir
+            or relative_dir.is_absolute()
+            or ".." in relative_dir.parts
+            or Path(filename).name != filename
+            or not filename.lower().endswith(".png")
+            or len(expected_sha) != 64
+        ):
+            raise HarnessError("artifact_not_found", "Browser evidence image is not publicly available.", run_id=run_id)
+        run_dir = self.store.run_dir(run_id).resolve()
+        image_path = (run_dir / relative_dir / filename).resolve()
+        try:
+            image_path.relative_to(run_dir)
+        except ValueError as exc:
+            raise HarnessError("artifact_not_found", "Browser evidence image is not publicly available.", run_id=run_id) from exc
+        if not image_path.is_file() or image_path.stat().st_size > MAX_EVIDENCE_IMAGE_BYTES:
+            raise HarnessError("artifact_not_found", "Browser evidence image is not publicly available.", run_id=run_id)
+        try:
+            content = image_path.read_bytes()
+        except OSError as exc:
+            raise HarnessError("artifact_read_failed", "Browser evidence image could not be read.", run_id=run_id) from exc
+        if not content.startswith(b"\x89PNG\r\n\x1a\n") or hashlib.sha256(content).hexdigest() != expected_sha:
+            raise HarnessError("artifact_corrupted", "Browser evidence image no longer matches its manifest.", run_id=run_id)
+        return {"content": content, "media_type": "image/png", "size_bytes": len(content)}
 
     def public_value(self, value: Any) -> Any:
         """Sanitize API-visible operation/status data with the same read boundary."""

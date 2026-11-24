@@ -33,6 +33,7 @@ class LlmCallProfile:
     thinking_effort: str
     max_tokens: int
     timeout_seconds: int
+    accepts_images: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,30 +64,30 @@ class Settings:
     developer_working_memory_evidence_chars: int
     requirement_contract_version: str
     design_repair_limit: int
-    design_validation_trials: int
-    design_semantic_review_mode: str
     design_llm_call_budget: int
     designer_partition_action_budget: int
     designer_scenario_repair_action_budget: int
     designer_finalization_action_budget: int
     designer_global_action_hard_cap: int
-    designer_contract_version: str
     design_step_review_enabled: bool
     design_step_review_input_enabled: bool
     design_step_review_output_enabled: bool
-    designer_ui_contract_version: str
-    uiux_skill_mode: str
+    browser_readiness_repair_limit: int
+    browser_polish_repair_limit: int
+    browser_qa_repair_limit: int
+    browser_journey_patch_limit: int
+    browser_max_images_per_call: int
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
-    vertical_trace_mode: str
     implementation_plan_repair_limit: int
     implementation_plan_step_review_enabled: bool
     implementation_plan_step_review_input_enabled: bool
     implementation_plan_step_review_output_enabled: bool
     implementation_repair_limit: int
-    implementation_validation_trials: int
     implementation_validation_call_budget: int
-    qa_repair_limit: int
+    implementation_validation_step_review_enabled: bool
+    implementation_validation_step_review_input_enabled: bool
+    implementation_validation_step_review_output_enabled: bool
     sync_mode: str
     atlassian_base_url: str
     atlassian_email: str
@@ -333,6 +334,7 @@ def _phase4_llm_profiles(
                 minimum=1,
                 maximum=1800,
             ),
+            accepts_images=bool(defaults.get("accepts_images", False)),
         )
     return profiles
 
@@ -347,12 +349,15 @@ def phase4_llm_call_options(
     profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
     if not isinstance(profile, LlmCallProfile):
         return {"max_tokens": fallback_max_tokens}
-    return {
+    options: dict[str, object] = {
         "model": profile.model,
         "reasoning_effort": profile.thinking_effort,
         "max_tokens": profile.max_tokens,
         "timeout_seconds": profile.timeout_seconds,
     }
+    if profile.accepts_images:
+        options["accepts_images"] = True
+    return options
 
 
 def resolve_config(
@@ -438,29 +443,6 @@ def load_settings(
     if llm_thinking_mode not in {"disabled", "enabled"}:
         llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    vertical_trace_mode = merged.get("SDLC_VERTICAL_TRACE_MODE", "enforce").strip().lower() or "enforce"
-    if vertical_trace_mode not in {"shadow", "enforce"}:
-        vertical_trace_mode = "enforce"
-    designer_contract_version = merged.get(
-        "SDLC_DESIGNER_CONTRACT_VERSION",
-        "vertical_design_graph_v1",
-    ).strip()
-    if designer_contract_version not in {"vertical_design_graph_v1", "vertical_design_graph_v2"}:
-        designer_contract_version = "vertical_design_graph_v1"
-    designer_ui_contract_version = merged.get(
-        "SDLC_DESIGNER_UI_CONTRACT_VERSION",
-        "ui_experience_contract_v1",
-    ).strip()
-    if designer_ui_contract_version not in {"ui_experience_contract_v1", "ui_experience_contract_v2"}:
-        designer_ui_contract_version = "ui_experience_contract_v1"
-    uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
-    if uiux_skill_mode not in {"off", "enforce"}:
-        uiux_skill_mode = "off"
-    design_semantic_review_mode = (
-        merged.get("SDLC_DESIGN_SEMANTIC_REVIEW_MODE", "legacy").strip().lower() or "legacy"
-    )
-    if design_semantic_review_mode not in {"legacy", "sliced_shadow", "sliced_enforce"}:
-        design_semantic_review_mode = "legacy"
     uiux_skill_root_raw = merged.get("SDLC_UIUX_SKILL_ROOT", "").strip()
     uiux_skill_root = Path(uiux_skill_root_raw).expanduser() if uiux_skill_root_raw else None
     if uiux_skill_root is not None and not uiux_skill_root.is_absolute():
@@ -514,8 +496,6 @@ def load_settings(
         ),
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
-        design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
-        design_semantic_review_mode=design_semantic_review_mode,
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=128, minimum=1),
         designer_partition_action_budget=_int_value(
             merged.get("SDLC_DESIGNER_PARTITION_ACTION_BUDGET"),
@@ -537,7 +517,6 @@ def load_settings(
             default=128,
             minimum=1,
         ),
-        designer_contract_version=designer_contract_version,
         design_step_review_enabled=_bool_value(
             merged.get("SDLC_DESIGN_STEP_REVIEW_ENABLED")
         ),
@@ -549,8 +528,19 @@ def load_settings(
             merged.get("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED"),
             default=True,
         ),
-        designer_ui_contract_version=designer_ui_contract_version,
-        uiux_skill_mode=uiux_skill_mode,
+        browser_readiness_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_READINESS_REPAIR_LIMIT"), default=2, minimum=0
+        ),
+        browser_polish_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_POLISH_REPAIR_LIMIT"), default=2, minimum=0
+        ),
+        browser_qa_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_QA_REPAIR_LIMIT"), default=3, minimum=0
+        ),
+        browser_journey_patch_limit=_int_value(merged.get("SDLC_BROWSER_JOURNEY_PATCH_LIMIT"), default=2, minimum=0),
+        browser_max_images_per_call=_int_value(
+            merged.get("SDLC_BROWSER_MAX_IMAGES_PER_CALL"), default=12, minimum=1
+        ),
         uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
         uiux_skill_timeout_seconds=_int_value(
             merged.get("SDLC_UIUX_SKILL_TIMEOUT_SECONDS"),
@@ -558,8 +548,7 @@ def load_settings(
             minimum=1,
             maximum=300,
         ),
-        vertical_trace_mode=vertical_trace_mode,
-        implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
+        implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=4, minimum=0),
         implementation_plan_step_review_enabled=_bool_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED")
         ),
@@ -572,9 +561,18 @@ def load_settings(
             default=True,
         ),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),
-        implementation_validation_trials=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"), default=3, minimum=2),
-        implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=6, minimum=2),
-        qa_repair_limit=_int_value(merged.get("SDLC_QA_REPAIR_LIMIT"), default=1, minimum=0),
+        implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=0, minimum=0),
+        implementation_validation_step_review_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED")
+        ),
+        implementation_validation_step_review_input_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_INPUT_ENABLED"),
+            default=True,
+        ),
+        implementation_validation_step_review_output_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED"),
+            default=True,
+        ),
         sync_mode=sync_mode,
         atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),
         atlassian_email=merged.get("ATLASSIAN_EMAIL", ""),

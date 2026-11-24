@@ -56,6 +56,16 @@ class RequirementModelV2Test(unittest.TestCase):
         self.assertIn("[SC-1] Insert a cultural heritage record successfully", packet)
         self.assertIn("business_rule: `required`", packet)
 
+    def test_flow_target_is_labelled_instead_of_appended_to_the_action(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["flows"]["main"][1]["target"] = "form"
+        model = self.validate(payload).model
+
+        expected = "[MF-2] System Displays the corresponding form. (target: form)"
+        self.assertIn(f"- {expected}", render_requirement_packet_v2(model))
+        self.assertIn(expected, render_formal_use_case_v2(model))
+        self.assertIn("[MF-1] ACT-1 Activate the feature for the insertion of a new cultural good.\n", render_formal_use_case_v2(model))
+
     def test_round_trip_returns_a_detached_copy(self) -> None:
         model = RequirementModelV2.from_dict(self.payload)
         serialized = model.to_dict()
@@ -148,12 +158,29 @@ class RequirementModelV2Test(unittest.TestCase):
         self.assertIn("surface_not_applicable_conflict", codes)
         self.assertIn("surface_clarification_question_required", codes)
 
-    def test_scenario_question_must_be_mapped_to_a_related_surface(self) -> None:
+    def test_python_binds_open_questions_to_scenarios_and_required_surfaces(self) -> None:
         payload = deepcopy(self.payload)
-        scenario = payload["scenario_contract"]["scenarios"][4]
-        for surface in scenario["surfaces"].values():
-            surface["open_question_refs"] = []
-        self.assertIn("scenario_question_not_mapped", self.issue_codes(payload))
+        for scenario in payload["scenario_contract"]["scenarios"]:
+            scenario["open_question_refs"] = []
+            for surface in scenario["surfaces"].values():
+                surface["open_question_refs"] = []
+
+        result = self.validate(payload)
+
+        self.assertTrue(result.report.ok, result.report.issues)
+        self.assertEqual(
+            result.model.to_dict()["scenario_contract"],
+            self.validate().model.to_dict()["scenario_contract"],
+        )
+
+    def test_python_never_maps_a_question_onto_a_clarification_required_surface(self) -> None:
+        payload = deepcopy(self.payload)
+        surface = payload["scenario_contract"]["scenarios"][1]["surfaces"]["ui"]
+        surface["status"] = "clarification_required"
+        surface["open_question_refs"] = []
+        codes = self.issue_codes(payload)
+        self.assertIn("scenario_question_not_mapped", codes)
+        self.assertIn("surface_clarification_question_required", codes)
 
     def test_revision_type_is_not_coerced(self) -> None:
         payload = deepcopy(self.payload)

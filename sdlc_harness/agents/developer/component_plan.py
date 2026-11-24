@@ -10,11 +10,14 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    DEVELOPER_INTENT_STAGE_OWNER,
+    QA_INTENT_STAGE_OWNER,
     PlanningPathPolicy,
 )
-from ..designer.graph import GRAPH_VERSION_V2, validate_vertical_design_graph
+from ...profiles.runtime_config import runtime_config_impact_issues
+from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
+from ...core.coerce import dict_items as _dicts, string_items as _strings
 
 
 COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION = (
@@ -42,25 +45,9 @@ _IMMUTABLE_UNIT_FIELDS = {
     "runtime_bindings",
     "boundary_contracts",
     "surface_contracts",
+    "code_entities",
+    "ui_obligations",
 }
-
-
-def resolve_implementation_plan_contract(state: dict[str, object]) -> str:
-    """Resolve the plan schema pinned to a run; missing markers are historical V3."""
-
-    value = str(state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY) or "").strip()
-    if not value:
-        return PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    if value not in {
-        COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
-        PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    }:
-        raise HarnessError(
-            "implementation_plan_contract_invalid",
-            f"Unsupported implementation plan contract: {value}",
-            run_id=str(state.get("run_id") or "") or None,
-        )
-    return value
 
 
 def build_component_work_units(
@@ -108,6 +95,7 @@ def build_component_work_units(
         if str(_dict(trace_nodes.get(source)).get("kind") or "") == "acceptance_criterion" and target in nodes:
             acceptance_by_design.setdefault(target, set()).add(source)
 
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION
     units: list[dict[str, object]] = []
     unit_by_node: dict[str, str] = {}
     for (scenario_id, component_id), group_nodes in sorted(grouped.items()):
@@ -198,11 +186,15 @@ def build_component_work_units(
             "depends_on": [],
             "planned_code_targets": seeded_targets,
             "test_intents": [],
+            "qa_test_intents": [],
             "repo_evidence_refs": evidence_refs,
             "runtime_bindings": runtime_bindings,
             "boundary_contracts": [],
             "surface_contracts": surface_contracts,
         }
+        obligations = [row for node in group_nodes for row in _ui_obligations(node)] if entity_graph else []
+        if obligations:
+            unit["ui_obligations"] = obligations
         if "data" in surfaces:
             intents = sorted(
                 {
@@ -221,6 +213,7 @@ def build_component_work_units(
         units.append(unit)
 
     units_by_id = {str(item["unit_id"]): item for item in units}
+    scenario_rank = _scenario_rank(trace_graph)
     scenario_kinds = {
         str(item.get("id") or ""): str(item.get("scenario_kind") or "")
         for item in _dicts(trace_graph.get("nodes"))
@@ -248,6 +241,28 @@ def build_component_work_units(
                             **boundary,
                         }
                     )
+        branch_scenario = str(_dict(nodes.get(source_node)).get("scenario_id") or "")
+        main_scenario = str(_dict(nodes.get(target_node)).get("scenario_id") or "")
+        if (
+            str(edge.get("kind") or "") == "depends_on"
+            and source_unit
+            and not target_unit
+            and branch_scenario != main_scenario
+            and scenario_kinds.get(branch_scenario) in {"alternative", "exception"}
+            and scenario_kinds.get(main_scenario) == "main"
+        ):
+            # The branch builds on main-scenario code it only reuses: no shared file links the two, so
+            # the Harness still orders the branch after every work unit of its main scenario.
+            refs = units_by_id[source_unit]["depends_on"]
+            for candidate in units:
+                candidate_id = str(candidate.get("unit_id") or "")
+                if (
+                    isinstance(refs, list)
+                    and str(candidate.get("scenario_id") or "") == main_scenario
+                    and candidate_id != source_unit
+                    and candidate_id not in refs
+                ):
+                    refs.append(candidate_id)
         if not source_unit or not target_unit or source_unit == target_unit:
             continue
         kind = str(edge.get("kind") or "")
@@ -264,7 +279,8 @@ def build_component_work_units(
         source_scenario = str(_dict(nodes.get(source_node)).get("scenario_id") or "")
         target_scenario = str(_dict(nodes.get(target_node)).get("scenario_id") or "")
         if (
-            kind == "depends_on"
+            not entity_graph
+            and kind == "depends_on"
             and source_scenario != target_scenario
             and scenario_kinds.get(source_scenario) in {"alternative", "exception"}
             and scenario_kinds.get(target_scenario) == "main"
@@ -282,7 +298,16 @@ def build_component_work_units(
                 ):
                     refs.append(target_unit)
 
-    ordered_ids = _topological_order(units, scenario_rank=_scenario_rank(trace_graph))
+    if entity_graph:
+        _bind_code_entities(
+            units_by_id=units_by_id,
+            nodes=nodes,
+            unit_by_node=unit_by_node,
+            scenario_rank=scenario_rank,
+            planning_policy=planning_policy,
+        )
+
+    ordered_ids = _topological_order(units, scenario_rank=scenario_rank)
     order_by_id = {unit_id: index for index, unit_id in enumerate(ordered_ids, start=1)}
     for unit in units:
         unit["order"] = order_by_id[str(unit["unit_id"])]
@@ -297,6 +322,291 @@ def build_component_work_units(
             key=lambda item: str(item.get("design_node_id") or ""),
         )
     return sorted(units, key=lambda item: int(item.get("order") or 0))
+
+
+def _bind_code_entities(
+    *,
+    units_by_id: dict[str, dict[str, object]],
+    nodes: dict[str, dict[str, object]],
+    unit_by_node: dict[str, str],
+    scenario_rank: dict[str, tuple[int, int]],
+    planning_policy: PlanningPathPolicy,
+) -> None:
+    """Group actionable nodes by exact runtime target and order the units that share one."""
+
+    entity_nodes: dict[str, list[str]] = {}
+    for node_id in sorted(unit_by_node):
+        target = _dict(_dict(nodes[node_id].get("runtime_binding")).get("target"))
+        path = planning_policy.normalize_editable_path(target.get("path"))
+        if path:
+            entity = f"{path}#{str(target.get('symbol') or '').strip()}"
+            entity_nodes.setdefault(entity, []).append(node_id)
+
+    def owner_rank(unit_id: str) -> tuple[object, ...]:
+        unit = units_by_id[unit_id]
+        return (
+            *scenario_rank.get(str(unit.get("scenario_id") or ""), (4, 10**9)),
+            str(unit.get("component_id") or ""),
+            unit_id,
+        )
+
+    for entity, node_ids in sorted(entity_nodes.items()):
+        owners = sorted({unit_by_node[node_id] for node_id in node_ids}, key=owner_rank)
+        # A later scenario extends the code an earlier scenario created, never the reverse.
+        for earlier, later in zip(owners, owners[1:]):
+            refs = units_by_id[later]["depends_on"]
+            if isinstance(refs, list) and earlier not in refs:
+                refs.append(earlier)
+        record = {"entity": entity, "design_node_ids": node_ids, "unit_ids": owners}
+        for unit_id in owners:
+            units_by_id[unit_id].setdefault("code_entities", []).append(record)
+        # The first unit that attaches this symbol to an owner wires it; later units reuse that wiring.
+        wired: dict[tuple[str, str, str], str] = {}
+        for unit_id in owners:
+            for binding in _dicts(units_by_id[unit_id].get("runtime_bindings")):
+                if str(binding.get("design_node_id") or "") not in node_ids:
+                    continue
+                attachment = _dict(binding.get("attachment"))
+                key = (
+                    str(attachment.get("relation") or "").strip(),
+                    planning_policy.normalize_editable_path(attachment.get("owner_path")),
+                    str(attachment.get("owner_symbol") or "").strip(),
+                )
+                if key[1] and wired.setdefault(key, unit_id) != unit_id:
+                    binding["attachment_wired_by"] = wired[key]
+
+    for unit in units_by_id.values():
+        required = _wiring_endpoints(unit, planning_policy)
+        unit["planned_code_targets"] = [
+            target
+            for target in _dicts(unit.get("planned_code_targets"))
+            if (str(target.get("path") or ""), str(target.get("symbol") or "")) in required
+        ]
+
+
+def _wiring_endpoints(unit: dict[str, object], planning_policy: PlanningPathPolicy) -> set[tuple[str, str]]:
+    """Runtime targets plus the attachment owners this unit must wire itself."""
+
+    endpoints = set()
+    for binding in _dicts(unit.get("runtime_bindings")):
+        target = _dict(binding.get("target"))
+        endpoints.add((target.get("path"), target.get("symbol")))
+        if not binding.get("attachment_wired_by"):
+            attachment = _dict(binding.get("attachment"))
+            endpoints.add((attachment.get("owner_path"), attachment.get("owner_symbol")))
+    return {
+        (planning_policy.normalize_editable_path(path), str(symbol or "").strip())
+        for path, symbol in endpoints
+        if planning_policy.normalize_editable_path(path)
+    }
+
+
+def _ui_obligations(node: dict[str, object]) -> list[dict[str, str]]:
+    """Enumerate UI behavior and externally supplied runtime inputs with stable ids."""
+
+    return [{"id": row_id, "summary": summary} for row_id, summary, _contract in ui_obligation_rows(node)]
+
+
+def ui_obligation_rows(node: dict[str, object]) -> list[tuple[str, str, dict[str, object]]]:
+    """Each UI obligation as (stable id, summary, the approved item's fields the summary leaves out)."""
+
+    if str(node.get("surface") or "") != "ui":
+        return []
+    contract = _dict(node.get("surface_contract"))
+    experience = _dict(contract.get("experience_contract"))
+    runtime_surface = _dict(contract.get("runtime_surface"))
+
+    def rest(item: dict[str, object], *summarized: str) -> dict[str, object]:
+        return {key: value for key, value in item.items() if key not in summarized}
+
+    rows: list[tuple[str, str, str, dict[str, object]]] = []
+    external_inputs = sorted(
+        (
+            item
+            for item in _dicts(runtime_surface.get("required_inputs"))
+            if str(item.get("source") or "") == "external_use_case"
+        ),
+        key=lambda item: str(item.get("name") or ""),
+    )
+    for item in external_inputs:
+        name = str(item.get("name") or "")
+        rows.append(
+            (
+                "runtime_input",
+                name,
+                f"{name}: external_use_case via {item.get('binding') or ''}; "
+                f"provided by {item.get('provided_by') or ''}",
+                {},
+            )
+        )
+    for name, state in sorted(_dict(experience.get("runtime_states")).items()):
+        if isinstance(state, dict) and not state.get("not_applicable"):
+            rows.append(
+                ("state", str(name), f"{name}: {state.get('trigger') or ''}".strip(), rest(state, "trigger", "not_applicable"))
+            )
+    for index, value in enumerate(_strings(contract.get("validations")), start=1):
+        rows.append(("validation", str(index), value, {}))
+    for index, item in enumerate(_dicts(contract.get("transitions")), start=1):
+        rows.append(
+            (
+                "transition",
+                str(index),
+                f"{item.get('from') or ''} -> {item.get('to') or ''} on {item.get('action') or ''}",
+                rest(item, "from", "to", "action"),
+            )
+        )
+    for index, item in enumerate(_dicts(experience.get("feedback")), start=1):
+        rows.append(("feedback", str(index), str(item.get("trigger") or ""), rest(item, "trigger")))
+    for kind in ("accessibility", "focus_flow", "responsive"):
+        for index, value in enumerate(_strings(experience.get(kind)), start=1):
+            rows.append((kind, str(index), value, {}))
+    for index, item in enumerate(_dicts(experience.get("focus_policies")), start=1):
+        rows.append(("focus_policy", str(index), str(item.get("event") or ""), rest(item, "event")))
+    node_id = str(node.get("id") or "")
+    return [(f"{node_id}:{kind}.{key}", summary, detail) for kind, key, summary, detail in rows]
+
+
+def unit_write_scope(unit: dict[str, object], planning_policy: PlanningPathPolicy) -> dict[str, object]:
+    """Files a Design V2 unit may target, mirroring the runtime-wiring rule in component_plan_issues."""
+
+    files = sorted(
+        {
+            normalized
+            for binding in _dicts(unit.get("runtime_bindings"))
+            for raw in (
+                _dict(binding.get("target")).get("path"),
+                _dict(binding.get("attachment")).get("owner_path"),
+            )
+            for normalized in [planning_policy.normalize_editable_path(raw)]
+            if normalized
+        }
+    )
+    if not files:
+        return {}
+    surfaces = _strings(unit.get("surfaces"))
+    also = []
+    # Same conditions as _target_allowed_for_unit plus the V2 boundary-contract rule.
+    if _dicts(unit.get("boundary_contracts")) and str(unit.get("component_id") or "") == "api" and "api" in surfaces:
+        also.append("shared contract files under the `contracts` component root")
+    if "data" in surfaces:
+        also.append("packages/db/prisma/schema.prisma and packages/db/prisma/migrations/<id>_<name>/migration.sql")
+    if "ui" in surfaces:
+        also.append("stylesheets under the planning policy's `ui_stylesheets` root")
+    return {"files": files, "also_allowed": also}
+
+
+def unit_existing_test_paths(
+    unit: dict[str, object],
+    repo_target_tests: object,
+    planning_policy: PlanningPathPolicy,
+) -> list[str]:
+    """Existing repository tests that import a file of the unit's write scope (Harness-owned)."""
+
+    files = set(_strings(unit_write_scope(unit, planning_policy).get("files")))
+    return sorted(
+        {
+            normalized
+            for row in _dicts(repo_target_tests)
+            if str(row.get("path") or "") in files
+            for raw in _strings(row.get("tests"))
+            for normalized in [planning_policy.normalize_editable_path(raw)]
+            if normalized and planning_policy.is_test_path(normalized)
+        }
+    )
+
+
+def requirement_existing_coverage(
+    requirement_id: str,
+    *,
+    design_graph: dict[str, object],
+    trace_graph: dict[str, object],
+) -> dict[str, object]:
+    """Coverage of a requirement that no work unit changes, read mechanically from the graphs.
+
+    Every realizing Design node reuses code -> `existing_code` with that code's runtime targets;
+    a precondition no Design node realizes -> `precondition`; anything else -> {} (it needs work).
+    """
+
+    nodes = {str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))}
+    realizing = sorted(
+        {
+            str(edge.get("to") or "")
+            for edge in _dicts(trace_graph.get("edges"))
+            if str(edge.get("kind") or "") == "realizes"
+            and str(edge.get("from") or "") == requirement_id
+            and str(edge.get("to") or "") in nodes
+        }
+    )
+    if realizing:
+        if any(str(nodes[node_id].get("disposition") or "") in _ACTIONABLE_DISPOSITIONS for node_id in realizing):
+            return {}
+        targets = sorted(
+            {
+                path + (f"#{symbol}" if symbol else "")
+                for node_id in realizing
+                for target in [_dict(_dict(nodes[node_id].get("runtime_binding")).get("target"))]
+                for path, symbol in [
+                    (str(target.get("path") or "").strip(), str(target.get("symbol") or "").strip())
+                ]
+                if path
+            }
+        )
+        if not targets:
+            return {}
+        return {
+            "coverage_kind": "existing_code",
+            "existing_design_node_ids": realizing,
+            "existing_code_targets": targets,
+        }
+    claim = next(
+        (item for item in _dicts(trace_graph.get("nodes")) if str(item.get("id") or "") == requirement_id),
+        {},
+    )
+    if str(claim.get("claim_type") or "") == "precondition":
+        return {"coverage_kind": "precondition"}
+    return {}
+
+
+def mark_existing_code_coverage(
+    coverage: list[dict[str, object]],
+    *,
+    design_graph: dict[str, object],
+    trace_graph: dict[str, object],
+) -> list[dict[str, object]]:
+    """Label requirement rows without planned code as existing-code or precondition coverage."""
+
+    result = []
+    for row in coverage:
+        item = dict(row)
+        if not _strings(item.get("planned_code_targets")):
+            item.update(
+                requirement_existing_coverage(
+                    str(item.get("requirement_id") or ""),
+                    design_graph=design_graph,
+                    trace_graph=trace_graph,
+                )
+            )
+        result.append(item)
+    return result
+
+
+def attach_existing_test_paths(
+    units: list[dict[str, object]],
+    repo_target_tests: object,
+    planning_policy: PlanningPathPolicy,
+) -> list[dict[str, object]]:
+    """Give each unit the existing tests of its files; its Developer may update them (Phase 4)."""
+
+    result = []
+    for unit in units:
+        item = dict(unit)
+        tests = unit_existing_test_paths(item, repo_target_tests, planning_policy)
+        if tests:
+            item["existing_test_paths"] = tests
+        else:
+            item.pop("existing_test_paths", None)
+        result.append(item)
+    return result
 
 
 def merge_work_unit_updates(
@@ -323,6 +633,13 @@ def merge_work_unit_updates(
             surfaces=_strings(unit.get("surfaces")),
             planning_policy=planning_policy,
         )
+        removals = _target_removals(patch, unit=unit, planning_policy=planning_policy)
+        if removals:
+            targets = [
+                target
+                for target in targets
+                if (str(target.get("path") or ""), str(target.get("symbol") or "")) not in removals
+            ]
         if (
             planning_policy.project_profile_id == "typescript_fullstack_v1"
             and any(
@@ -337,9 +654,21 @@ def merge_work_unit_updates(
                 planning_policy=planning_policy,
             )
         unit["planned_code_targets"] = targets
-        unit["test_intents"] = _canonical_test_intents(patch.get("test_intents")) or _dicts(
-            unit.get("test_intents")
+        # A patch adds tests and drops only the ids it names, so a repair never rewrites kept tests.
+        dropped = set(_strings(patch.get("remove_test_intents")))
+        unit["test_intents"] = _canonical_test_intents(
+            [
+                *(item for item in _dicts(unit.get("test_intents")) if test_intent_id(item) not in dropped),
+                *_dicts(patch.get("test_intents")),
+            ]
         )
+        if "unverified_obligations" in patch:
+            declared = {
+                str(item.get("id") or "").strip(): str(item.get("reason") or "").strip()
+                for item in [*_dicts(unit.get("unverified_obligations")), *_dicts(patch.get("unverified_obligations"))]
+                if str(item.get("id") or "").strip()
+            }
+            unit["unverified_obligations"] = [{"id": key, "reason": declared[key]} for key in sorted(declared)]
         evidence_refs = _strings(patch.get("repo_evidence_refs"))
         if evidence_refs:
             unit["repo_evidence_refs"] = sorted(set(evidence_refs))
@@ -370,6 +699,24 @@ def merge_work_unit_updates(
         result,
         planning_policy=planning_policy,
     )
+
+
+def _target_removals(
+    patch: dict[str, object],
+    *,
+    unit: dict[str, object],
+    planning_policy: PlanningPathPolicy,
+) -> set[tuple[str, str]]:
+    """Exact Planner removals, minus the runtime targets and owners seeded by Harness."""
+
+    requested = {
+        (
+            planning_policy.normalize_editable_path(item.get("path")),
+            str(item.get("symbol") or "").strip(),
+        )
+        for item in _dicts(patch.get("remove_planned_code_targets"))
+    }
+    return {item for item in requested - _wiring_endpoints(unit, planning_policy) if item[0]}
 
 
 def _assign_typescript_database_barrel_owner(
@@ -443,6 +790,13 @@ def canonicalize_work_unit_dependencies(
             for item in _dicts(unit.get("test_intents"))
             for path in _strings(item.get("target_paths"))
         )
+        paths.update(
+            path
+            for item in _dicts(unit.get("qa_test_intents"))
+            for path in _strings(item.get("target_paths"))
+        )
+        # The unit's Developer may update these tests, so units sharing one must run in order.
+        paths.update(_strings(unit.get("existing_test_paths")))
         for path in paths:
             owners.setdefault(path, []).append(unit_id)
 
@@ -468,13 +822,18 @@ def rebind_legacy_mappings_to_work_units(
     legacy_mappings: list[dict[str, object]],
     planning_policy: PlanningPathPolicy,
     signature_entries: object = None,
+    symbol_kinds: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, object]]:
-    """Bind legacy Class/Sequence projections to canonical V4 code targets."""
+    """Bind legacy Class/Sequence projections to canonical V5 code targets.
+
+    `symbol_kinds` maps (path, symbol) to the kind the repository declares for it.
+    """
 
     design_nodes = {
         str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))
     }
     targets_by_name: dict[str, tuple[str, list[dict[str, object]]]] = {}
+    runtime_target_by_name: dict[str, dict[str, object]] = {}
     for unit in units:
         targets = _dicts(unit.get("planned_code_targets"))
         component_id = str(unit.get("component_id") or "")
@@ -483,12 +842,41 @@ def rebind_legacy_mappings_to_work_units(
             name = str(node.get("name") or "").strip()
             if name and targets:
                 targets_by_name[name] = (component_id, targets)
+            runtime = _dict(_dict(node.get("runtime_binding")).get("target"))
+            runtime_key = (
+                planning_policy.normalize_editable_path(runtime.get("path")),
+                str(runtime.get("symbol") or "").strip(),
+            )
+            runtime_target = next(
+                (
+                    candidate
+                    for candidate in targets
+                    if (str(candidate.get("path") or ""), str(candidate.get("symbol") or "").strip())
+                    == runtime_key
+                ),
+                None,
+            )
+            if name and runtime_target:
+                runtime_target_by_name[name] = runtime_target
     signature_symbols = {
         str(item.get("design_element_id") or ""): str(item.get("qualified_name") or "").strip()
         for item in _dicts(signature_entries)
         if str(item.get("design_element_id") or "")
         and str(item.get("qualified_name") or "").strip()
     }
+    unit_node_ids = {node_id for unit in units for node_id in _strings(unit.get("design_node_ids"))}
+    unitless_names = {
+        str(node.get("name") or "").strip()
+        for node_id, node in design_nodes.items()
+        if node_id not in unit_node_ids
+    } - {""}
+    # Legacy projections name their file after a Design node (`<root>/<node name>.<ext>`), and node
+    # names may hold `/`, so the owner is the longest node name the extension-less path ends with.
+    node_names = sorted(
+        {str(node.get("name") or "").strip() for node in design_nodes.values()} - {""},
+        key=len,
+        reverse=True,
+    )
 
     rebound: list[dict[str, object]] = []
     for mapping in legacy_mappings:
@@ -505,9 +893,18 @@ def rebind_legacy_mappings_to_work_units(
             if element_type == "class"
             else ""
         )
+        path_stem = current_path.rsplit(".", 1)[0] if current_path else ""
+        path_owner = next((name for name in node_names if path_stem.endswith(f"/{name}")), "")
+        node_owner = design_owner or path_owner
+        if node_owner in unitless_names and node_owner not in targets_by_name:
+            # No work unit implements that Design node (it reuses existing code), so there is no new code
+            # to trace; requirement coverage records the existing code instead.
+            continue
         owner = (
             design_owner
             if design_owner in targets_by_name
+            else path_owner
+            if path_owner in targets_by_name
             else planning_policy.symbol_owner(current_path)
         )
         component_id, targets = targets_by_name.get(owner, ("", []))
@@ -550,18 +947,22 @@ def rebind_legacy_mappings_to_work_units(
                 None,
             )
         if target is None:
-            target = _best_named_target(name=owner, targets=targets)
+            # The node's own runtime target outranks name similarity with Planner-added helpers.
+            target = runtime_target_by_name.get(owner) or _best_named_target(name=owner, targets=targets)
         if not target:
             rebound.append(item)
             continue
         path = str(target.get("path") or "")
         symbol = str(target.get("symbol") or "").strip()
         path_stem = path.rsplit("/", 1)[-1].removesuffix(".ts")
+        # A legacy operation becomes a method only of a class the repository declares; a function
+        # named like its file (or a new file) is the callable itself, not an owner of fake methods.
         if (
             direct_symbol
             and current_symbol
             and path.endswith(".ts")
             and symbol.lower() == path_stem.lower()
+            and (symbol_kinds or {}).get((path, symbol)) == "class"
         ):
             symbol = f"{symbol}.{current_symbol}"
         item["planned_code_target"] = path + (f"#{symbol}" if direct_symbol and symbol else "")
@@ -621,13 +1022,14 @@ def component_plan_projections(
     legacy_mappings: list[dict[str, object]],
     planning_policy: PlanningPathPolicy | None = None,
 ) -> dict[str, list[dict[str, object]]]:
-    """Render legacy Phase 4 fields from V4 units; never create a second plan authority."""
+    """Render legacy Phase 4 fields from V5 units; never create a second plan authority."""
 
     design_nodes = {str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))}
     steps: list[dict[str, object]] = []
     files: dict[str, dict[str, object]] = {}
     vdn_mappings: list[dict[str, object]] = []
     all_test_intents: list[dict[str, object]] = []
+    all_qa_test_intents: list[dict[str, object]] = []
     for unit in units:
         unit_id = str(unit.get("unit_id") or "")
         targets = _dicts(unit.get("planned_code_targets"))
@@ -640,6 +1042,7 @@ def component_plan_projections(
         paths.extend(path for path in test_paths if path not in paths)
         migration = _dict(unit.get("migration_impact"))
         paths.extend(path for path in _strings(migration.get("targets")) if path not in paths)
+        paths.extend(path for path in _strings(unit.get("existing_test_paths")) if path not in paths)
         steps.append(
             {
                 "order": int(unit.get("order") or 0),
@@ -696,6 +1099,7 @@ def component_plan_projections(
                     }
                 )
         all_test_intents.extend(_dicts(unit.get("test_intents")))
+        all_qa_test_intents.extend(_dicts(unit.get("qa_test_intents")))
 
     mappings = _dedupe_mappings([*legacy_mappings, *vdn_mappings])
     requirements = {str(item.get("id") or ""): item for item in _dicts(requirement_graph.get("requirements"))}
@@ -727,6 +1131,14 @@ def component_plan_projections(
                         if str(item.get("intent") or "")
                     }
                 ),
+                "qa_test_intents": sorted(
+                    {
+                        str(item.get("intent") or "")
+                        for unit in related
+                        for item in _dicts(unit.get("qa_test_intents"))
+                        if str(item.get("intent") or "")
+                    }
+                ),
             }
         )
     return {
@@ -735,6 +1147,7 @@ def component_plan_projections(
         "design_mappings": mappings,
         "requirement_coverage": coverage,
         "test_intents": _dedupe_test_intents(all_test_intents),
+        "qa_test_intents": _dedupe_test_intents(all_qa_test_intents),
     }
 
 
@@ -745,17 +1158,26 @@ def component_plan_issues(
     expected_inputs: dict[str, object],
     planning_policy: PlanningPathPolicy,
     verification_stage_ids: list[str],
+    verification_stage_ownership: dict[str, str] | None = None,
     design_graph: dict[str, object] | None = None,
     trace_graph: dict[str, object] | None = None,
     repo_landscape: dict[str, object] | None = None,
 ) -> list[str]:
-    """Return deterministic V4 contract violations."""
+    """Return deterministic V5 contract violations."""
 
     issues: list[str] = []
     if structured_plan.get("version") != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
         issues.append(f"Plan version must be `{COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION}`.")
     if _dict(structured_plan.get("inputs")) != expected_inputs:
         issues.append("Component-aware plan input binding is stale or incomplete.")
+    if isinstance(expected_inputs.get("repo_runtime_config"), dict):
+        issues.extend(
+            runtime_config_impact_issues(
+                structured_plan=structured_plan,
+                repo_runtime_config=_dict(expected_inputs.get("repo_runtime_config")),
+                planning_policy=planning_policy,
+            )
+        )
     units = _dicts(structured_plan.get("work_units"))
     actual_by_id = {str(item.get("unit_id") or ""): item for item in units}
     expected_with_targets: list[dict[str, object]] = []
@@ -764,6 +1186,10 @@ def component_plan_issues(
         actual = _dict(actual_by_id.get(str(item.get("unit_id") or "")))
         item["planned_code_targets"] = _dicts(actual.get("planned_code_targets"))
         item["test_intents"] = _dicts(actual.get("test_intents"))
+        item["qa_test_intents"] = _dicts(actual.get("qa_test_intents"))
+        existing_tests = unit_existing_test_paths(item, expected_inputs.get("repo_target_tests"), planning_policy)
+        if existing_tests:
+            item["existing_test_paths"] = existing_tests
         if "migration_impact" in item:
             item["migration_impact"] = _dict(actual.get("migration_impact"))
         expected_with_targets.append(item)
@@ -776,13 +1202,18 @@ def component_plan_issues(
     if set(actual_by_id) != set(expected_by_id):
         issues.append("Component-aware plan work-unit identity does not match the approved Design graph.")
     allowed_stages = set(verification_stage_ids)
-    strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION_V2
+    stage_owners = dict(verification_stage_ownership or {})
+    strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION
     for unit_id, unit in actual_by_id.items():
         expected = expected_by_id.get(unit_id)
         if expected:
             for field in _IMMUTABLE_UNIT_FIELDS:
                 if unit.get(field) != expected.get(field):
                     issues.append(f"Work unit {unit_id} changed immutable field `{field}`.")
+            if _strings(unit.get("existing_test_paths")) != _strings(expected.get("existing_test_paths")):
+                issues.append(
+                    f"Work unit {unit_id} existing_test_paths do not match the repository tests of its files."
+                )
         targets = _dicts(unit.get("planned_code_targets"))
         if not targets:
             issues.append(f"Work unit {unit_id} has no planned code target.")
@@ -818,6 +1249,8 @@ def component_plan_issues(
                 for binding in _dicts(expected.get("runtime_bindings"))
             }
             allowed_targets.discard(("", ""))
+            # Write scope is per file: a new exported symbol inside a runtime-wired file stays wired.
+            allowed_paths = {path for path, _ in allowed_targets if path}
             has_boundary_contract = bool(_dicts(expected.get("boundary_contracts")))
             for target in targets:
                 target_key = (
@@ -840,24 +1273,25 @@ def component_plan_issues(
                     and target_key[0] == _TYPESCRIPT_DATABASE_BARREL
                     and not target_key[1]
                 )
+                is_ui_stylesheet = "ui" in _strings(unit.get("surfaces")) and planning_policy.is_stylesheet_path(
+                    target_key[0]
+                )
                 if (
-                    target_key not in allowed_targets
+                    target_key[0] not in allowed_paths
                     and not is_shared_contract
                     and not is_data_schema_artifact
                     and not is_database_barrel
+                    and not is_ui_stylesheet
                 ):
                     issues.append(
                         f"Work unit {unit_id} has unapproved support target "
                         f"`{target_key[0]}#{target_key[1]}` outside runtime wiring."
                     )
-        for binding in _dicts(unit.get("runtime_bindings")):
-            target_path = str(_dict(binding.get("target")).get("path") or "")
-            owner_path = str(_dict(binding.get("attachment")).get("owner_path") or "")
-            for required_path in {target_path, owner_path} - {""}:
-                if required_path not in target_paths:
-                    issues.append(
-                        f"Work unit {unit_id} omits runtime wiring target `{required_path}`."
-                    )
+        for required_path in sorted({path for path, _ in _wiring_endpoints(unit, planning_policy)}):
+            if required_path not in target_paths:
+                issues.append(
+                    f"Work unit {unit_id} omits runtime wiring target `{required_path}`."
+                )
         known_edge_ids = set(_strings(unit.get("design_edge_ids")))
         for boundary in _dicts(unit.get("boundary_contracts")):
             if str(boundary.get("design_edge_id") or "") not in known_edge_ids:
@@ -865,16 +1299,50 @@ def component_plan_issues(
         tests = _dicts(unit.get("test_intents"))
         if not tests:
             issues.append(f"Work unit {unit_id} has no test intent.")
-        covered_acceptance = {
-            ref for item in tests for ref in _strings(item.get("acceptance_refs"))
-        }
-        missing_acceptance = set(_strings(unit.get("acceptance_refs"))) - covered_acceptance
+        if _dicts(unit.get("qa_test_intents")):
+            issues.append(
+                f"Work unit {unit_id} plans QA intents; Phase 4 Browser QA plans and runs the browser tests."
+            )
+        # Phase 4 Browser QA plans journeys for every UI obligation from the approved Design, so with it
+        # active a unit's UI obligations and acceptance need no browser intents in the Plan.
+        browser_qa = "browser_e2e" in allowed_stages and (
+            not stage_owners or stage_owners.get("browser_e2e") == QA_INTENT_STAGE_OWNER
+        )
+        obligation_ids = {str(item.get("id") or "") for item in _dicts(_dict(expected).get("ui_obligations"))}
+        tested = {ref for item in tests for ref in _strings(item.get("obligation_refs"))}
+        declared = _dicts(unit.get("unverified_obligations"))
+        unverified = {str(item.get("id") or "") for item in declared if str(item.get("reason") or "").strip()}
+        unknown = (tested | {str(item.get("id") or "") for item in declared}) - obligation_ids
+        if unknown:
+            issues.append(f"Work unit {unit_id} references unknown UI obligations: {sorted(unknown)}")
+        if browser_qa and unverified:
+            issues.append(
+                f"Work unit {unit_id} declares UI obligations unverified while browser QA is active: "
+                f"{sorted(unverified)}"
+            )
+        unaccounted = set() if browser_qa else obligation_ids - tested - unverified
+        if unaccounted:
+            issues.append(
+                f"Work unit {unit_id} leaves UI obligations neither tested nor declared unverified "
+                f"with a reason: {sorted(unaccounted)}"
+            )
+        covered_acceptance = {ref for item in tests for ref in _strings(item.get("acceptance_refs"))}
+        missing_acceptance = (
+            set()
+            if browser_qa and obligation_ids
+            else set(_strings(unit.get("acceptance_refs"))) - covered_acceptance
+        )
         if missing_acceptance:
             issues.append(f"Work unit {unit_id} omits acceptance test coverage: {sorted(missing_acceptance)}")
         for item in tests:
             stage_id = str(item.get("stage_id") or "")
             if stage_id not in allowed_stages:
                 issues.append(f"Work unit {unit_id} references unsupported verification stage `{stage_id}`.")
+            elif stage_owners and stage_owners.get(stage_id) != DEVELOPER_INTENT_STAGE_OWNER:
+                issues.append(
+                    f"Work unit {unit_id} developer test intent cannot claim stage `{stage_id}` "
+                    f"owned by `{stage_owners.get(stage_id) or 'unknown'}`."
+                )
             test_paths = _strings(item.get("target_paths"))
             if not test_paths:
                 issues.append(f"Work unit {unit_id} test intent has no exact target path.")
@@ -883,7 +1351,9 @@ def component_plan_issues(
                 valid_stage_target = (
                     planning_policy.is_test_path(path)
                     if stage_id == "unit"
-                    else path in target_paths and not planning_policy.is_test_path(path)
+                    else path in target_paths
+                    and not planning_policy.is_test_path(path)
+                    and not planning_policy.is_stylesheet_path(path)
                     if stage_id == "typecheck"
                     else False
                 )
@@ -954,7 +1424,22 @@ def component_plan_issues(
         for unit in units
         for target in _dicts(unit.get("planned_code_targets"))
     )
-    if has_web_surface and has_api_surface and profile_has_contracts and not has_contract_target:
+    # Mechanical part only: a new endpoint the web calls needs a shared contract. Whether a changed
+    # existing endpoint needs one depends on what changes, which the semantic review judges.
+    graph_nodes = {str(item.get("id") or ""): item for item in _dicts(_dict(design_graph).get("nodes"))}
+    adds_web_endpoint = any(
+        str(_dict(graph_nodes.get(str(edge.get("from") or ""))).get("component_id") or "") == "web"
+        and str(_dict(graph_nodes.get(str(edge.get("to") or ""))).get("surface") or "") == "api"
+        and str(_dict(graph_nodes.get(str(edge.get("to") or ""))).get("disposition") or "") == "add"
+        for edge in _dicts(_dict(design_graph).get("edges"))
+    )
+    if (
+        has_web_surface
+        and has_api_surface
+        and adds_web_endpoint
+        and profile_has_contracts
+        and not has_contract_target
+    ):
         issues.append(
             "Cross-boundary Web/API work requires an approved shared contract target from the repository profile."
         )
@@ -1027,8 +1512,8 @@ def component_plan_issues(
         for unit in units
         for item in _dicts(unit.get("test_intents"))
         for path in _strings(item.get("target_paths"))
-    }
-    proposed_paths = {str(item.get("path") or "") for item in _dicts(structured_plan.get("proposed_files"))}
+    } | {path for unit in units for path in _strings(unit.get("existing_test_paths"))}
+    proposed_paths ={str(item.get("path") or "") for item in _dicts(structured_plan.get("proposed_files"))}
     if expected_paths != proposed_paths:
         issues.append("Compatibility proposed files do not match work-unit targets.")
     mapped_vdns = {
@@ -1107,6 +1592,8 @@ def _structural_plan_issues(
         return found
 
     parent_scenarios: dict[str, set[str]] = {}
+    branch_entry_units: dict[str, set[str]] = {}
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION
     scenario_edges: dict[str, list[dict[str, object]]] = {}
     for edge in _dicts(design_graph.get("edges")):
         source_node = str(edge.get("from") or "")
@@ -1133,6 +1620,8 @@ def _structural_plan_issues(
             and scenario_kinds.get(target_scenario) == "main"
         ):
             parent_scenarios.setdefault(source_scenario, set()).add(target_scenario)
+            if source_unit:
+                branch_entry_units.setdefault(source_scenario, set()).add(source_unit)
         if not edge.get("boundary_contract"):
             continue
         edge_id = str(edge.get("id") or "")
@@ -1151,11 +1640,17 @@ def _structural_plan_issues(
         if scenario_kinds.get(scenario_id) not in {"alternative", "exception"}:
             continue
         parents = parent_scenarios.get(scenario_id, set())
+        # With code entities a branch unit only needs the path its entry unit opens to the parent.
+        if entity_graph and parents and unit_id not in branch_entry_units.get(scenario_id, set()):
+            continue
         parent_units = {
             candidate_id
             for candidate_id, candidate in units_by_id.items()
             if str(candidate.get("scenario_id") or "") in parents
         }
+        # A main scenario that only reuses code has no work unit to come after.
+        if parents and not parent_units:
+            continue
         if not parents or not dependency_closure(unit_id).intersection(parent_units):
             issues.append(
                 f"Branch work unit {unit_id} has no dependency path to its parent main scenario."
@@ -1175,13 +1670,19 @@ def _structural_plan_issues(
     if missing_surfaces:
         issues.append(f"Work units omit actionable scenario surfaces: {missing_surfaces}")
 
+    # Same rule as the Design gate: a surface declared not exercised has no node to reach.
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
+        for item in _dicts(design_graph.get("surface_not_exercised"))
+    }
     required_surfaces: dict[str, set[str]] = {}
     for node in _dicts(trace_graph.get("nodes")):
         if str(node.get("kind") or "") != "surface_requirement" or str(node.get("status") or "") != "required":
             continue
-        required_surfaces.setdefault(str(node.get("scenario_id") or ""), set()).add(
-            str(node.get("surface") or "")
-        )
+        scenario_id = str(node.get("scenario_id") or "")
+        surface = str(node.get("surface") or "")
+        if (scenario_id, surface) not in not_exercised:
+            required_surfaces.setdefault(scenario_id, set()).add(surface)
     for scenario_id, surfaces in required_surfaces.items():
         scenario_nodes = [
             node for node in design_nodes.values() if str(node.get("scenario_id") or "") == scenario_id
@@ -1285,16 +1786,57 @@ def _topological_order(
             ),
         )
         if not ready:
+            cycles = _dependency_cycles(remaining)
             raise HarnessError(
                 "implementation_plan_dependency_cycle",
-                f"Component-aware work units contain a dependency cycle: {sorted(remaining)}",
+                "Component-aware work units contain a dependency cycle: "
+                f"{cycles or sorted(remaining)}",
             )
-        for unit_id in ready:
-            ordered.append(unit_id)
-            remaining.pop(unit_id)
+        # One unit at a time: the highest-ranked scenario slice finishes before a later one starts.
+        unit_id = ready[0]
+        ordered.append(unit_id)
+        remaining.pop(unit_id)
         for dependencies in remaining.values():
-            dependencies.difference_update(ready)
+            dependencies.discard(unit_id)
     return ordered
+
+
+def _dependency_cycles(remaining: dict[str, set[str]]) -> list[list[str]]:
+    """Tarjan SCC over unresolved units: return only the components that really loop."""
+
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    cycles: list[list[str]] = []
+
+    def visit(unit_id: str) -> None:
+        index[unit_id] = low[unit_id] = len(index)
+        stack.append(unit_id)
+        on_stack.add(unit_id)
+        for dependency in sorted(remaining.get(unit_id, set())):
+            if dependency not in remaining:
+                continue
+            if dependency not in index:
+                visit(dependency)
+                low[unit_id] = min(low[unit_id], low[dependency])
+            elif dependency in on_stack:
+                low[unit_id] = min(low[unit_id], index[dependency])
+        if low[unit_id] == index[unit_id]:
+            component: list[str] = []
+            while True:
+                member = stack.pop()
+                on_stack.discard(member)
+                component.append(member)
+                if member == unit_id:
+                    break
+            if len(component) > 1 or unit_id in remaining.get(unit_id, set()):
+                cycles.append(sorted(component))
+
+    for unit_id in sorted(remaining):
+        if unit_id not in index:
+            visit(unit_id)
+    return sorted(cycles)
 
 
 def _canonical_targets(
@@ -1340,13 +1882,27 @@ def _target_allowed_for_unit(
 
 def _canonical_test_intents(value: object) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    seen: set[
+        tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...], str]
+    ] = set()
     for item in _dicts(value):
         stage_id = str(item.get("stage_id") or "").strip()
         intent = str(item.get("intent") or "").strip()
         acceptance_refs = tuple(sorted(set(_strings(item.get("acceptance_refs")))))
         target_paths = tuple(sorted(set(_safe_relative_paths(item.get("target_paths")))))
-        key = (stage_id, intent, acceptance_refs, target_paths)
+        obligation_refs = tuple(sorted(set(_strings(item.get("obligation_refs")))))
+        raw_setup = _dict(item.get("data_setup"))
+        data_setup = (
+            {
+                "mode": str(raw_setup.get("mode") or "").strip(),
+                "reason": str(raw_setup.get("reason") or "").strip(),
+                "requirements": sorted(set(_strings(raw_setup.get("requirements")))),
+            }
+            if raw_setup
+            else {}
+        )
+        setup_key = json.dumps(data_setup, ensure_ascii=False, sort_keys=True)
+        key = (stage_id, intent, acceptance_refs, target_paths, obligation_refs, setup_key)
         if stage_id and intent and key not in seen:
             seen.add(key)
             result.append(
@@ -1355,9 +1911,19 @@ def _canonical_test_intents(value: object) -> list[dict[str, object]]:
                     "intent": intent,
                     "acceptance_refs": list(acceptance_refs),
                     "target_paths": list(target_paths),
+                    **({"obligation_refs": list(obligation_refs)} if obligation_refs else {}),
+                    **({"data_setup": data_setup} if data_setup else {}),
                 }
             )
     return result
+
+
+def test_intent_id(item: dict[str, object]) -> str:
+    """Content id of a test intent, so a repair can drop one without resending the others."""
+
+    canonical = _canonical_test_intents([item])
+    payload = json.dumps(canonical[0] if canonical else {}, ensure_ascii=False, sort_keys=True)
+    return "TI-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
 
 def _dedupe_test_intents(items: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1375,14 +1941,6 @@ def _dedupe_mappings(items: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def _dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _strings(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
 
 
 def _safe_relative_paths(value: object) -> list[str]:

@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run.add_argument("--run-id", required=True)
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     continue_run.add_argument("--implementation-repair-limit", default=None)
-    continue_run.add_argument("--qa-repair-limit", default=None)
+    continue_run.add_argument("--implementation-plan-repair-limit", default=None)
     continue_run.add_argument("--step-review", action="store_true")
     continue_run.add_argument("--step-review-input", action="store_true")
     continue_run.add_argument("--step-review-output", action="store_true")
@@ -81,36 +81,45 @@ def build_parser() -> argparse.ArgumentParser:
     revalidate_design.add_argument("--run-id", required=True)
     revalidate_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     revalidate_design.add_argument("--design-repair-limit", default=None)
-    revalidate_design.add_argument("--design-validation-trials", default=None)
-    revalidate_design.add_argument(
-        "--design-semantic-review-mode",
-        choices=["legacy", "sliced_shadow", "sliced_enforce"],
-        default=None,
-    )
     revalidate_design.add_argument("--design-llm-call-budget", default=None)
     _add_sync_mode_argument(revalidate_design)
     revalidate_design.add_argument("--runtime-root", default=None)
+
+    rewind_run = subparsers.add_parser("rewind-run")
+    rewind_run.add_argument("--run-id", required=True)
+    rewind_run.add_argument("--node", required=True)
+    rewind_run.add_argument("--reason", required=True)
+    rewind_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    rewind_run.add_argument("--runtime-root", default=None)
+
+    run_until_checkpoint = subparsers.add_parser("run-until-checkpoint")
+    run_until_checkpoint.add_argument("--run-id", required=True)
+    run_until_checkpoint.add_argument("--max-steps", default=None)
+    run_until_checkpoint.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    run_until_checkpoint.add_argument("--runtime-root", default=None)
+
+    set_step_review = subparsers.add_parser("set-step-review")
+    set_step_review.add_argument("--run-id", required=True)
+    set_step_review.add_argument("--enabled", required=True, choices=["true", "false"])
+    set_step_review.add_argument("--reason", required=True)
+    set_step_review.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    set_step_review.add_argument("--runtime-root", default=None)
+
+    adjust_budget = subparsers.add_parser("adjust-budget")
+    adjust_budget.add_argument("--run-id", required=True)
+    adjust_budget.add_argument("--budget-id", required=True)
+    adjust_budget.add_argument("--limit", required=True)
+    adjust_budget.add_argument("--reason", required=True)
+    adjust_budget.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    adjust_budget.add_argument("--runtime-root", default=None)
 
     restart_design = subparsers.add_parser("restart-design")
     restart_design.add_argument("--run-id", required=True)
     restart_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     restart_design.add_argument("--design-repair-limit", default=None)
-    restart_design.add_argument("--design-validation-trials", default=None)
-    restart_design.add_argument(
-        "--design-semantic-review-mode",
-        choices=["legacy", "sliced_shadow", "sliced_enforce"],
-        default=None,
-    )
     restart_design.add_argument("--design-llm-call-budget", default=None)
-    restart_design.add_argument(
-        "--designer-contract-version",
-        choices=["vertical_design_graph_v1", "vertical_design_graph_v2"],
-        default=None,
-    )
-    restart_design.add_argument("--uiux-skill-mode", choices=["off", "enforce"], default=None)
     restart_design.add_argument("--uiux-skill-root", default=None)
     restart_design.add_argument("--uiux-skill-timeout-seconds", default=None)
-    restart_design.add_argument("--vertical-trace-mode", choices=["shadow", "enforce"], default=None)
     _add_sync_mode_argument(restart_design)
     restart_design.add_argument("--runtime-root", default=None)
 
@@ -131,12 +140,6 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--checkpoint-id", default=None)
     approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     approve.add_argument("--design-repair-limit", default=None)
-    approve.add_argument("--design-validation-trials", default=None)
-    approve.add_argument(
-        "--design-semantic-review-mode",
-        choices=["legacy", "sliced_shadow", "sliced_enforce"],
-        default=None,
-    )
     approve.add_argument("--design-llm-call-budget", default=None)
     approve.add_argument("--implementation-plan-repair-limit", default=None)
     approve.add_argument("--implementation-repair-limit", default=None)
@@ -192,6 +195,10 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "revalidate-implementation-plan": ("run_id",),
     "revalidate-design": ("run_id",),
     "restart-design": ("run_id",),
+    "rewind-run": ("run_id", "node", "reason"),
+    "adjust-budget": ("run_id", "budget_id", "limit", "reason"),
+    "run-until-checkpoint": ("run_id", "max_steps"),
+    "set-step-review": ("run_id", "enabled", "reason"),
     "revalidate-requirement": ("run_id",),
     "clarify-more": ("run_id",),
     "approve-checkpoint": ("run_id", "checkpoint_id"),
@@ -204,17 +211,11 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
 _SETTINGS_OVERRIDE_ARGUMENTS: dict[str, str] = {
     "llm_mode": "SDLC_LLM_MODE",
     "design_repair_limit": "SDLC_DESIGN_REPAIR_LIMIT",
-    "design_validation_trials": "SDLC_DESIGN_VALIDATION_TRIALS",
-    "design_semantic_review_mode": "SDLC_DESIGN_SEMANTIC_REVIEW_MODE",
     "design_llm_call_budget": "SDLC_DESIGN_LLM_CALL_BUDGET",
-    "designer_contract_version": "SDLC_DESIGNER_CONTRACT_VERSION",
-    "uiux_skill_mode": "SDLC_UIUX_SKILL_MODE",
     "uiux_skill_root": "SDLC_UIUX_SKILL_ROOT",
     "uiux_skill_timeout_seconds": "SDLC_UIUX_SKILL_TIMEOUT_SECONDS",
-    "vertical_trace_mode": "SDLC_VERTICAL_TRACE_MODE",
     "implementation_plan_repair_limit": "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
     "implementation_repair_limit": "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
-    "qa_repair_limit": "SDLC_QA_REPAIR_LIMIT",
     "sync_mode": "SDLC_SYNC_MODE",
     "target_repo": "SDLC_TARGET_REPO_PATH",
     "target_remote": "SDLC_TARGET_REPO_REMOTE",

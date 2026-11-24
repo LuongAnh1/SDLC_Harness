@@ -12,7 +12,6 @@ from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
 import json
-from itertools import combinations
 import re
 import time
 from typing import Any
@@ -22,16 +21,18 @@ from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
 from ...llm.step_review import LlmStepReviewRequired
 from .semantic_review import (
-    SEMANTIC_REVIEW_MODES,
     build_semantic_review_plan,
     materialize_task_context,
     review_node_view,
     relation_index,
+    with_global_projections,
 )
 from .traceability import TraceabilityResult
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 FINDING_IDENTITY_VERSION = "design_finding_identity_v2"
+REMEDIATION_MODES = frozenset({"local_patch", "partition_rebuild", "inconclusive"})
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,15 @@ class DesignFinding:
     origin: str = "semantic"
     repair_owner: str = "designer"
     repairability: str = "repairable"
+    remediation_mode: str = "local_patch"
+    remediation_reason: str = ""
+    repair_steps: list[dict[str, object]] = field(default_factory=list)
     confidence: float = 1.0
     snapshot_fingerprint: str = ""
     review_task_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "id": self.finding_id,
             "identity_version": FINDING_IDENTITY_VERSION,
             "canonical_key": self.canonical_key,
@@ -81,6 +85,13 @@ class DesignFinding:
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "review_task_ids": self.review_task_ids,
         }
+        if self.remediation_mode:
+            payload["remediation_mode"] = self.remediation_mode
+        if self.remediation_reason:
+            payload["remediation_reason"] = self.remediation_reason
+        if self.repair_steps:
+            payload["repair_steps"] = self.repair_steps
+        return payload
 
     @property
     def canonical_key(self) -> str:
@@ -106,6 +117,13 @@ class DesignValidationResult:
     disputed_findings: list[DesignFinding] = field(default_factory=list)
     inconclusive: bool = False
     semantic_review_plan: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(
+            item.severity == "blocking" and item.remediation_mode == "inconclusive"
+            for item in self.blocking_findings
+        ):
+            object.__setattr__(self, "inconclusive", True)
 
     @property
     def ok(self) -> bool:
@@ -189,8 +207,6 @@ class DesignValidator:
     def review(
         self,
         *,
-        requirement_packet: str,
-        design_artifact: str,
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         traceability: TraceabilityResult,
@@ -198,223 +214,26 @@ class DesignValidator:
         vertical_trace: dict[str, object] | None = None,
         vertical_design_graph: dict[str, object] | None = None,
         repair_iterations: int = 0,
-        validation_trials: int = 1,
-        semantic_review_mode: str = "legacy",
         semantic_review_plan: dict[str, object] | None = None,
         semantic_call_budget: int | None = None,
         semantic_task_cache: Path | None = None,
         semantic_task_cache_version: int = 0,
     ) -> DesignValidationResult:
-        if semantic_review_mode not in SEMANTIC_REVIEW_MODES:
-            raise HarnessError(
-                "design_semantic_review_mode_invalid",
-                f"Unsupported Design semantic review mode: {semantic_review_mode}",
-            )
-        if semantic_review_mode != "legacy":
-            plan = semantic_review_plan or self.build_review_plan(
-                canonical_requirement=canonical_requirement,
-                vertical_design_graph=vertical_design_graph,
-            )
-            sliced_calls = len(_dict_items(plan.get("tasks"))) + 2
-            if semantic_review_mode == "sliced_enforce":
-                return self._sliced_review(
-                    class_graph=class_graph,
-                    sequence_graph=sequence_graph,
-                    traceability=traceability,
-                    canonical_requirement=canonical_requirement,
-                    vertical_trace=vertical_trace,
-                    vertical_design_graph=vertical_design_graph,
-                    repair_iterations=repair_iterations,
-                    review_plan=plan,
-                    call_budget=semantic_call_budget,
-                    task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
-                )
-            legacy = self.review(
-                requirement_packet=requirement_packet,
-                design_artifact=design_artifact,
-                class_graph=class_graph,
-                sequence_graph=sequence_graph,
-                traceability=traceability,
-                canonical_requirement=canonical_requirement,
-                vertical_trace=vertical_trace,
-                vertical_design_graph=vertical_design_graph,
-                repair_iterations=repair_iterations,
-                validation_trials=validation_trials,
-                semantic_review_mode="legacy",
-            )
-            shadow: DesignValidationResult | None = None
-            if semantic_call_budget is not None and max(1, int(validation_trials)) + sliced_calls > semantic_call_budget:
-                shadow_payload: dict[str, object] = {
-                    "ok": False,
-                    "inconclusive": True,
-                    "skipped": True,
-                    "error_code": "design_semantic_review_budget_exceeded",
-                    "summary": "Sliced shadow review did not fit the configured Design LLM call budget.",
-                    "planned_calls": sliced_calls,
-                }
-            else:
-                try:
-                    shadow = self._sliced_review(
-                        class_graph=class_graph,
-                        sequence_graph=sequence_graph,
-                        traceability=traceability,
-                        canonical_requirement=canonical_requirement,
-                        vertical_trace=vertical_trace,
-                        vertical_design_graph=vertical_design_graph,
-                        repair_iterations=repair_iterations,
-                        review_plan=plan,
-                        call_budget=sliced_calls,
-                        task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
-                    )
-                    shadow_payload = shadow.to_dict()
-                except LlmStepReviewRequired:
-                    raise
-                except HarnessError as exc:
-                    shadow_payload = {
-                        "ok": False,
-                        "inconclusive": True,
-                        "error": exc.to_response(),
-                        "summary": "Sliced shadow review failed; legacy remains authoritative.",
-                    }
-            legacy_keys = {item.canonical_key for item in legacy.blocking_findings}
-            shadow_keys = {item.canonical_key for item in shadow.blocking_findings} if shadow is not None else set()
-            shadow_inconclusive = shadow is None or shadow.inconclusive
-            return replace(
-                legacy,
-                mode="design_validation_sliced_shadow_v1",
-                llm_review={
-                    "ok": legacy.ok and not shadow_inconclusive,
-                    "summary": (
-                        "Sliced shadow review did not complete; legacy findings are retained but cannot trigger "
-                        "repair or checkpoint."
-                        if shadow_inconclusive
-                        else "Legacy semantic review remains authoritative; sliced review is observational."
-                    ),
-                    "authoritative": legacy.llm_review,
-                    "sliced_shadow": shadow_payload,
-                    "comparison": {
-                        "legacy_ok": legacy.ok,
-                        "sliced_ok": shadow.ok if shadow is not None else None,
-                        "legacy_blocking_count": len(legacy.blocking_findings),
-                        "sliced_blocking_count": len(shadow.blocking_findings) if shadow is not None else None,
-                        "legacy_only_blockers": sorted(legacy_keys - shadow_keys),
-                        "sliced_only_blockers": sorted(shadow_keys - legacy_keys),
-                    },
-                },
-                inconclusive=legacy.inconclusive or shadow_inconclusive,
-                semantic_review_plan=plan,
-            )
-
-        canonical = _canonical_requirement_dict(canonical_requirement)
-        review_claims = _semantic_review_claims(canonical)
-        valid_requirement_ids = {
-            requirement_id
-            for claim in review_claims
-            for requirement_id in _string_items(claim.get("requirement_ids"))
-        }
-        valid_requirement_ids.update(
-            str(claim.get("scenario_id") or "")
-            for claim in review_claims
-            if str(claim.get("scenario_id") or "")
+        plan = semantic_review_plan or self.build_review_plan(
+            canonical_requirement=canonical_requirement,
+            vertical_design_graph=vertical_design_graph,
         )
-        valid_subject_refs = _vertical_design_subject_refs(vertical_design_graph)
-        rule_findings = _rule_findings(
+        return self._sliced_review(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             traceability=traceability,
-        )
-        rule_payload = {
-            "ok": not any(item.severity == "blocking" for item in rule_findings),
-            "findings": [item.to_dict() for item in rule_findings],
-        }
-        requested_trials = max(1, int(validation_trials))
-        trial_payloads: list[dict[str, object]] = []
-        valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]] = []
-        for index in range(requested_trials):
-            trial_id = f"trial-{index + 1}"
-            try:
-                payload = self._semantic_review(
-                    class_graph=class_graph,
-                    sequence_graph=sequence_graph,
-                    traceability=traceability,
-                    canonical_requirement=canonical_requirement,
-                    vertical_trace=vertical_trace,
-                    vertical_design_graph=vertical_design_graph,
-                    rule_review=rule_payload,
-                    review_claims=review_claims,
-                )
-                _validate_semantic_assessments(
-                    payload,
-                    claims=review_claims,
-                    valid_subject_refs=valid_subject_refs,
-                )
-                normalized = _normalize_llm_findings(
-                    payload,
-                    valid_claim_ids={str(item.get("claim_id") or "") for item in review_claims},
-                    valid_requirement_ids=valid_requirement_ids,
-                    valid_subject_refs=valid_subject_refs,
-                )
-                if requested_trials > 1:
-                    normalized = _prepare_consensus_trial(normalized, trial_id=trial_id)
-                trial_payloads.append(
-                    {
-                        "trial_id": trial_id,
-                        "ok": True,
-                        "review": payload,
-                        "canonical_keys": sorted({item.canonical_key for item in normalized}),
-                    }
-                )
-                valid_trials.append((trial_id, payload, normalized))
-            except LlmStepReviewRequired:
-                raise
-            except HarnessError as exc:
-                if requested_trials == 1:
-                    raise
-                trial_payloads.append(
-                    {
-                        "trial_id": trial_id,
-                        "ok": False,
-                        "error": exc.to_response(),
-                        "canonical_keys": [],
-                    }
-                )
-
-        if requested_trials == 1:
-            llm_payload = valid_trials[0][1]
-            llm_findings = valid_trials[0][2]
-            findings = _deduplicate_findings([*rule_findings, *llm_findings])
-            return DesignValidationResult(
-                traceability=traceability,
-                blocking_findings=[item for item in findings if item.severity == "blocking"],
-                warnings=[item for item in findings if item.severity == "warning"],
-                rule_review=rule_payload,
-                llm_review=llm_payload,
-                repair_iterations=repair_iterations,
-            )
-
-        consensus = _aggregate_semantic_trials(
-            requested_trials=requested_trials,
-            valid_trials=valid_trials,
-        )
-        semantic_findings = [*consensus["blocking_findings"], *consensus["warnings"]]
-        findings = _deduplicate_findings([*rule_findings, *semantic_findings])
-        semantic_payload = {
-            "ok": not consensus["blocking_findings"] and len(valid_trials) == requested_trials,
-            "summary": "Semantic findings aggregated by majority vote.",
-            "trials": trial_payloads,
-            **consensus["metrics"],
-        }
-        return DesignValidationResult(
-            traceability=traceability,
-            blocking_findings=[item for item in findings if item.severity == "blocking"],
-            warnings=[item for item in findings if item.severity == "warning"],
-            rule_review=rule_payload,
-            llm_review=semantic_payload,
+            canonical_requirement=canonical_requirement,
+            vertical_trace=vertical_trace,
+            vertical_design_graph=vertical_design_graph,
             repair_iterations=repair_iterations,
-            mode="design_validation_consensus_v1",
-            semantic_consensus=consensus["metrics"],
-            disputed_findings=consensus["disputed_findings"],
-            inconclusive=len(valid_trials) != requested_trials,
+            review_plan=plan,
+            call_budget=semantic_call_budget,
+            task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
         )
 
     def _sliced_review(
@@ -473,46 +292,22 @@ class DesignValidator:
         trace_view = _vertical_trace_review_view(vertical_trace)
         task_results: list[dict[str, object]] = []
         semantic_findings: list[DesignFinding] = []
+        global_claims: list[dict[str, object]] = []
         runtime_blockers: dict[str, list[str]] = {}
         skipped_calls = 0
         retry_calls = 0
         metric_start = len(_llm_call_metrics(self.llm_client))
         try:
-            for task in tasks:
+            def run_task(task: dict[str, object]) -> tuple[bool, int]:
+                """Review one task; return (served from the task cache, contract retries)."""
+
+                nonlocal skipped_calls, retry_calls
                 task_id = str(task.get("task_id") or "")
                 task_type = str(task.get("task_type") or "")
                 scenario_ids = _string_items(task.get("scenario_ids"))
                 primary_ids = set(_string_items(task.get("primary_claim_ids")))
                 context_ids = set(_string_items(task.get("context_claim_ids")))
                 task_claims = [claim for claim in claims if str(claim.get("claim_id") or "") in primary_ids]
-                blocked_by = sorted(
-                    finding_id for scenario_id in scenario_ids for finding_id in runtime_blockers.get(scenario_id, [])
-                )
-                if task_type == "scenario_behavior" and blocked_by:
-                    # Harness gate: behavior is not reviewed on a runtime path already known to be blocked.
-                    skipped_calls += 1
-                    task_results.append(
-                        {
-                            "task_id": task_id,
-                            "task_type": task_type,
-                            "status": "deferred_runtime_blocked",
-                            "ok": False,
-                            "summary": "Behavior review deferred until the scenario runtime blockers are repaired.",
-                            "assessments": [
-                                {
-                                    "claim_id": claim_id,
-                                    "status": "deferred",
-                                    "design_refs": [],
-                                    "blocked_by": blocked_by,
-                                    "reason": "Scenario runtime review reported blocking findings.",
-                                }
-                                for claim_id in sorted(primary_ids)
-                            ],
-                            "findings": [],
-                            "deferred_claim_ids": sorted(primary_ids),
-                        }
-                    )
-                    continue
                 task_context = materialize_task_context(
                     task,
                     claims=claims,
@@ -527,7 +322,10 @@ class DesignValidator:
                 )
                 cached_payload = task_cache.get(cache_key) if task_cache is not None else None
 
+                task_attempt_payload: dict[str, object] | None = None
+
                 def review_task(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                    nonlocal task_attempt_payload
                     task_payload = (
                         dict(cached_payload)
                         if cached_payload is not None and not correction
@@ -537,6 +335,7 @@ class DesignValidator:
                             correction=correction,
                         )
                     )
+                    task_attempt_payload = task_payload
                     _validate_semantic_assessments(
                         task_payload,
                         claims=task_claims,
@@ -547,9 +346,13 @@ class DesignValidator:
                         valid_claim_ids=primary_ids | context_ids,
                         valid_requirement_ids=valid_requirement_ids,
                         valid_subject_refs=valid_subject_refs,
+                        require_remediation_mode=False,
                     )
 
-                (payload, normalized), retries = _with_contract_retry(review_task)
+                (payload, normalized), retries = _with_contract_retry(
+                    review_task,
+                    previous_response=lambda: task_attempt_payload,
+                )
                 cache_hit = cached_payload is not None and retries == 0
                 if cache_hit:
                     skipped_calls += 1
@@ -584,7 +387,43 @@ class DesignValidator:
                         "deferred_claim_ids": [],
                     }
                 )
+                return cache_hit, retries
 
+            for task in tasks:
+                primary_ids = set(_string_items(task.get("primary_claim_ids")))
+                blocked_by = sorted(
+                    finding_id
+                    for scenario_id in _string_items(task.get("scenario_ids"))
+                    for finding_id in runtime_blockers.get(scenario_id, [])
+                )
+                if str(task.get("task_type") or "") == "scenario_behavior" and blocked_by:
+                    # Harness gate: behavior is not reviewed on a runtime path already known to be blocked.
+                    skipped_calls += 1
+                    task_results.append(
+                        {
+                            "task_id": str(task.get("task_id") or ""),
+                            "task_type": "scenario_behavior",
+                            "status": "deferred_runtime_blocked",
+                            "ok": False,
+                            "summary": "Behavior review deferred until the scenario runtime blockers are repaired.",
+                            "assessments": [
+                                {
+                                    "claim_id": claim_id,
+                                    "status": "deferred",
+                                    "design_refs": [],
+                                    "blocked_by": blocked_by,
+                                    "reason": "Scenario runtime review reported blocking findings.",
+                                }
+                                for claim_id in sorted(primary_ids)
+                            ],
+                            "findings": [],
+                            "deferred_claim_ids": sorted(primary_ids),
+                        }
+                    )
+                    continue
+                run_task(task)
+
+            global_claims, global_findings = _aggregate_global_claims(claims=claims, task_results=task_results)
             shared_surfaces = _dict_items(review_plan.get("shared_surfaces"))
             shared_node_ids = {
                 node_id
@@ -597,23 +436,39 @@ class DesignValidator:
                 if str(node.get("id") or "") in shared_node_ids
             ]
 
+            coherence_attempt_payload: dict[str, object] | None = None
+
             def review_coherence(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                nonlocal coherence_attempt_payload
                 coherence_payload = self._semantic_coherence_review(
                     task_results=task_results,
                     relationship_index=relation_index(vertical_design_graph),
                     claims=claims,
                     shared_surfaces=shared_surfaces,
                     shared_surface_nodes=shared_surface_nodes,
+                    global_claims=global_claims,
                     correction=correction,
                 )
-                return coherence_payload, _normalize_llm_findings(
+                coherence_attempt_payload = coherence_payload
+                normalized = _normalize_llm_findings(
                     coherence_payload,
                     valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
                     valid_requirement_ids=valid_requirement_ids,
                     valid_subject_refs=valid_subject_refs,
+                    require_remediation_mode=False,
                 )
+                _validate_coherence_conflicts(
+                    coherence_payload,
+                    valid_finding_ids={finding.finding_id for finding in semantic_findings},
+                    valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
+                    valid_design_refs=valid_subject_refs,
+                )
+                return coherence_payload, normalized
 
-            (coherence, coherence_findings), retries = _with_contract_retry(review_coherence)
+            (coherence, coherence_findings), retries = _with_contract_retry(
+                review_coherence,
+                previous_response=lambda: coherence_attempt_payload,
+            )
             retry_calls += retries
             coherence_findings = [
                 replace(
@@ -624,36 +479,182 @@ class DesignValidator:
                 for finding in coherence_findings
             ]
             semantic_findings.extend(coherence_findings)
+            semantic_findings.extend(global_findings)
             conflicts = _dict_items(coherence.get("conflicts"))
             adjudication: dict[str, object] = {}
             actual_calls = len(tasks) - skipped_calls + 1 + retry_calls
-            if conflicts:
-                existing_ids = {finding.finding_id for finding in semantic_findings}
+            blocking_finding_ids = {
+                finding.finding_id for finding in semantic_findings if finding.severity == "blocking"
+            }
+            if conflicts or blocking_finding_ids:
+                conflict_finding_ids = {
+                    finding_id
+                    for conflict in conflicts
+                    for finding_id in _string_items(conflict.get("finding_ids"))
+                }
+                adjudication_finding_ids = conflict_finding_ids | blocking_finding_ids
+                adjudication_claim_ids = {
+                    claim_id
+                    for conflict in conflicts
+                    for claim_id in _string_items(conflict.get("claim_ids"))
+                }
+                adjudication_design_refs = {
+                    design_ref
+                    for conflict in conflicts
+                    for design_ref in _string_items(conflict.get("design_refs"))
+                }
+                adjudication_findings = [
+                    finding.to_dict()
+                    for finding in semantic_findings
+                    if finding.finding_id in adjudication_finding_ids
+                ]
+                adjudication_claim_ids.update(
+                    claim_id
+                    for finding in adjudication_findings
+                    for claim_id in _string_items(finding.get("claim_ids"))
+                )
+                adjudication_design_refs.update(
+                    design_ref
+                    for finding in adjudication_findings
+                    for design_ref in [
+                        *_string_items(finding.get("diagram_ids")),
+                        str(finding.get("subject_ref") or ""),
+                        *[
+                            str(item.get("ref") or "")
+                            for item in _dict_items(finding.get("evidence"))
+                            if str(item.get("source") or "") in {"design", "design_graph"}
+                        ],
+                        *re.findall(
+                            r"\bVD[NE]-[A-Za-z0-9_-]+\b",
+                            f"{finding.get('message') or ''} {finding.get('expected_change') or ''}",
+                        ),
+                    ]
+                    if design_ref
+                )
+                adjudication_design_refs.intersection_update(valid_subject_refs)
+                adjudication_claims = [
+                    claim for claim in claims if str(claim.get("claim_id") or "") in adjudication_claim_ids
+                ]
+                graph = _dict_value(vertical_design_graph)
+                adjudication_edges = [
+                    edge
+                    for edge in _dict_items(graph.get("edges"))
+                    if str(edge.get("id") or "") in adjudication_design_refs
+                ]
+                adjudication_endpoint_refs = {
+                    str(edge.get(endpoint) or "")
+                    for edge in adjudication_edges
+                    for endpoint in ("from", "to")
+                    if str(edge.get(endpoint) or "")
+                }
+                adjudication_design_evidence = {
+                    "nodes": [
+                        review_node_view(node, task_type="coherence")
+                        for node in _dict_items(graph.get("nodes"))
+                        if str(node.get("id") or "")
+                        in (adjudication_design_refs | adjudication_endpoint_refs)
+                    ],
+                    "edges": adjudication_edges,
+                }
+                adjudication_requirement_ids = {
+                    requirement_id
+                    for claim in adjudication_claims
+                    for requirement_id in _string_items(claim.get("requirement_ids"))
+                }
+                adjudication_requirement_ids.update(
+                    str(claim.get("scenario_id") or "")
+                    for claim in adjudication_claims
+                    if str(claim.get("scenario_id") or "")
+                )
 
-                def review_adjudication(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                adjudication_attempt_payload: dict[str, object] | None = None
+
+                def review_adjudication(
+                    correction: str,
+                ) -> tuple[dict[str, object], tuple[list[DesignFinding], dict[str, dict[str, str]]]]:
+                    nonlocal adjudication_attempt_payload
                     adjudication_payload = self._semantic_adjudication_review(
                         conflicts=conflicts,
-                        findings=[finding.to_dict() for finding in semantic_findings],
-                        claims=claims,
+                        findings=adjudication_findings,
+                        claims=adjudication_claims,
+                        design_evidence=adjudication_design_evidence,
                         correction=correction,
                     )
-                    unknown_drops = set(_string_items(adjudication_payload.get("drop_finding_ids"))) - existing_ids
+                    adjudication_attempt_payload = adjudication_payload
+                    unknown_drops = (
+                        set(_string_items(adjudication_payload.get("drop_finding_ids"))) - conflict_finding_ids
+                    )
                     if unknown_drops:
                         raise HarnessError(
                             "design_semantic_review_failed",
-                            f"Design semantic adjudication tried to drop unknown findings {sorted(unknown_drops)}.",
+                            "Design semantic adjudication tried to drop findings outside the supplied conflicts "
+                            f"{sorted(unknown_drops)}.",
                         )
-                    return adjudication_payload, _normalize_llm_findings(
-                        adjudication_payload,
-                        valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
-                        valid_requirement_ids=valid_requirement_ids,
-                        valid_subject_refs=valid_subject_refs,
+                    retained_blocking_ids = blocking_finding_ids - set(
+                        _string_items(adjudication_payload.get("drop_finding_ids"))
                     )
+                    routes = _dict_items(adjudication_payload.get("remediation_modes"))
+                    route_ids = [str(item.get("finding_id") or "") for item in routes]
+                    if len(route_ids) != len(set(route_ids)) or set(route_ids) != retained_blocking_ids:
+                        raise HarnessError(
+                            "design_semantic_review_failed",
+                            "Design semantic adjudication must classify every retained existing blocking finding "
+                            "exactly once.",
+                        )
+                    findings_by_id = {
+                        str(item.get("id") or ""): item
+                        for item in adjudication_findings
+                        if str(item.get("id") or "")
+                    }
+                    route_map: dict[str, dict[str, object]] = {}
+                    for route in routes:
+                        finding_id = str(route.get("finding_id") or "")
+                        remediation_mode = str(route.get("remediation_mode") or "").strip().lower()
+                        remediation_reason = str(route.get("reason") or "").strip()
+                        if remediation_mode not in REMEDIATION_MODES or not remediation_reason:
+                            raise HarnessError(
+                                "design_semantic_review_failed",
+                                f"Design semantic adjudication route {finding_id!r} requires a valid "
+                                "remediation_mode and reason.",
+                            )
+                        repair_steps = _normalize_adjudication_repair_steps(
+                            route=route,
+                            finding=findings_by_id[finding_id],
+                            remediation_mode=remediation_mode,
+                            vertical_design_graph=vertical_design_graph,
+                        )
+                        route_map[finding_id] = {
+                            "mode": remediation_mode,
+                            "reason": remediation_reason,
+                            "repair_steps": repair_steps,
+                        }
+                    new_findings = _normalize_llm_findings(
+                        adjudication_payload,
+                        valid_claim_ids=adjudication_claim_ids,
+                        valid_requirement_ids=adjudication_requirement_ids,
+                        valid_subject_refs=adjudication_design_refs,
+                    )
+                    return adjudication_payload, (new_findings, route_map)
 
-                (adjudication, adjudicated), retries = _with_contract_retry(review_adjudication)
+                (adjudication, adjudication_result), retries = _with_contract_retry(
+                    review_adjudication,
+                    previous_response=lambda: adjudication_attempt_payload,
+                )
                 actual_calls += retries
+                adjudicated, route_map = adjudication_result
                 drop_ids = set(_string_items(adjudication.get("drop_finding_ids")))
-                semantic_findings = [finding for finding in semantic_findings if finding.finding_id not in drop_ids]
+                semantic_findings = [
+                    replace(
+                        finding,
+                        remediation_mode=str(route_map[finding.finding_id]["mode"]),
+                        remediation_reason=str(route_map[finding.finding_id]["reason"]),
+                        repair_steps=list(route_map[finding.finding_id]["repair_steps"]),
+                    )
+                    if finding.finding_id in route_map
+                    else finding
+                    for finding in semantic_findings
+                    if finding.finding_id not in drop_ids
+                ]
                 semantic_findings.extend(
                     replace(
                         finding,
@@ -663,6 +664,31 @@ class DesignValidator:
                     for finding in adjudicated
                 )
                 actual_calls += 1
+            # A behavior review deferred by a runtime blocker that adjudication then dropped runs now, so a scenario
+            # never reaches the checkpoint with unreviewed behavior claims (r7 SC-1). A task still deferred keeps a
+            # retained blocking finding, so the result stays not ok.
+            remaining_blocking = {finding.finding_id for finding in semantic_findings if finding.severity == "blocking"}
+            tasks_by_id = {str(task.get("task_id") or ""): task for task in tasks}
+            reran_behavior = False
+            for result in [item for item in task_results if item.get("status") == "deferred_runtime_blocked"]:
+                blocked_by = {
+                    ref
+                    for assessment in _dict_items(result.get("assessments"))
+                    for ref in _string_items(assessment.get("blocked_by"))
+                }
+                if blocked_by & remaining_blocking:
+                    continue
+                task_results.remove(result)
+                skipped_calls -= 1
+                cache_hit, retries = run_task(tasks_by_id[str(result.get("task_id") or "")])
+                actual_calls += (0 if cache_hit else 1) + retries
+                reran_behavior = True
+            if reran_behavior:
+                global_claims, updated_findings = _aggregate_global_claims(claims=claims, task_results=task_results)
+                existing_ids = {finding.finding_id for finding in global_findings}
+                semantic_findings.extend(
+                    finding for finding in updated_findings if finding.finding_id not in existing_ids
+                )
         except LlmStepReviewRequired:
             raise
         except HarnessError as exc:
@@ -674,6 +700,7 @@ class DesignValidator:
                 review_plan=review_plan,
                 error=exc.to_response(),
                 task_results=task_results,
+                global_claims=global_claims,
                 call_metrics=_llm_call_metrics(self.llm_client)[metric_start:],
             )
 
@@ -688,6 +715,7 @@ class DesignValidator:
                 "ok": not any(item.severity == "blocking" for item in semantic_findings),
                 "summary": "Sliced specialist reviews completed with a compact coherence pass.",
                 "tasks": task_results,
+                "global_claims": global_claims,
                 "coherence": coherence,
                 "adjudication": adjudication,
                 "planned_calls": planned_calls,
@@ -719,6 +747,7 @@ class DesignValidator:
         review_plan: dict[str, object],
         error: dict[str, object],
         task_results: list[dict[str, object]] | None = None,
+        global_claims: list[dict[str, object]] | None = None,
         call_metrics: list[dict[str, object]] | None = None,
     ) -> DesignValidationResult:
         return DesignValidationResult(
@@ -732,6 +761,7 @@ class DesignValidator:
                 "summary": "Sliced semantic review did not complete; Design cannot reach checkpoint.",
                 "error": error,
                 "tasks": task_results or [],
+                "global_claims": global_claims or [],
                 "call_metrics": call_metrics or [],
                 "usage": _summarize_call_metrics(call_metrics or []),
                 "coverage": review_plan.get("coverage") or {},
@@ -757,34 +787,81 @@ class DesignValidator:
         task = _dict_value(task_context.get("task"))
         task_type = str(task.get("task_type") or "")
         header, scope, task_rules = _SEMANTIC_TASK_PROMPTS.get(task_type, _SEMANTIC_TASK_PROMPTS["cross_cutting"])
+        if (
+            task_type == "cross_cutting"
+            and not _string_items(task.get("primary_claim_ids"))
+            and _string_items(task.get("coverage_keys"))
+        ):
+            scope = (
+                "Global boundary scope:\n"
+                "- Review only the global boundary contracts listed as boundary:<edge id> in coverage_keys. "
+                "Context claims are evidence and may be cited by boundary findings.\n"
+                "- This task has no primary claims: return an empty assessments array."
+            )
+            task_rules = _RUNTIME_RULES
+        statuses = "satisfied|missing|contradicted|uncertain"
+        assessment_rule = (
+            "A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence."
+        )
+        if task_type == "scenario_behavior":
+            statuses += "|not_applicable"
+            assessment_rule = (
+                "Only a global_projection claim can be not_applicable, with a non-empty reason. "
+                "All other non-satisfied primary claims require a finding. "
+                "A satisfied claim requires exact Design evidence."
+            )
+        finding_categories = _SEMANTIC_FINDING_CATEGORIES.get(
+            task_type,
+            _SEMANTIC_FINDING_CATEGORIES["cross_cutting"],
+        )
+        severity_guide = _BEHAVIOR_SEVERITY_GUIDE if task_type == "scenario_behavior" else _SEVERITY_GUIDE
+        packet_field_guide = (
+            _BEHAVIOR_PACKET_FIELD_GUIDE if task_type == "scenario_behavior" else _PACKET_FIELD_GUIDE
+        )
+        deterministic_review_note = (
+            _BEHAVIOR_DETERMINISTIC_REVIEW_NOTE
+            if task_type == "scenario_behavior"
+            else _DETERMINISTIC_REVIEW_NOTE
+        )
+        review_context = dict(task_context)
+        review_context["task"] = {key: value for key, value in task.items() if key != "focus"}
         return f"""{header}
 
-Review only the assigned task. Primary claims require exactly one assessment each. Context claims may be cited by
-findings but must not be assessed. Review obligations are validation coverage, not new Requirements.
+This reviews a real Design before it is implemented in a real repository. It is not a test: no defect was planted,
+and there is no grader or expected answer to guess. Decide every status and severity from the packet evidence and the
+severity guide alone.
+
+Review only the assigned task. Primary claims require exactly one assessment each. Context claims are evidence only
+and may be cited only where the task-specific scope below permits it. Review obligations are validation coverage, not
+new Requirements.
 
 {scope}
 
 Return one JSON object only:
-{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract","severity":"blocking|warning","message":"specific issue","expected_change":"what must become true, stated on existing node/edge ids","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":[],"subject_ref":"exact VDN-* or VDE-* id","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
+{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"{statuses}","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"{finding_categories}","severity":"blocking|warning","message":"specific issue","expected_change":"one invariant that must become true across the cited existing ids; no repair instructions or alternatives","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["every exact existing VDN-* or VDE-* id whose contract may coherently change to satisfy the invariant"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
 
-{_PACKET_FIELD_GUIDE}
+{packet_field_guide}
 
-{_SEVERITY_GUIDE}
+{severity_guide}
 
 Rules:
+- Set ok=true exactly when findings contains no blocking item. Warnings keep ok=true.
 - Never invent a Requirement or Design reference. Every blocker cites a stable Requirement id and exact Design ref.
-- A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence.
-- expected_change states what must become true, in terms of existing node and edge ids. Do not prescribe a design,
-  and do not introduce a system, service or dependency that neither the approved Requirement nor the packet contains.
+- {assessment_rule}
+- expected_change states one invariant that must become true across cited existing node and edge ids. Describe the
+  defect-free contract, not how to repair it: do not select, add, remove or reorder an edge; require a particular new
+  field, mapping, guard or trigger; or offer alternative repairs. Do not introduce a system, service or dependency
+  that neither the approved Requirement nor the packet contains.
+- subject_ref is the exact node or edge where the defect is observed. diagram_ids is the non-empty candidate mutation
+  scope: include every exact existing node/edge whose contract may coherently change to satisfy the invariant, and omit
+  evidence-only ids or subject_ref when it should remain read-only. These ids authorize possible repair; they do not
+  prescribe which id must change or how it changes.
 {task_rules}
 
-Task focus:
-{task.get("focus")}
-
 Assigned review packet:
-{json.dumps(task_context, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+{json.dumps(review_context, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-{_DETERMINISTIC_REVIEW_NOTE}
+{deterministic_review_note}
 {json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 """.strip()
 
@@ -797,26 +874,48 @@ Assigned review packet:
         claims: list[dict[str, object]],
         shared_surfaces: list[dict[str, object]],
         shared_surface_nodes: list[dict[str, object]],
+        global_claims: list[dict[str, object]],
     ) -> dict[str, object]:
         prompt = f"""Design Semantic Coherence Review v2
 
 Review the specialist summaries and compact relationship index for contradictions across tasks. Do not reassess every
 claim and do not invent missing graph detail. Return one JSON object only:
-{{"ok":true,"summary":"short summary","findings":[],"conflicts":[{{"finding_ids":["exact existing finding id"],"claim_ids":["exact claim id"],"reason":"why adjudication is needed"}}]}}
+{{"ok":true,"summary":"short summary","findings":[],"conflicts":[{{"finding_ids":["exact existing finding id"],"claim_ids":["exact claim id"],"design_refs":["exact VDN-* or VDE-* id"],"reason":"why adjudication is needed"}}]}}
 
 Emit a new finding only for a cross-task defect with exact Requirement and Design evidence. Use the same finding schema
 as the specialists; its expected_change states what must become true on existing node and edge ids, without
 prescribing a design or introducing a system the Requirement and graph do not contain. Put genuine disagreement or blocking uncertainty in conflicts; cosmetic wording differences are not
 conflicts. Pay special attention to a state or event being treated incompatibly across runtime, UI and data tasks.
-Review each shared surface across its scenarios as one coherent contract for state, actions, feedback, layout, focus,
-inputs and availability; visual taste alone is only a warning. Never assess or raise a finding on a claim listed as
-deferred in a specialist result, and do not re-report a runtime blocker already present.
+Review whether each shared surface's scenario-owned projections can coexist in one implementation across state,
+actions, responses, feedback, layout, focus, inputs and availability; visual taste alone is only a warning. A shared
+screen or runtime target does not make each projection a complete global contract. Additive slices are expected: for
+example, a main scenario may declare only its 200 response while an exception scenario declares an additional 503.
+Never require one projection to copy a sibling's responses, actions, outcomes or Requirement refs. Emit a finding only
+when overlapping conditions give the same event, status or input incompatible meanings, ownership conflicts, or
+mutually exclusive obligations. UI experience_contract.runtime_states keys
+(loading, ready, empty, error and success) are fixed scenario-local presentation categories, not globally named
+workflow states. Different presentation or trigger variants for the same key on one screen are expected and are
+merged with scenario_ids; key reuse alone is not a contradiction. Compare the scenario-owned states, transitions
+and event meanings for an actual behavioral conflict. If evidence from a sibling scenario makes an existing
+specialist finding questionable or inapplicable, emit a conflict with that exact finding id, all of that finding's
+claim ids, every additional exact claim id needed to understand the counter-evidence, and every exact Design node/edge
+ref needed to decide it; do not silently retain or dismiss it. Every conflict must have
+non-empty finding_ids, claim_ids, design_refs and reason. Never assess or raise a finding on a claim listed as
+deferred in a specialist result. Do not use a deferred claim's behavior or Requirement ids to support a new finding
+by attaching it to a non-deferred claim. Do not re-report a runtime blocker already present.
+Global projection assessments of the same projection_of claim must be compatible across scenarios: on a shared
+surface or shared runtime target, two scenarios must not give the claim's outcome incompatible meanings (for example
+different orderings of the same list); report a cross-task finding or a conflict with the exact projection claim ids
+and design refs.
 
 Claims:
 {json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Specialist results:
 {json.dumps(task_results, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+
+global_claims:
+{json.dumps(global_claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Relationship index:
 {json.dumps(relationship_index, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -842,14 +941,35 @@ Full shared surface node contracts:
         conflicts: list[dict[str, object]],
         findings: list[dict[str, object]],
         claims: list[dict[str, object]],
+        design_evidence: dict[str, object],
     ) -> dict[str, object]:
-        prompt = f"""Design Semantic Adjudication v1
+        prompt = f"""Design Semantic Adjudication v2
 
-Resolve only the supplied conflicts. Return one JSON object only:
-{{"ok":true,"summary":"short resolution","drop_finding_ids":["exact existing finding id"],"findings":[]}}
+Resolve the supplied conflicts, then classify every retained existing blocking finding. Return one JSON object only:
+{{"ok":true,"summary":"short resolution","drop_finding_ids":["exact conflicting finding id"],"remediation_modes":[{{"finding_id":"exact retained existing blocking finding id","remediation_mode":"local_patch|partition_rebuild|inconclusive","reason":"evidence-backed routing reason","repair_steps":[{{"target_id":"SC-N@component","diagram_ids":["exact existing node/edge id"],"expected_change":"change owned by only this target","depends_on":["earlier SC-N@component target"]}}]}}],"findings":[]}}
 
-Keep an existing finding unless exact Requirement and Design evidence disproves it. New findings use the specialist
-finding schema and exact supplied references. Do not reassess unrelated claims.
+Adjudication contract:
+- Keep an existing finding unless exact supplied evidence disproves it. drop_finding_ids may name only findings in a
+  supplied conflict. Classify every retained existing blocker exactly once; do not classify warnings or reassess
+  unrelated claims. New findings may only replace findings in a supplied conflict. With no conflicts,
+  drop_finding_ids and findings must both be empty.
+- reason is forwarded unchanged to the Designer. State the exact contract limitation, the responsible existing or new
+  provider, and the call/return order that makes every required value exist before its consumer decision. Treat the
+  finding's expected_change as a semantic postcondition, not a prescribed topology. Reuse an existing provider only
+  when that node already owns the operation and can keep one coherent typed input/outcome shape. Otherwise rebuild or
+  choose inconclusive; never invent an observation with no provider.
+- local_patch and partition_rebuild require one or more repair_steps; inconclusive requires none. Use one unique
+  target_id per affected component, formatted from an existing node as `scenario_id@component_id`. depends_on may name
+  only target_ids in the same route, must be acyclic, and is empty for an independent step.
+- A step's diagram_ids may contain only ids from that same finding's diagram_ids, plus subject_ref when it is an exact
+  graph id. Other Exact Design evidence is read-only context and may appear in reason only; it never expands mutation
+  scope. A node id must exactly match the step target's scenario and component. An edge id must match the target
+  scenario and have at least one endpoint in the target component; the other endpoint remains read-only.
+- expected_change states only what that target must make true. Scope ids are anchors, not an instruction to mutate every
+  cited edge. For an added or split provider, describe the new owner-to-provider call, provider-to-consumer return, and
+  the later decision that consumes it. Never place a provider result on an earlier edge whose source did not observe it.
+
+{_REMEDIATION_GUIDE}
 
 Conflicts:
 {json.dumps(conflicts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -859,6 +979,9 @@ Existing findings:
 
 Claims:
 {json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+
+Exact Design evidence:
+{json.dumps(design_evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 """.strip()
         payload = _semantic_json_completion(self.llm_client, prompt=_with_contract_correction(prompt, correction))
         if not isinstance(payload.get("drop_finding_ids", []), list):
@@ -867,151 +990,6 @@ Claims:
                 "Design semantic adjudication response must contain a drop_finding_ids array.",
             )
         return payload
-
-    def _semantic_review(
-        self,
-        *,
-        class_graph: dict[str, object],
-        sequence_graph: dict[str, object],
-        traceability: TraceabilityResult,
-        canonical_requirement: object | None,
-        vertical_trace: dict[str, object] | None,
-        vertical_design_graph: dict[str, object] | None,
-        rule_review: dict[str, object],
-        review_claims: list[dict[str, object]],
-    ) -> dict[str, object]:
-        canonical = _canonical_requirement_dict(canonical_requirement)
-        prompt = f"""Design Semantic Review v3
-
-Review the approved Requirement against the canonical Vertical Design Graph.
-
-Source-of-truth order:
-1. Canonical Requirement review claims define required behavior.
-2. Runtime-bound Vertical Design Graph defines the Design.
-3. Requirement-to-Design mapping and deterministic review provide structural evidence.
-4. Class and sequence graphs are derived compatibility projections. They may expose a contradiction but never override items 1-3.
-
-Review every claim exactly once. Do not infer a missing behavior only because a derived projection omits detail that is present in the canonical Vertical Design Graph. A node or edge that only repeats a required outcome is not evidence of an executable mechanism or causal order.
-
-Return one JSON object only:
-{{
-  "ok": true,
-  "summary": "short summary",
-  "assessments": [
-    {{
-      "claim_id": "SC-1:MF-1",
-      "status": "satisfied|missing|contradicted|uncertain",
-      "design_refs": ["exact VDN-* or VDE-* id"],
-      "reason": "short evidence-backed decision"
-    }}
-  ],
-  "findings": [
-    {{
-      "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract",
-      "severity": "blocking|warning",
-      "message": "specific contradiction or ambiguity",
-      "expected_change": "specific UML correction",
-      "claim_ids": ["SC-1:MF-1"],
-      "requirement_ids": ["MAIN-1"],
-      "diagram_ids": ["sequence_diagram_1"],
-      "subject_ref": "exact VDN-* or VDE-* id",
-      "evidence": [{{"source": "requirement|design", "ref": "stable id", "excerpt": "short exact evidence"}}]
-    }}
-  ]
-}}
-
-Assessment contract:
-- Return exactly one assessment for every supplied claim_id and no invented claim IDs.
-- satisfied assessments require at least one exact Design node/edge ID in design_refs.
-- missing, contradicted, and uncertain assessments require a finding bound through claim_ids.
-- Finding requirement_ids and subject_ref must use exact IDs supplied below.
-- For finding evidence with source "requirement", ref must be an exact Requirement ID from requirement_ids
-  (for example "MF-1" or "AC-3"), never a composite claim_id such as "SC-1:MF-1".
-- For finding evidence with source "design" or "design_graph", ref must be an exact VDN-* or VDE-* ID supplied below.
-
-Blocking policy:
-- Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
-- Block a sequence call whose receiver contract is inconsistent with the class design.
-- Block success, cancellation, and failure paths that reach the wrong terminal state.
-- Block persistence before required human confirmation only when neither the UI contract nor the interaction path represents that confirmation before the write.
-- Do not require a preliminary backend verification round trip unless the approved requirement explicitly requires it.
-- Reusing one UI owner across main and alternative scenarios is valid when each projection keeps its own behavior contract.
-- Verify that every runtime edge is executable. A direct call may stay within one application or target an importable
-  shared package; a call into another application requires an explicit API/transport surface.
-- For every decision, guard, branch, and exception outcome, verify that the receiving node has enough information to
-  decide it through an input/boundary mapping, a response or error event, an already-selected control-flow path, or
-  local runtime state. Do not require a dedicated boolean when the control flow already identifies the condition.
-  Block when the Design names a decision but models no source from which the receiver can make it.
-- Do not prescribe one fixed UI -> API -> business-rule -> data chain. Fan-out, caller-local rules, dedicated error
-  handlers, and other topologies are valid when every required surface is reachable and the declared path is executable.
-- A business rule does not imply backend placement. When a scenario marks API as not applicable, do not invent an
-  endpoint to connect UI to a backend service; report the placement/boundary contradiction so the Designer can keep
-  local logic in the caller application or an importable shared package.
-- Validate causal order: a condition may justify behavior only after a modeled runtime surface or edge can observe it.
-  A broken transport cannot also carry a new request or response, and naming an error scenario or projection does not
-  prove when the error becomes known.
-- A promised rollback, unchanged record, atomic outcome or safe retry needs an executable transaction boundary,
-  compensation, idempotency or reconciliation path. Repeating the promised outcome in node, edge or return prose is
-  not mechanism evidence; block when Requirement or Design promises the guarantee but no such mechanism is modeled.
-- Do not demand those mechanisms when neither Requirement nor Design promises the guarantee.
-- For each Vertical Design UI node, review its experience contract: component structure, observable feedback,
-  accessibility, responsive behavior, and focus flow must agree with the approved interaction and states.
-- Block a UI experience issue only when it omits or contradicts approved behavior, makes a required state or
-  outcome unobservable, or makes the approved interaction impossible. Visual polish and aesthetic preferences
-  are warnings unless the approved requirement explicitly makes them mandatory.
-- UI/UX guidance references are design evidence, not new Requirements; never promote a recommendation into a blocker by itself.
-- Treat approved negative constraints as behavior: inspect transitions, states, feedback, outcomes, and edges for a
-  contradiction instead of relying on keyword-specific deterministic rules.
-- Review authentication_required, authentication_source, and authentication Requirement refs against the full approved
-  preconditions and flows. Keep actor authentication separate from role/permission authorization; do not decide either
-  from field labels alone. Review authorization_required against the approved Requirement as the typed Design decision.
-- Review focus and announcement behavior semantically. A live/status announcement may announce without receiving
-  keyboard focus; block focus movement only when the modeled target makes an approved interaction inaccessible or
-  targets an element that no longer exists.
-{_holistic_ui_review_instruction(vertical_design_graph)}- Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
-- Give every finding an exact Vertical Design node or edge ID as subject_ref.
-- An uncertainty without evidence is a warning, not a blocker.
-
-Canonical Requirement review packet:
-{json.dumps(_canonical_requirement_review_view(canonical, review_claims), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Canonical Vertical Design Graph semantic view:
-{json.dumps(_vertical_design_review_view(vertical_design_graph), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Requirement-to-Design mapping view:
-{json.dumps(_vertical_trace_review_view(vertical_trace), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Compatibility class projection:
-{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Compatibility sequence projection:
-{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Deterministic review:
-{json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-""".strip()
-        raw = _complete_json(
-            self.llm_client,
-            system="You are SDLC Harness Design Validator. Return strict JSON only.",
-            prompt=prompt,
-        )
-        try:
-            payload = parse_first_json_object(raw, expected_keys={"ok", "findings"})
-        except json.JSONDecodeError as exc:
-            raise HarnessError(
-                "design_semantic_review_failed",
-                "Design semantic validator did not return parseable JSON.",
-            ) from exc
-        if not isinstance(payload.get("findings"), list):
-            raise HarnessError(
-                "design_semantic_review_failed",
-                "Design semantic validator response must contain a findings array.",
-            )
-        payload["ok"] = bool(payload.get("ok"))
-        payload["summary"] = str(payload.get("summary") or "").strip()
-        return payload
-
 
 def _rule_findings(
     *,
@@ -1072,6 +1050,20 @@ def _structural_findings(
         )
 
     classes = _class_symbols(class_graph)
+    # Class names are display names and need not be unique (design_v20: SC-3 and SC-4 both project "Refuse favoriting
+    # a draft (POST ...)"), so a receiver that is a class node id is checked against that node's own methods.
+    classes_by_id = {
+        str(node.get("id") or "").strip(): (
+            str(node.get("className") or node.get("id") or "").strip(),
+            {
+                str(method.get("name") or "").strip()
+                for method in _dict_items(node.get("methods"))
+                if str(method.get("name") or "").strip()
+            },
+        )
+        for node in _dict_items(class_graph.get("nodes"))
+        if str(node.get("id") or "").strip()
+    }
     for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):
         diagram_id = str(diagram.get("id") or "sequence_diagram")
         for issue in _dict_items(diagram.get("parseIssues")):
@@ -1098,8 +1090,19 @@ def _structural_findings(
             target_node = nodes.get(target_id, {})
             if str(target_node.get("type") or "").lower() == "actor":
                 continue
-            matches = _matching_classes(target_id, str(target_node.get("label") or ""), classes)
             event_id = str(message.get("id") or "")
+            if target_id in classes_by_id:
+                class_name, methods = classes_by_id[target_id]
+                if operation not in methods:
+                    add(
+                        "cross_diagram_contract",
+                        f"Sequence calls `{target_id}.{operation}` but `{class_name}` does not declare that operation.",
+                        f"Declare `{operation}` on `{class_name}` or change the sequence call to an existing operation.",
+                        diagram=diagram_id,
+                        evidence=event_id or str(message.get("message") or ""),
+                    )
+                continue
+            matches = _matching_classes(target_id, str(target_node.get("label") or ""), classes)
             if not matches:
                 add(
                     "unresolved_lifeline",
@@ -1195,7 +1198,7 @@ def _semantic_review_claims(canonical: dict[str, object]) -> list[dict[str, obje
                     "statement": _record_statement(record) or requirement_id,
                 }
             )
-    return claims
+    return with_global_projections(claims)
 
 
 def _record_statement(record: dict[str, object]) -> str:
@@ -1205,101 +1208,6 @@ def _record_statement(record: dict[str, object]) -> str:
         if isinstance(value, (str, int, float)) and str(value).strip():
             parts.append(str(value).strip())
     return " ".join(parts)
-
-
-def _canonical_requirement_review_view(
-    canonical: dict[str, object], claims: list[dict[str, object]]
-) -> dict[str, object]:
-    return {
-        "schema_version": "design_semantic_requirement_view_v1",
-        "use_case": canonical.get("use_case") or {},
-        "claims": claims,
-        "assumptions": canonical.get("assumptions") or [],
-        "open_questions": canonical.get("open_questions") or [],
-        "decisions": canonical.get("decisions") or [],
-    }
-
-
-def _vertical_design_review_view(value: dict[str, object] | None) -> dict[str, object]:
-    graph = _dict_value(value)
-    node_keys = (
-        "id",
-        "scenario_id",
-        "component_id",
-        "surface",
-        "kind",
-        "name",
-        "semantic_key",
-        "disposition",
-        "requirement_refs",
-        "contract",
-        "surface_contract",
-        "runtime_binding",
-    )
-    edge_keys = (
-        "id",
-        "scenario_id",
-        "order",
-        "from",
-        "to",
-        "kind",
-        "label",
-        "terminal",
-        "branch_group",
-        "requirement_refs",
-        "boundary_contract",
-    )
-    return {
-        "schema_version": "vertical_design_semantic_view_v1",
-        "graph_digest": graph.get("artifact_digest"),
-        "nodes": [
-            {key: node[key] for key in node_keys if key in node}
-            for node in _dict_items(graph.get("nodes"))
-        ],
-        "edges": [
-            {key: edge[key] for key in edge_keys if key in edge}
-            for edge in _dict_items(graph.get("edges"))
-        ],
-        "unresolved_items": graph.get("unresolved_items") or [],
-        **({"ui_repo_context": _ui_repo_context_review_view(graph)} if _ui_contract_v2(graph) else {}),
-    }
-
-
-def _ui_contract_v2(graph: dict[str, object]) -> bool:
-    binding = _dict_value(graph.get("snapshot_binding"))
-    return binding.get("designer_ui_contract_version") == "ui_experience_contract_v2"
-
-
-def _ui_repo_context_review_view(graph: dict[str, object]) -> dict[str, object]:
-    context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
-    return {
-        "entrypoint": _dict_value(context.get("entrypoint")).get("ref"),
-        "composition_chain": [
-            {"ref": hop.get("ref"), "renders": hop.get("renders"), "passes_props": hop.get("passes_props")}
-            for hop in _dict_items(context.get("composition_chain"))
-        ],
-        "data_clients": [item.get("ref") for item in _dict_items(context.get("data_clients"))],
-        "auth": context.get("auth"),
-        "styles": context.get("styles"),
-        "verification": context.get("verification"),
-    }
-
-
-def _holistic_ui_review_instruction(vertical_design_graph: dict[str, object] | None) -> str:
-    if not _ui_contract_v2(_dict_value(vertical_design_graph)):
-        return ""
-    return (
-        "- UI contract v2: review each screen as one journey. Nodes sharing a screen_id must tell one consistent story "
-        "across scenarios (ui_journey_coherence). runtime_states must make loading, empty, error and success observable "
-        "when the approved behavior can reach them; not_applicable needs a reason that matches the Requirement. "
-        "focus_policies must give one deterministic target per event. Using ui_repo_context, check that every "
-        "required_input classification is plausible: external_use_case must match an approved precondition, and a "
-        "list-driven or authenticated screen marked bound must have a real provider (ui_runtime_input_binding). "
-        "Block only when a required behavior or state becomes unreachable or unobservable; visual taste stays a warning. "
-        "For role=composition_wiring, runtime_surface.forwarded_inputs is the authoritative per-screen propagation "
-        "contract; required_inputs lists only inputs consumed by the AS-IS hop. Do not demand screen inputs be "
-        "duplicated in both fields.\n"
-    )
 
 
 def _vertical_trace_review_view(value: dict[str, object] | None) -> dict[str, object]:
@@ -1336,16 +1244,57 @@ def _vertical_design_subject_refs(value: dict[str, object] | None) -> set[str]:
     }
 
 
+def _validate_coherence_conflicts(
+    payload: dict[str, object],
+    *,
+    valid_finding_ids: set[str],
+    valid_claim_ids: set[str],
+    valid_design_refs: set[str],
+) -> None:
+    conflicts = payload.get("conflicts", [])
+    if not isinstance(conflicts, list):
+        raise HarnessError(
+            "design_semantic_review_failed",
+            "Design semantic coherence response must contain a conflicts array.",
+        )
+    for index, conflict in enumerate(conflicts, start=1):
+        if not isinstance(conflict, dict):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} must be an object.",
+            )
+        finding_ids = _string_items(conflict.get("finding_ids"))
+        claim_ids = _string_items(conflict.get("claim_ids"))
+        design_refs = _string_items(conflict.get("design_refs"))
+        reason = str(conflict.get("reason") or "").strip()
+        if not finding_ids or not claim_ids or not design_refs or not reason:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} requires non-empty finding_ids, claim_ids, "
+                "design_refs and reason.",
+            )
+        unknown_findings = sorted(set(finding_ids) - valid_finding_ids)
+        unknown_claims = sorted(set(claim_ids) - valid_claim_ids)
+        unknown_design_refs = sorted(set(design_refs) - valid_design_refs)
+        if unknown_findings or unknown_claims or unknown_design_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} cites unknown ids: "
+                f"finding_ids={unknown_findings}, claim_ids={unknown_claims}, "
+                f"design_refs={unknown_design_refs}.",
+            )
+
+
 def _validate_semantic_assessments(
     payload: dict[str, object],
     *,
     claims: list[dict[str, object]],
     valid_subject_refs: set[str],
 ) -> None:
-    expected = {str(item.get("claim_id") or "") for item in claims}
+    claim_types = {str(item.get("claim_id") or ""): item.get("claim_type") for item in claims}
     assessments = _dict_items(payload.get("assessments"))
     received = [str(item.get("claim_id") or "") for item in assessments]
-    if len(received) != len(set(received)) or set(received) != expected:
+    if len(received) != len(set(received)) or set(received) != set(claim_types):
         raise HarnessError(
             "design_semantic_review_failed",
             "Design semantic validator must assess every supplied claim exactly once.",
@@ -1358,7 +1307,14 @@ def _validate_semantic_assessments(
     for assessment in assessments:
         claim_id = str(assessment.get("claim_id") or "")
         status = str(assessment.get("status") or "").strip().lower()
-        if status not in {"satisfied", "missing", "contradicted", "uncertain"}:
+        if status == "not_applicable" and claim_types[claim_id] == "global_projection":
+            reason = assessment.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise HarnessError(
+                    "design_semantic_review_failed",
+                    f"Not-applicable Design semantic assessment {claim_id} requires a non-empty reason.",
+                )
+        elif status not in {"satisfied", "missing", "contradicted", "uncertain"}:
             raise HarnessError(
                 "design_semantic_review_failed",
                 f"Design semantic assessment {claim_id} has an invalid status.",
@@ -1375,11 +1331,80 @@ def _validate_semantic_assessments(
                 "design_semantic_review_failed",
                 f"Satisfied Design semantic assessment {claim_id} requires Design evidence.",
             )
-        if status != "satisfied" and claim_id not in findings_by_claim:
+        if status not in {"satisfied", "not_applicable"} and claim_id not in findings_by_claim:
             raise HarnessError(
                 "design_semantic_review_failed",
                 f"Non-satisfied Design semantic assessment {claim_id} requires an actionable finding.",
             )
+
+
+def _aggregate_global_claims(
+    *,
+    claims: list[dict[str, object]],
+    task_results: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[DesignFinding]]:
+    assessments = {
+        str(assessment.get("claim_id") or ""): assessment
+        for task in task_results
+        for assessment in _dict_items(task.get("assessments"))
+    }
+    projections_by_global: dict[str, list[dict[str, object]]] = {}
+    for claim in claims:
+        if claim.get("claim_type") != "global_projection":
+            continue
+        claim_id = str(claim["claim_id"])
+        assessment = assessments.get(claim_id)
+        if assessment is None:
+            raise HarnessError("design_semantic_plan_invalid", f"Global projection {claim_id} was not assessed.")
+        projections_by_global.setdefault(str(claim["projection_of"]), []).append(
+            {
+                "claim_id": claim_id,
+                "scenario_id": claim["scenario_id"],
+                "status": str(assessment["status"]).strip().lower(),
+                "design_refs": _string_items(assessment.get("design_refs")),
+                "reason": assessment.get("reason") or "",
+            }
+        )
+
+    summary: list[dict[str, object]] = []
+    findings: list[DesignFinding] = []
+    for claim in claims:
+        if claim.get("scenario_id"):
+            continue
+        claim_id = str(claim["claim_id"])
+        projections = projections_by_global.get(claim_id, [])
+        if not projections:
+            assessment = assessments.get(claim_id)
+            if assessment is None:
+                raise HarnessError("design_semantic_plan_invalid", f"Global claim {claim_id} was not assessed.")
+            status = str(assessment["status"]).strip().lower()
+        else:
+            statuses = {projection["status"] for projection in projections}
+            status = next(
+                (status for status in ("contradicted", "missing", "uncertain", "deferred") if status in statuses),
+                "satisfied",
+            )
+            if statuses == {"not_applicable"} and claim.get("claim_type") != "precondition":
+                status = "missing"
+                findings.append(
+                    DesignFinding(
+                        finding_id=f"global-aggregation:{claim_id}",
+                        category="global_claim_coverage",
+                        severity="blocking",
+                        message=f"{claim_id} is realized by no scenario",
+                        expected_change=f"At least one scenario realizes {claim_id}.",
+                        claim_ids=[claim_id],
+                        requirement_ids=_string_items(claim.get("requirement_ids")),
+                        diagram_ids=sorted({
+                            ref
+                            for projection in projections
+                            for ref in _string_items(projection.get("design_refs"))
+                        }),
+                        origin="deterministic",
+                    )
+                )
+        summary.append({"claim_id": claim_id, "status": status, "projections": projections})
+    return summary, findings
 
 
 def _normalize_llm_findings(
@@ -1388,6 +1413,7 @@ def _normalize_llm_findings(
     valid_claim_ids: set[str] | None = None,
     valid_requirement_ids: set[str] | None = None,
     valid_subject_refs: set[str] | None = None,
+    require_remediation_mode: bool = True,
 ) -> list[DesignFinding]:
     strict_claim_ids = {item for item in (valid_claim_ids or set()) if item}
     strict_requirement_ids = {item for item in (valid_requirement_ids or set()) if item}
@@ -1397,6 +1423,15 @@ def _normalize_llm_findings(
         severity = str(raw.get("severity") or "warning").strip().lower()
         if severity not in {"blocking", "warning"}:
             severity = "warning"
+        remediation_mode = str(raw.get("remediation_mode") or "").strip().lower()
+        if require_remediation_mode and remediation_mode not in REMEDIATION_MODES:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic finding {raw.get('id')} must select remediation_mode from "
+                f"{sorted(REMEDIATION_MODES)}.",
+            )
+        if not require_remediation_mode:
+            remediation_mode = ""
         claim_ids = _string_items(raw.get("claim_ids"))
         requirement_ids = _string_items(raw.get("requirement_ids"))
         if strict_claim_ids and (not claim_ids or any(item not in strict_claim_ids for item in claim_ids)):
@@ -1431,6 +1466,15 @@ def _normalize_llm_findings(
                 f"Design semantic finding {raw.get('id')} subject_ref {subject_ref!r} is not an exact Vertical Design "
                 "node or edge ID.",
             )
+        if strict_subject_refs and (
+            not diagram_ids or any(item not in strict_subject_refs for item in diagram_ids)
+        ):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic finding {raw.get('id')} diagram_ids must be a non-empty list of exact Vertical "
+                f"Design node or edge IDs; invalid refs: "
+                f"{[item for item in diagram_ids if item not in strict_subject_refs]}.",
+            )
         if strict_requirement_ids or strict_subject_refs:
             for item in evidence:
                 source = item["source"]
@@ -1462,6 +1506,8 @@ def _normalize_llm_findings(
                 diagram_ids=diagram_ids,
                 evidence=evidence,
                 subject_ref=subject_ref,
+                remediation_mode=remediation_mode,
+                remediation_reason=str(raw.get("remediation_reason") or "").strip(),
             )
         )
     if not bool(payload.get("ok")) and not findings:
@@ -1472,125 +1518,152 @@ def _normalize_llm_findings(
     return findings
 
 
-def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) -> list[DesignFinding]:
-    """Normalize one semantic vote and ensure one vote per canonical subject."""
-
-    prepared: list[DesignFinding] = []
-    for finding in findings:
-        severity = finding.severity
-        if severity == "blocking" and (not finding.requirement_ids or not finding.subject_ref):
-            severity = "warning"
-        subject_ref = finding.subject_ref
-        if not _normalize_reference(subject_ref):
-            # An unlocated observation cannot vote with another trial. Preserve it
-            # as disputed evidence under a trial-local identity instead.
-            subject_ref = f"unlocated:{trial_id}:{finding.finding_id}"
-        prepared.append(
-            DesignFinding(
-                finding_id=finding.finding_id,
-                category=finding.category,
-                severity=severity,
-                message=finding.message,
-                expected_change=finding.expected_change,
-                claim_ids=finding.claim_ids,
-                requirement_ids=finding.requirement_ids,
-                diagram_ids=finding.diagram_ids,
-                evidence=finding.evidence,
-                subject_ref=subject_ref,
-                support_count=1,
-                trial_ids=[trial_id],
-                origin="semantic",
-            )
-        )
-    unique: dict[str, DesignFinding] = {}
-    for finding in prepared:
-        current = unique.get(finding.canonical_key)
-        if current is None or _evidence_score(finding) > _evidence_score(current):
-            unique[finding.canonical_key] = finding
-    return list(unique.values())
-
-
-def _aggregate_semantic_trials(
+def _normalize_adjudication_repair_steps(
     *,
-    requested_trials: int,
-    valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]],
-) -> dict[str, object]:
-    """Majority-vote semantic findings while retaining minority observations."""
-
-    quorum = requested_trials // 2 + 1
-    groups: dict[str, list[tuple[str, DesignFinding]]] = {}
-    trial_key_sets: list[tuple[str, set[str]]] = []
-    for trial_id, _payload, findings in valid_trials:
-        key_set = {item.canonical_key for item in findings}
-        trial_key_sets.append((trial_id, key_set))
-        for finding in findings:
-            groups.setdefault(finding.canonical_key, []).append((trial_id, finding))
-
-    blockers: list[DesignFinding] = []
-    warnings: list[DesignFinding] = []
-    disputed: list[DesignFinding] = []
-    for ordinal, (key, votes) in enumerate(sorted(groups.items()), start=1):
-        blocker_votes = [(trial_id, item) for trial_id, item in votes if item.severity == "blocking"]
-        representative = max((item for _trial, item in votes), key=_evidence_score)
-        if len(blocker_votes) >= quorum:
-            severity = "blocking"
-            target = blockers
-        elif len(votes) >= quorum:
-            severity = "warning"
-            target = warnings
-        else:
-            severity = representative.severity
-            target = disputed
-        target.append(
-            DesignFinding(
-                finding_id=f"CONS-{ordinal:03d}",
-                category=representative.category,
-                severity=severity,
-                message=representative.message,
-                expected_change=representative.expected_change,
-                claim_ids=_merged_string_values(item.claim_ids for _trial, item in votes),
-                requirement_ids=_merged_string_values(item.requirement_ids for _trial, item in votes),
-                diagram_ids=_merged_string_values(item.diagram_ids for _trial, item in votes),
-                evidence=_merged_evidence(item.evidence for _trial, item in votes),
-                subject_ref=representative.subject_ref,
-                support_count=len({trial_id for trial_id, _item in votes}),
-                trial_ids=sorted({trial_id for trial_id, _item in votes}),
-                origin="semantic",
+    route: dict[str, object],
+    finding: dict[str, object],
+    remediation_mode: str,
+    vertical_design_graph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    raw_steps = route.get("repair_steps")
+    if remediation_mode == "inconclusive":
+        if raw_steps not in (None, []):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication inconclusive route {route.get('finding_id')!r} must not contain "
+                "repair_steps.",
             )
+        return []
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise HarnessError(
+            "design_semantic_review_failed",
+            f"Design semantic adjudication {remediation_mode} route {route.get('finding_id')!r} requires repair_steps.",
         )
 
-    pairwise = []
-    for (left_id, left), (right_id, right) in combinations(trial_key_sets, 2):
-        union = left | right
-        score = 1.0 if not union else len(left & right) / len(union)
-        pairwise.append(
+    graph = _dict_value(vertical_design_graph)
+    nodes_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("nodes"))
+        if str(item.get("id") or "")
+    }
+    edges_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("edges"))
+        if str(item.get("id") or "")
+    }
+    graph_refs = set(nodes_by_id) | set(edges_by_id)
+    allowed_refs = set(_string_items(finding.get("diagram_ids")))
+    subject_ref = str(finding.get("subject_ref") or "")
+    if subject_ref in graph_refs:
+        allowed_refs.add(subject_ref)
+
+    def ref_targets(ref: str) -> set[str]:
+        node = nodes_by_id.get(ref)
+        if node is not None:
+            scenario_id = str(node.get("scenario_id") or "")
+            component_id = str(node.get("component_id") or "")
+            return {f"{scenario_id}@{component_id}"} if scenario_id and component_id else set()
+        edge = edges_by_id.get(ref)
+        if edge is None:
+            return set()
+        edge_scenario_id = str(edge.get("scenario_id") or "")
+        targets: set[str] = set()
+        for endpoint_key in ("from", "to"):
+            endpoint = nodes_by_id.get(str(edge.get(endpoint_key) or ""))
+            if endpoint is None:
+                continue
+            scenario_id = str(endpoint.get("scenario_id") or "")
+            component_id = str(endpoint.get("component_id") or "")
+            if scenario_id and component_id and (not edge_scenario_id or scenario_id == edge_scenario_id):
+                targets.add(f"{scenario_id}@{component_id}")
+        return targets
+
+    # A rebuild may need a provider that does not exist yet in another component of the finding's own scenario
+    # (UC4 runtime-sc-9: a title read in SC-9@database), so no existing id can name that partition. Such a step may
+    # leave diagram_ids empty: it then only authorizes adding nodes in that partition.
+    finding_scenarios = {target.split("@", 1)[0] for ref in allowed_refs for target in ref_targets(ref)}
+    graph_components = {str(node.get("component_id") or "") for node in nodes_by_id.values()} - {""}
+    normalized: list[dict[str, object]] = []
+    seen_targets: set[str] = set()
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, dict):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} contains a non-object repair step.",
+            )
+        target_id = str(raw_step.get("target_id") or "").strip()
+        diagram_ids = _string_items(raw_step.get("diagram_ids"))
+        expected_change = str(raw_step.get("expected_change") or "").strip()
+        depends_on = _string_items(raw_step.get("depends_on"))
+        target_scenario, _, target_component = target_id.partition("@")
+        adds_only = (
+            not diagram_ids
+            and remediation_mode == "partition_rebuild"
+            and target_scenario in finding_scenarios
+            and target_component in graph_components
+        )
+        if (
+            not target_id
+            or target_id in seen_targets
+            or (not diagram_ids and not adds_only)
+            or not expected_change
+            or len(depends_on) != len(set(depends_on))
+            or target_id in depends_on
+        ):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} has an invalid or duplicate "
+                f"repair step for target {target_id!r}.",
+            )
+        invalid_refs = [ref for ref in diagram_ids if ref not in allowed_refs or target_id not in ref_targets(ref)]
+        if invalid_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication repair target {target_id!r} contains out-of-scope Design refs "
+                f"{invalid_refs}.",
+            )
+        seen_targets.add(target_id)
+        normalized.append(
             {
-                "left_trial": left_id,
-                "right_trial": right_id,
-                "jaccard": round(score, 4),
+                "target_id": target_id,
+                "diagram_ids": diagram_ids,
+                "expected_change": expected_change,
+                "depends_on": depends_on,
             }
         )
-    consistency = (
-        round(sum(float(item["jaccard"]) for item in pairwise) / len(pairwise), 4)
-        if pairwise
-        else (1.0 if len(valid_trials) == requested_trials else 0.0)
+
+    target_ids = {str(item["target_id"]) for item in normalized}
+    unknown_dependencies = sorted(
+        {
+            dependency
+            for item in normalized
+            for dependency in _string_items(item.get("depends_on"))
+            if dependency not in target_ids
+        }
     )
-    metrics = {
-        "requested_trials": requested_trials,
-        "valid_trials": len(valid_trials),
-        "quorum": quorum,
-        "consensus_blocking_count": len(blockers),
-        "consensus_warning_count": len(warnings),
-        "disputed_count": len(disputed),
-        "pairwise_jaccard": pairwise,
-        "consistency_score": consistency,
-    }
-    return {
-        "blocking_findings": blockers,
-        "warnings": warnings,
-        "disputed_findings": disputed,
-        "metrics": metrics,
-    }
+    if unknown_dependencies:
+        raise HarnessError(
+            "design_semantic_review_failed",
+            f"Design semantic adjudication route {route.get('finding_id')!r} has unknown repair dependencies "
+            f"{unknown_dependencies}.",
+        )
+    completed: set[str] = set()
+    remaining = {str(item["target_id"]): item for item in normalized}
+    while remaining:
+        ready = [
+            target_id
+            for target_id, item in remaining.items()
+            if set(_string_items(item.get("depends_on"))) <= completed
+        ]
+        if not ready:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} repair_steps contain a cycle.",
+            )
+        for target_id in ready:
+            completed.add(target_id)
+            remaining.pop(target_id)
+    return normalized
 
 
 def _subject_ref_from_evidence(evidence: list[dict[str, str]], diagram_ids: list[str]) -> str:
@@ -1645,30 +1718,8 @@ def _merged_string_values(values: Any) -> list[str]:
     return [merged[key] for key in sorted(merged)]
 
 
-def _merged_evidence(values: Any) -> list[dict[str, str]]:
-    merged: dict[tuple[str, str, str], dict[str, str]] = {}
-    for group in values:
-        for item in group:
-            normalized = {
-                "source": str(item.get("source") or "").strip(),
-                "ref": str(item.get("ref") or "").strip(),
-                "excerpt": str(item.get("excerpt") or "").strip(),
-            }
-            key = (
-                normalized["source"].casefold(),
-                normalized["ref"].casefold(),
-                normalized["excerpt"].casefold(),
-            )
-            merged.setdefault(key, normalized)
-    return [merged[key] for key in sorted(merged)]
-
-
 def _normalize_reference(value: str) -> str:
     return re.sub(r"[^a-z0-9:_-]", "", value.strip().casefold())
-
-
-def _evidence_score(finding: DesignFinding) -> tuple[int, int, int]:
-    return (len(finding.evidence), len(finding.message), len(finding.expected_change))
 
 
 def _class_symbols(class_graph: dict[str, object]) -> dict[str, set[str]]:
@@ -1708,22 +1759,6 @@ def _deduplicate_findings(findings: list[DesignFinding]) -> list[DesignFinding]:
             seen.add(key)
             result.append(item)
     return result
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _complete_json(llm_client: Any, *, system: str, prompt: str) -> str:
@@ -1818,7 +1853,7 @@ def _summarize_call_metrics(metrics: list[dict[str, object]]) -> dict[str, objec
 
 _PACKET_FIELD_GUIDE = """
 Packet field guide (Harness-owned meanings; do not reinterpret them):
-- task.primary_claim_ids are assessed once each; context claims are background that findings may cite.
+- task.primary_claim_ids are assessed once each; context claims are evidence governed by the task-specific scope.
 - task.coverage_keys list what this call answers for: claim:<id> and boundary:<edge id>.
 - surface_contract.runtime_surface.required_inputs are values a surface consumes. source=external_use_case or
   external_dependency means the approved Requirement supplies the value from outside this use case (see
@@ -1832,12 +1867,64 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   consumer side must hold each value through a request field, an inbound mapping, a modeled response or error event,
   its own declared state or transition, or a declared external input. response_mapping and error_mapping flow back to
   the consumer.
+- A UI transition outcome is its observable postcondition, not a separately ordered runtime event or mechanism
+  evidence. Covered ordered edges may realize it; repeated wording in the outcome and an edge mapping is not by itself
+  a duplicate event. Report a defect only when explicit ordering, guards or mappings make them contradictory.
 - branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
-  parent_entry_state: parent_transitions_taken_before_entry have happened and parent_transitions_not_taken_at_entry
-  have not, so values and events those transitions would produce do not exist yet. An unresolved entry means the
-  Design does not state where the branch starts; do not assume one.
+  parent_entry_state. parent_transitions_leading_to_entry are the transitions on some path that can reach
+  parent_entry_state: they are the conditions for being in that state, not a record that each one ran on this pass.
+  parent_transitions_after_entry are the transitions that can follow parent_entry_state; at the moment the branch
+  starts they have not run on this pass, so values and events they would produce do not exist yet. In a cyclic parent
+  one transition can appear in both lists. An unresolved entry means the Design does not state where the branch
+  starts; do not assume one.
 - approved_context holds approved Requirement preconditions and the Requirement text behind each declared external
   input. Treat them as facts the scenario may rely on.
+- ui_repo_context describes the current AS-IS repository (auth, data clients and the composition hops of this packet's
+  UI nodes). disposition=add or modify describes planned implementation, so absence from AS-IS is not a defect by
+  itself.
+- harness_established: facts the Harness proved mechanically for this packet, per boundary edge and per scenario;
+  not_established lists the questions those checks leave to this review.
+- surface_placements: the Designer put the scenario's business_rule in component_id because, by its reason and
+  evidence_refs, that code makes the decision. It is correct only when that component's code makes this scenario's rule
+  decision; a rule the approved Requirement says the server must enforce still needs a server-side Design node.
+- surface_not_exercised: the Designer states this scenario runs nothing on that required surface (reason,
+  evidence_refs). It is correct only when no step of this scenario reads, writes or decides on that surface (for example
+  a request refused before any data access) and its requirement_refs are realized by the scenario's other nodes; a
+  surface the scenario does use can never be declared not exercised.
+""".strip()
+
+_BEHAVIOR_PACKET_FIELD_GUIDE = """
+Packet field guide (Harness-owned meanings; do not reinterpret them):
+- task.primary_claim_ids are assessed once each; task.coverage_keys list the claim ids owned by this call.
+- Active-scenario nodes contain the approved behavior contracts to judge: states, transitions, decisions, outcomes,
+  validations and UI experience. Runtime wiring is intentionally omitted because the runtime specialist passed it.
+- A UI transition outcome is its observable postcondition, not a separately ordered runtime event or mechanism
+  evidence. Ordered edges may realize it; repeated wording in the outcome and an edge mapping is not by itself a
+  duplicate event. Report a defect only when explicit ordering, guards or mappings make them contradictory.
+- A node from another scenario is compact branch evidence only. Use branch_entries, its states and transitions to
+  determine where this scenario starts; do not review that other scenario's behavior or UI contract here.
+- edges establish behavior order, guards, terminal outcomes and observable response/error semantics. Transport,
+  input propagation and authentication wiring are intentionally omitted because they already passed runtime review.
+- branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
+  parent_entry_state. parent_transitions_leading_to_entry are reachability conditions, not a history of transitions
+  that all ran on this pass. parent_transitions_after_entry have not run when the branch starts.
+- A node realizes its requirement_refs and its scenario's surface claim (<scenario>:surface:<surface>); trace_mappings
+  list only the further links the nodes do not state.
+- realized_in_other_scenarios lists, for each Requirement item of a non-projection primary claim, every node or edge
+  of another scenario that the approved trace says realizes it. It is Harness-derived and complete: an empty list
+  means no other scenario realizes that item.
+- owned_code lists the code an active-scenario node's work may change: its runtime binding target and attachment
+  owner. The implementation changes no other code for that node.
+- approved_context contains approved Requirement preconditions and external facts; treat them as given.
+- harness_established: facts the Harness proved mechanically for this packet; not_established lists the questions
+  those checks leave to this review.
+- surface_placements: the Designer put the scenario's business_rule in component_id because, by its reason and
+  evidence_refs, that code makes the decision. It is correct only when that component's code makes this scenario's rule
+  decision; a rule the approved Requirement says the server must enforce still needs a server-side Design node.
+- surface_not_exercised: the Designer states this scenario runs nothing on that required surface (reason,
+  evidence_refs). It is correct only when no step of this scenario reads, writes or decides on that surface (for example
+  a request refused before any data access) and its requirement_refs are realized by the scenario's other nodes; a
+  surface the scenario does use can never be declared not exercised.
 """.strip()
 
 _SEVERITY_GUIDE = """
@@ -1845,27 +1932,68 @@ Severity:
 - blocking: the packet proves the defect. For runtime, a step on the modeled path cannot execute as declared: an event
   cannot occur, a value a decision tests does not exist at that point, or a promised guarantee has no mechanism. For a
   claim, the Design omits or contradicts what the claim requires.
-- warning: the packet leaves the issue uncertain, or the issue does not stop the path or the claim (quality, wording,
-  an error branch outside the active path).
-- Decide from the packet alone. An invented blocker and a missed blocker each cost a full repair cycle.
+- warning: the packet leaves the issue uncertain, or the issue does not stop the assigned required path or primary
+  claim, such as a wording concern or an explicitly modeled but non-required alternative or error outcome.
+- Decide from the packet alone. Report only defects established by supplied path or claim evidence; do not assume every
+  task contains a finding.
+""".strip()
+
+_BEHAVIOR_SEVERITY_GUIDE = """
+Severity:
+- blocking: the packet proves that a primary claim or promised behavior guarantee cannot be satisfied as declared.
+- warning: the packet leaves the issue uncertain, or the issue does not stop a primary claim, such as a wording or
+  non-required UI-contract concern.
+- Decide from the packet alone. Do not assume every task contains a finding.
+""".strip()
+
+_REMEDIATION_GUIDE = """
+Remediation mode for every finding:
+- local_patch: the Designer may update contracts on existing writable nodes and remove, add or reorder scenario edges
+  between existing nodes. It may not add, split, remove or replace a node. Choose this only when those permissions are
+  enough to produce a complete causal path and every reused node can keep one coherent typed input/operation shape.
+- partition_rebuild: the affected scenario/component partition needs a node added, split, removed or replaced, or no
+  coherent repair exists under the local_patch permissions. A missing field or outcome alone does not require rebuild
+  when an existing node already owns the responsibility and can coherently declare it.
+- inconclusive: the supplied Requirement or Design evidence is insufficient to choose either safe route. Fail closed;
+  do not guess a repair.
+Classify the smallest complete repair, not the smallest textual delta. Choose the mode semantically. The Harness
+validates exact ids and performs the route mechanically.
 """.strip()
 
 _DETERMINISTIC_REVIEW_NOTE = """
 Deterministic review: before this call the Harness already enforced graph schema and stable IDs, edge endpoints,
 partition coverage, boundary_contract shape, composition forwarded-input propagation, branch parent wiring and
-Requirement-to-Design trace coverage. The object below adds class/sequence projection traceability and structure.
-None of these checks judges whether a value exists at the right time or whether behavior satisfies a claim, so ok=true
-is not evidence that this Design is semantically sound:
+Requirement-to-Design trace coverage; packet.harness_established lists the facts it proved for this packet (mapping
+names, operation and paired-edge facts of each listed boundary, path order). Treat those facts as true and do not
+re-verify them; spend the review on packet.harness_established.not_established and on this task's own questions. None
+of these checks judges whether a value exists at the right time or whether behavior satisfies a claim, so they are not
+evidence that this Design is semantically sound. The object below adds class/sequence projection traceability:
+""".strip()
+
+_BEHAVIOR_DETERMINISTIC_REVIEW_NOTE = """
+Deterministic review: the Harness already enforced graph schema, stable IDs, endpoints and partition coverage, plus
+branch parent wiring and Requirement-to-Design trace coverage; packet.harness_established lists the facts it proved
+for this packet (graph schema and ids, path order). Treat those facts as true and do not re-verify them. A separate
+runtime specialist passed this scenario without a blocker, so runtime-only wiring is intentionally absent from this
+packet. These checks do not judge whether the remaining behavior and UI contracts satisfy the primary claims:
 """.strip()
 
 _RUNTIME_RULES = """
-- Check that every modeled transport, response and error event can actually occur. A cross-application call requires a
-  real transport/API surface; a broken transport cannot also carry a request or response.
+- A cross-application call requires a declared transport/API surface, runtime binding and boundary contract;
+  disposition=add or modify means that mechanism need not exist in the AS-IS repository yet.
 - Validate causal order: a condition may justify behavior only after a modeled runtime surface or edge can observe it;
   naming an error scenario does not prove when the error becomes known.
 - Every value a decision tests must exist on this path when the decision runs (see input_mapping in the field guide).
   A tested value that no modeled surface, declared state or declared external input produces is a
   decision_input_sufficiency defect even when an input_mapping names it.
+- Do not infer that a provider re-tests an upstream guard merely because its decision prose states the guarded
+  operation. When a modeled UI or interaction transition enforces the guard before the outbound call, the downstream
+  provider needs the resulting operation inputs, not a duplicate guard flag, unless its typed inputs or branches
+  explicitly declare that it tests the guard itself.
+- migration_intent describes implementation work, not runtime contents. add does not prove a new store is empty or
+  disconnected from records supplied by an approved upstream/external use case. Do not require this use case to model
+  record creation, ingestion, seeding or an extra write unless the Requirement or Design explicitly assigns that
+  lifecycle to this path or declares a distinct incompatible store.
 - Transitions that leave the same `from` state are alternative branches unless an edge or transition orders them;
   taking one branch does not mean a sibling branch's request, write or response has happened. A branch that starts
   before an external action (per branch_entries) needs no mechanism to undo or cancel that action.
@@ -1873,6 +2001,8 @@ _RUNTIME_RULES = """
   reconciliation mechanism; when neither Requirement nor Design promises it, do not require one.
 - For role=composition_wiring, runtime_surface.forwarded_inputs is the authoritative propagation contract; a missing
   forwarded input is a structural defect already reported by deterministic review.
+- UI states and transitions may prove when a runtime value or event exists. Do not audit UI completeness, feedback,
+  focus, accessibility or responsive presentation in this runtime task.
 """.strip()
 
 _BEHAVIOR_RULES = """
@@ -1881,11 +2011,20 @@ _BEHAVIOR_RULES = """
 - The UI experience contract (states, feedback, focus, accessibility, responsive layout) must agree with the approved
   interaction and make every required state and outcome observable. Visual taste alone is a warning.
 - Authentication and authorization are separate decisions; an uncertainty without evidence is a warning.
+- A primary claim may name several cases (for example edit and delete, or two actors). Each case needs a Design
+  realization in this packet or among the realized_in_other_scenarios subjects of a Requirement item that states that
+  case; a subject listed only under another item does not realize what this item adds (such as its error message). A
+  case that neither realizes has no Design: report a blocking finding citing the claim; never downgrade it on the guess
+  that another scenario realizes it. Its diagram_ids may include those other-scenario subjects as well as active nodes.
+- Contract prose (component_structure, decisions, outcomes) may name other code modules. Reading one unchanged is
+  fine. When a contract needs a new or changed module (for example a store slice that must hold a new state) that no
+  packet node's owned_code includes, no implementation unit can change it: report unsupported_assumption, blocking
+  when a primary claim depends on that change, otherwise a warning.
 """.strip()
 
 _GLOBAL_RULES = """
-- Judge preconditions, postconditions, quality requirements and negative constraints across every scenario they govern,
-  including the scenarios where they must not apply.
+- Judge only primary global preconditions, postconditions, quality requirements and negative constraints across the
+  scenarios they govern. Scenario-local constraints remain owned by their scenario calls.
 - Authentication and authorization are separate decisions; an uncertainty without evidence is a warning.
 - A surface reused by several scenarios must tell one consistent story about actions, state, feedback and inputs when
   a global claim depends on it. Visual taste alone is a warning.
@@ -1910,8 +2049,16 @@ Global-task scope:
 Runtime-task scope:
 - This task has no primary claims: return an empty assessments array. Context claims explain the intended scenario
   behavior and may be cited by findings.
-- Report only runtime feasibility defects of the active scenario path. Behavior, UX and Requirement satisfaction are
-  reviewed in a separate call that runs only when this runtime review has no blocking finding.
+- Review the assigned scenario through every boundary:<edge id> in coverage_keys. For each boundary, decide whether its
+  declared transport, response_mapping and
+  error_mapping events can occur in causal order. A provider-node outcome not named by a covered edge is in scope only
+  when the packet proves that the assigned required path can produce or consume it, or a cited Requirement or Design
+  guarantee requires it; it is not automatically an obligation of every edge that touches that provider.
+- A defect is blocking only when it prevents the required terminal path or breaks a guarantee promised by the
+  Requirement or Design. A defect confined to a modeled but non-required alternative or error outcome is a warning.
+- Do not turn hypothetical outcomes or repair alternatives into findings.
+- Behavior, UX and Requirement satisfaction are reviewed in a separate call that runs only when this runtime review
+  has no blocking finding.
 - Paths assigned to other scenario ids are reviewed separately.
 """.strip(),
         _RUNTIME_RULES,
@@ -1921,13 +2068,39 @@ Runtime-task scope:
         """
 Scenario-task scope:
 - Evaluate the active scenario in this packet. Paths assigned to other scenario ids are intentionally reviewed in
-  separate specialist calls, so their absence here is not a Design defect.
+  separate specialist calls: their absence here is not a Design defect when realized_in_other_scenarios shows they
+  realize the Requirement item at stake; a case of a primary claim that no scenario realizes is one.
 - Do not discard a shared acceptance criterion or rule. Assess every obligation it places on the active scenario;
   defer only evidence that requires executing another scenario to that scenario's separate review.
-- Do not report another scenario path as missing from this bounded packet.
-- This scenario's runtime path already passed a separate runtime review without blockers.
+- A claim with claim_type=global_projection projects an approved use-case-wide Requirement item (global_claim_type)
+  onto this scenario. Assess only this scenario's part: satisfied when this scenario's Design realizes it or relies on
+  it consistently, with exact refs; not_applicable when no step of this scenario realizes, relies on or could
+  contradict it, with the reason; missing or contradicted with a finding otherwise. Other scenarios' parts are
+  assessed in their own calls, and the Harness combines them.
+- This scenario's runtime path already passed a separate runtime review without blockers. Treat runtime feasibility as
+  established: use runtime details only as evidence for primary claims, and do not re-review or re-report transport,
+  input propagation or alternative runtime-outcome findings unless they make a primary claim missing or contradicted.
 """.strip(),
         _BEHAVIOR_RULES,
+    ),
+}
+
+_SEMANTIC_FINDING_CATEGORIES = {
+    "cross_cutting": (
+        "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|"
+        "decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|"
+        "unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|"
+        "interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract"
+    ),
+    "scenario_runtime": (
+        "cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|"
+        "data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|"
+        "authentication_contract|authorization_contract"
+    ),
+    "scenario_behavior": (
+        "behavior_order|terminal_state|cross_diagram_contract|negative_constraint|unsupported_assumption|"
+        "ui_state_coverage|ui_journey_coherence|interaction_feedback|accessibility|"
+        "responsive_attachment|authentication_contract|authorization_contract"
     ),
 }
 
@@ -1979,7 +2152,7 @@ class SemanticTaskCache:
         temp.replace(self.path)
 
 
-def _with_contract_retry(review: Any) -> tuple[Any, int]:
+def _with_contract_retry(review: Any, *, previous_response: Any = None) -> tuple[Any, int]:
     """Run one semantic review call; retry it once when its output breaks the Harness contract."""
 
     correction = ""
@@ -1991,18 +2164,38 @@ def _with_contract_retry(review: Any) -> tuple[Any, int]:
         except HarnessError as exc:
             if exc.error_code != "design_semantic_review_failed" or attempt:
                 raise
-            correction = exc.message
+            previous = previous_response() if previous_response is not None else None
+            correction = _contract_retry_instruction(
+                error=exc.message,
+                previous_response=previous if isinstance(previous, dict) else None,
+            )
     raise AssertionError("unreachable")
+
+
+def _contract_retry_instruction(*, error: str, previous_response: dict[str, object] | None) -> str:
+    parts = [
+        f"Your previous response to this same request was rejected before use: {error}",
+    ]
+    if previous_response is not None:
+        parts.extend(
+            [
+                "Previous JSON response:",
+                json.dumps(previous_response, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                "Correct only the fields implicated by the Harness error. Preserve every other semantic conclusion, "
+                "assessment status, finding, evidence item and mutation scope unchanged.",
+            ]
+        )
+    parts.append(
+        "Return one complete corrected JSON object for the same request. Cite only exact IDs that appear in the "
+        "supplied packet."
+    )
+    return "\n".join(parts)
 
 
 def _with_contract_correction(prompt: str, correction: str) -> str:
     if not correction:
         return prompt
-    return (
-        f"{prompt}\n\nHarness contract correction:\nYour previous response to this same request was rejected before "
-        f"use: {correction}\nReturn one complete corrected JSON object for the same request. Cite only exact IDs that "
-        "appear in the supplied packet."
-    )
+    return f"{prompt}\n\nHarness contract correction:\n{correction}"
 
 
 def _semantic_json_completion(llm_client: Any, *, prompt: str) -> dict[str, object]:

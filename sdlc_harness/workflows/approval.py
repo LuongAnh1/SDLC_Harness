@@ -1,13 +1,18 @@
-"""Dispatcher duyệt checkpoint theo state hiện tại của run."""
+"""Dispatcher duyệt checkpoint theo state hiện tại của run (bảng checkpoint ở workflows/graph.py)."""
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..storage.artifact_index import artifact_scope
 from ..storage.runtime import RuntimeStore
+from .graph import APPROVAL_REFUSALS, PHASE_FOUR, PHASE_THREE, PHASE_TWO, approval_for
 from .phase2 import PhaseTwoWorkflow
 from .phase3 import PhaseThreeWorkflow
 from .phase4 import PhaseFourWorkflow
+
 
 
 class CheckpointApprovalWorkflow:
@@ -20,31 +25,23 @@ class CheckpointApprovalWorkflow:
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
-        if status == "waiting_requirement_clarification":
+        if status in APPROVAL_REFUSALS:
+            error_code, message = APPROVAL_REFUSALS[status]
+            raise HarnessError(error_code, message, run_id=run_id)
+        approval = approval_for(status)
+        if approval is None:
             raise HarnessError(
-                "requirement_approval_blocked",
-                "Requirement approval is blocked until all blocking clarification questions are resolved.",
+                "checkpoint_not_current",
+                f"Run does not have an approvable checkpoint: {run_id}",
                 run_id=run_id,
             )
-        if status == "waiting_requirement_approval":
-            return PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id, checkpoint_id=checkpoint_id)
-        if status == "waiting_design_approval":
-            return PhaseThreeWorkflow(self.settings).approve_design_checkpoint(
-                run_id=run_id,
-                checkpoint_id=checkpoint_id,
-            )
-        if status == "waiting_implementation_plan_review":
-            return PhaseFourWorkflow(self.settings).approve_implementation_plan_checkpoint(
-                run_id=run_id,
-                checkpoint_id=checkpoint_id,
-            )
-        if status == "code_review_ready":
-            return PhaseFourWorkflow(self.settings).approve_code_review_checkpoint(
-                run_id=run_id,
-                checkpoint_id=checkpoint_id,
-            )
-        raise HarnessError(
-            "checkpoint_not_current",
-            f"Run does not have an approvable checkpoint: {run_id}",
-            run_id=run_id,
+        workflows = {PHASE_TWO: PhaseTwoWorkflow, PHASE_THREE: PhaseThreeWorkflow, PHASE_FOUR: PhaseFourWorkflow}
+        workflow = workflows[approval.workflow](self.settings)
+        # Only Phase 4 reads go through the recorded helpers; elsewhere `inputs` stays null (not tracked).
+        scope = (
+            artifact_scope(run_id, node=status, handler=approval.method, repo_root=self.store.repo_root)
+            if approval.workflow == PHASE_FOUR
+            else nullcontext()
         )
+        with scope:
+            return getattr(workflow, approval.method)(run_id=run_id, checkpoint_id=checkpoint_id)

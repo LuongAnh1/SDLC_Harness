@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import _settings_from_args, build_parser, command_from_args
@@ -41,8 +42,6 @@ class ApplicationCommandTests(unittest.TestCase):
                 "fake",
                 "--implementation-repair-limit",
                 "4",
-                "--qa-repair-limit",
-                "3",
                 "--step-review",
                 "--step-review-call-id",
                 "plan-1-input",
@@ -78,7 +77,6 @@ class ApplicationCommandTests(unittest.TestCase):
             {
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "4",
-                "SDLC_QA_REPAIR_LIMIT": "3",
                 "SDLC_SYNC_MODE": "real",
             },
         )
@@ -132,8 +130,7 @@ class ApplicationServiceTests(unittest.TestCase):
             "run_id": run_id,
             "status": "waiting_design_approval",
             "latest_artifacts": {},
-            "designer_contract_version": "vertical_design_graph_v1",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
         }
         if profiled:
             state["profile_snapshot"] = build_profile_snapshot(
@@ -615,6 +612,70 @@ class ApplicationServiceTests(unittest.TestCase):
             run_id="run_1"
         )
         phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
+
+    def test_continue_run_routes_runtime_closure_step_review(self) -> None:
+        self.write_state(
+            status="runtime_closure_step_review_required",
+            current_phase="runtime_closure",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "waiting_runtime_closure_review"}
+        arguments = {
+            "run_id": "run_1",
+            "step_review_call_id": "runtime-closure-planner-0001-a01",
+            "step_review_decision": "approve",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {"status": "runtime_closure_step_review_required"}
+            phase_four_type.return_value.continue_runtime_closure_step_review.return_value = response
+
+            result = self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(result, response)
+        self.assertEqual(
+            phase_four_type.call_args.kwargs["runtime_closure_step_review"],
+            {"enabled": True, "call_id": "runtime-closure-planner-0001-a01", "decision": "approve"},
+        )
+        phase_four_type.return_value.continue_runtime_closure_step_review.assert_called_once_with(run_id="run_1")
+        phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
+    def test_continue_run_keeps_developer_review_when_resuming_code_validation(self) -> None:
+        self.write_state(
+            status="implementation_validation_step_review_required",
+            current_phase="implementation_repair",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        arguments = {
+            "run_id": "run_1",
+            "step_review": True,
+            "step_review_call_id": "code-validation-scenario-SC-1-0001-a01-input",
+            "step_review_decision": "approve",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {
+                "status": "implementation_validation_step_review_required"
+            }
+            phase_four_type.return_value.continue_code_validation_step_review.return_value = {"ok": True}
+
+            self.service.execute(self.command("continue-run", arguments))
+
+        decision = {"call_id": "code-validation-scenario-SC-1-0001-a01-input", "decision": "approve"}
+        kwargs = phase_four_type.call_args.kwargs
+        # A Developer repair started after the Validator resumes must still pause at every call.
+        self.assertEqual(
+            kwargs["developer_step_review"],
+            {"review_input": True, "review_output": True, **decision, "enabled": True},
+        )
+        self.assertEqual(kwargs["runtime_closure_step_review"], kwargs["developer_step_review"])
+        self.assertEqual(kwargs["code_validation_step_review"], {"enabled": True, **decision})
+        phase_four_type.return_value.continue_code_validation_step_review.assert_called_once_with(run_id="run_1")
 
     def test_approval_and_workspace_commands_dispatch(self) -> None:
         self.write_state()

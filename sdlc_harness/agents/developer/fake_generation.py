@@ -7,6 +7,7 @@ import re
 
 from ...core.errors import HarnessError
 from .profile_context import developer_generation_context, developer_path_is_test
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, object]]:
@@ -20,12 +21,27 @@ def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, objec
             "Fake Developer generation requires the immutable project profile context.",
             run_id=str(work_packet.get("run_id") or "") or None,
         )
+    # Runtime-closure (and browser-readiness) units name their providers as planned code targets;
+    # declare them so fake runs keep every approved provider symbol.
+    closure_symbols: dict[str, list[str]] = defaultdict(list)
+    if work_packet.get("mode") in {"runtime_closure", "browser_readiness"}:
+        for unit in _dict_items(work_packet.get("execution_units")):
+            for target in _dict_items(unit.get("planned_code_targets")):
+                path, symbol = str(target.get("path") or ""), str(target.get("symbol") or "")
+                if path and symbol and symbol not in closure_symbols[path]:
+                    closure_symbols[path].append(symbol)
     for path in allowed_paths:
         content = _profiled_content(
             path,
             signatures=_dict_items(_dict_value(context.get("signatures_by_file")).get(path)),
             mappings=_dict_items(mappings_by_file.get(path)),
         )
+        if closure_symbols.get(path):
+            content = "".join(
+                f"export async function {symbol}(..._args: unknown[]): Promise<{{ close(): Promise<void> }}> {{\n"
+                "  return { close: async () => undefined };\n}\n"
+                for symbol in closure_symbols[path]
+            )
         files.append(
             {
                 "path": path,
@@ -93,7 +109,7 @@ def _typescript_declarations(signatures: list[dict[str, object]]) -> str:
         lines.append("")
     for entry in functions:
         name = str(entry.get("qualified_name") or "generated").split(".")[-1]
-        lines.extend(_render_callable(entry, name=name, indent="", prefix="export "))
+        lines.extend(_render_callable(entry, name=name, indent="", prefix="export ", keyword="function "))
         lines.append("")
     for (owner, owner_kind), entries in owners.items():
         if owner_kind == "interface":
@@ -158,9 +174,10 @@ def _render_callable(
     name: str,
     indent: str,
     prefix: str = "",
+    keyword: str = "",
 ) -> list[str]:
     async_prefix = "async " if entry.get("async") is True else ""
-    result = [f"{indent}{prefix}{async_prefix}{_signature(entry, name=name)} {{"]
+    result = [f"{indent}{prefix}{async_prefix}{keyword}{_signature(entry, name=name)} {{"]
     for parameter in _dict_items(entry.get("parameters")):
         parameter_name = str(parameter.get("name") or "value").strip()
         if parameter_name:
@@ -205,18 +222,3 @@ def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
         return []
     return [str(value).strip().replace("\\", "/") for value in values if str(value).strip()]
 
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

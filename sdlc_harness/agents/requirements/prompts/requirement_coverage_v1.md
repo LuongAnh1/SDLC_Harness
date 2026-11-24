@@ -9,6 +9,15 @@ Review each category exactly once: `functional_scope`, `domain_data`,
 `constraints_tradeoffs`, `terminology`, `completion_signals`, and `placeholders`.
 Use only `clear`, `partial`, or `missing` for coverage status.
 
+- `integrations` means an external system or service outside the application that
+  the source names. The application's own request/API boundary is not an integration.
+- `placeholders` means model content still waiting for a decision (an `unknown` item
+  with empty `text`, or a flow branch without steps or outcome) and placeholder wording
+  in the source such as TBD or TODO.
+- When an open question in the canonical model already captures a category's
+  source-scoped gap, mark that category `partial`, cite the IDs the question affects,
+  and do not add a candidate for the same gap.
+
 ## Source-boundary gate
 
 Coverage is evaluated only within behavior that the supplied source has put in
@@ -29,12 +38,20 @@ not mention, do not create the candidate.
   because an actor is logged in or performs an action.
 - Treat a source-stated observable result such as deletion as the product contract;
   do not ask about hard delete, soft delete, retention, archive, or audit unless the
-  source introduces that concern.
+  source introduces that concern. This limits how the deleted item itself is removed;
+  what happens on deletion to other records that the source names in relation to that
+  item is source-scoped (the Requirement Refiner asks it under the same counterfactual test).
 - Do not invent a failure, cancellation path, integration scenario, security/privacy
   rule, compliance rule, or quality target merely because a real system might need it.
   A named failure does not put other possible failures in scope.
 - Do not ask for best-practice completeness. Ask only for a missing decision required
   to implement or test behavior already introduced by the source.
+- A refusal the source introduces is a source-scoped gap when it leaves the request
+  answer open while the source makes request answers part of the contract (it states
+  one, such as HTTP 404 for one actor, or requires the server rather than the page to
+  enforce its rules): "refused and nothing created" is not yet testable at the request
+  boundary. Unless an open question already covers it, return one candidate with
+  `decision_category="api_contract"` that lists every such refusal.
 
 Return at most five material question candidates. Ask only when the answer changes
 behavior, acceptance testing, data identity, operational handling, security/privacy,
@@ -68,6 +85,25 @@ such as `UC-*`, `GOAL-*`, `ACT-*`, `PRE-*`, `MF-*`, `AF-*`, `EF-*`, `POST-*`,
 in `affects`. Do not return a new candidate for an ambiguity already represented
 by an open question in the canonical model.
 
+## Interpretation check
+
+The model may settle a point the source leaves open only honestly and consistently.
+Compare every `explicit` item with its quoted evidence and with the other explicit
+items, and find each place where the model settled such a point without an open
+question or decision: text that says more than its evidence (a wider scope, a
+precedence between clauses, an outcome for records the source names), or two items
+that give different outcomes for one situation. Return one `interpretations` entry
+for each place:
+
+- `verdict="accepted"` when the choice follows the source and every requirement
+  agrees with it;
+- `verdict="needs_fix"` when a requirement contradicts the source or another
+  requirement; `fix` says what must change in which requirement.
+
+An interpretation is never a question candidate: an accepted one passes as is, and
+one that needs a fix goes back to the Requirement model for correction. Return an
+empty list when the model settled nothing silently.
+
 Return one JSON object with this shape and no markdown fence:
 
 {
@@ -76,6 +112,7 @@ Return one JSON object with this shape and no markdown fence:
   "requirement_revision": {{REQUIREMENT_REVISION}},
   "coverage": [{"category":"functional_scope","status":"clear","requirement_refs":["UC-1"],"evidence_refs":["E-1"],"rationale":"Reason."}],
   "question_candidates": [{"category":"edge_failures","decision_category":"observable_behavior","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","proposed_disposition":"human_required","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"why_it_is_safe":null,"reversible":false,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
+  "interpretations": [{"requirement_ids":["BR-1","BR-2"],"evidence_refs":["E-1","E-2"],"choice":"What the model settled.","verdict":"needs_fix","reason":"Why it is or is not consistent with the source.","fix":"What must change in which requirement, or null when accepted."}],
   "deferred": [{"category":"quality_attributes","reason":"Lower impact than current blockers."}]
 }
 

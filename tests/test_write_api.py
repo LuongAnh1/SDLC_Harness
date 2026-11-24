@@ -174,9 +174,9 @@ class WriteApiTests(unittest.TestCase):
         cases = [
             ("answer_clarification", {"question_id": "Q-1", "answer": "Use 5", "answered_by": "owner"}, "answer-clarification"),
             ("approve_checkpoint", {"checkpoint_id": "cp-1", "design_repair_limit": 3}, "approve-checkpoint"),
-            ("continue_run", {"implementation_repair_limit": 4, "qa_repair_limit": 2}, "continue-run"),
+            ("continue_run", {"implementation_repair_limit": 4}, "continue-run"),
             ("sync_run", {}, "sync-run"),
-            ("revalidate_design", {"design_validation_trials": 3, "design_llm_call_budget": 8}, "revalidate-design"),
+            ("revalidate_design", {"design_repair_limit": 3, "design_llm_call_budget": 8}, "revalidate-design"),
             ("restart_design", {"design_repair_limit": 3}, "restart-design"),
             ("revalidate_requirement", {}, "revalidate-requirement"),
             ("clarify_more", {}, "clarify-more"),
@@ -281,7 +281,7 @@ class WriteApiTests(unittest.TestCase):
             ({"path": "/api/v1/runs/run_1/actions", "body": {**valid, "extra": 1}, "token": self.token, "key": "unknown"}, 400, "invalid_request"),
             ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "request_change", "requested_by": "owner"}, "token": self.token, "key": "unsupported"}, 400, "invalid_request"),
             ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "challenge_assumption", "requested_by": "owner", "arguments": {"assumption_id": "ASM-1"}}, "token": self.token, "key": "generic-challenge-missing-instruction"}, 400, "invalid_request"),
-            ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "continue_run", "requested_by": "owner", "arguments": {"qa_repair_limit": True}}, "token": self.token, "key": "bad-limit"}, 400, "invalid_request"),
+            ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "continue_run", "requested_by": "owner", "arguments": {"implementation_repair_limit": True}}, "token": self.token, "key": "bad-limit"}, 400, "invalid_request"),
             ({"path": "/api/v1/unknown", "body": {}, "token": self.token, "key": "unknown-route"}, 404, "route_not_found"),
         ]
         for request_data, expected_status, error_code in cases:

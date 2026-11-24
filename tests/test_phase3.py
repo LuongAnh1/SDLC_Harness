@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 import pytest
 
+from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.designer import GRAPH_VERSION_V2
+from sdlc_harness.agents.designer import GRAPH_VERSION
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
-from sdlc_harness.agents.developer.planner import _parse_developer_plan_payload
 from sdlc_harness.agents.validator import (
     ImplementationPlanReview,
     ImplementationPlanValidator,
@@ -26,9 +26,7 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
-    build_planning_path_policy,
     build_verification_stage_policy,
-    get_language_profile,
     get_project_profile,
 )
 from sdlc_harness.verification import VerificationResult
@@ -526,6 +524,63 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(second["status"], "implementation_plan_step_review_required")
         self.assertNotEqual(second["pending_step_review"]["call_id"], first_pending["call_id"])
 
+        # A continuation killed mid-replay leaves an in-flight status; the next continue resumes it.
+        store = PhaseOneWorkflow(self.settings).store
+        interrupted = store.read_state(self.run_id)
+        interrupted.update({"status": "implementation_plan_validating", "pending_step_review": None})
+        store.write_state(interrupted)
+        third = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={
+                "enabled": True,
+                "call_id": second["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_implementation_plan_step_review(run_id=self.run_id)
+        self.assertIn(third["status"], {"implementation_plan_step_review_required", "waiting_implementation_plan_review"})
+
+        finished = store.read_state(self.run_id)
+        finished.update({"status": "waiting_implementation_plan_review", "implementation_plan_step_review": None})
+        store.write_state(finished)
+        with self.assertRaises(HarnessError):
+            PhaseThreeWorkflow(self.settings, plan_step_review={"enabled": True}).continue_implementation_plan_step_review(
+                run_id=self.run_id
+            )
+
+    def test_plan_run_killed_mid_way_resumes_from_continue_run(self) -> None:
+        approved = self._create_phase2_run()
+        with patch.object(DeveloperPlanAgent, "plan", autospec=True, side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                PhaseThreeWorkflow(self.settings).approve_design_checkpoint(
+                    run_id=self.run_id,
+                    checkpoint_id=str(approved["pending_checkpoint"]["checkpoint_id"]),
+                )
+        store = PhaseOneWorkflow(self.settings).store
+        self.assertEqual(store.read_state(self.run_id)["status"], "implementation_planning")
+
+        resumed = ApplicationService(root=self.repo_root).execute(
+            ApplicationCommand(
+                name="continue-run",
+                arguments={"run_id": self.run_id},
+                settings_overrides={
+                    "SDLC_LLM_MODE": "fake",
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_DESIGN_REPAIR_LIMIT": "2",
+                    "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
+                    "SDLC_TARGET_REPO_PATH": str(self.target_repo),
+                    "SDLC_TARGET_REPO_REMOTE": self.remote_url,
+                },
+                runtime_root=self.runtime_root,
+            )
+        )
+
+        self.assertEqual(resumed["status"], "waiting_implementation_plan_review")
+        recoveries = store.read_state(self.run_id).get("recoveries") or []
+        self.assertEqual(
+            [(item["code"], item["from_status"], item["handler"]) for item in recoveries],
+            [("interrupted_resume", "implementation_planning", "continue_implementation_plan_step_review")],
+        )
+
     def test_new_design_checkpoint_supersedes_approved_plan_exchange(self) -> None:
         approved = self._create_phase2_run()
         store = PhaseOneWorkflow(self.settings).store
@@ -570,52 +625,6 @@ class PhaseThreeTest(unittest.TestCase):
             "upstream_design_checkpoint_changed",
         )
 
-    def test_revalidate_recovers_failed_plan_step_review_drift(self) -> None:
-        self._create_phase2_run()
-        store = PhaseOneWorkflow(self.settings).store
-        execution_root = store.run_dir(self.run_id) / "implementation_plan_execution"
-        execution_root.mkdir(parents=True, exist_ok=True)
-        stale = {
-            "call_id": "implementation-plan-0001-a01",
-            "ordinal": 1,
-            "attempt": 1,
-            "status": "approved",
-            "prompt_hash": "sha256:stale",
-            "resume_prompt_hash": "sha256:stale",
-            "raw_completion": "{}",
-        }
-        (execution_root / "step_review_session_v1.json").write_text(
-            json.dumps({"calls": [stale]}), encoding="utf-8"
-        )
-        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
-            json.dumps(stale), encoding="utf-8"
-        )
-        state = store.read_state(self.run_id)
-        state.update(
-            {
-                "current_phase": "implementation_planning",
-                "status": "failed",
-                "pending_checkpoint": None,
-                "last_error": {
-                    "error_code": "implementation_plan_step_review_drift",
-                    "message": "stale approved plan exchange",
-                },
-            }
-        )
-        store.write_state(state)
-
-        response = PhaseThreeWorkflow(
-            self.settings,
-            plan_step_review={"enabled": True},
-        ).revalidate_implementation_plan(run_id=self.run_id)
-
-        self.assertEqual(response["status"], "implementation_plan_step_review_required")
-        self.assertEqual(response["pending_step_review"]["review_stage"], "input")
-        session = json.loads(
-            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual([item["status"] for item in session["calls"]], ["superseded", "input_pending"])
-
     def _create_phase3_run_from_template(self) -> dict[str, object]:
         manager = RunWorkspaceManager(self.settings)
         worktree_path = manager.expected_worktree_path(self.run_id)
@@ -655,7 +664,7 @@ class PhaseThreeTest(unittest.TestCase):
 
         with self.assertRaises(HarnessError) as error:
             workflow._component_plan_context(
-                state={"designer_contract_version": GRAPH_VERSION_V2},
+                state={"designer_contract_version": GRAPH_VERSION},
                 run_id="run_design_v2_without_plan_marker",
                 artifact_paths={},
                 requirement_revision=1,
@@ -663,7 +672,7 @@ class PhaseThreeTest(unittest.TestCase):
             )
 
         self.assertEqual(error.exception.error_code, "implementation_plan_contract_invalid")
-        self.assertIn("Plan V4", error.exception.message)
+        self.assertIn("Plan V5", error.exception.message)
 
     def test_approve_design_checkpoint_creates_implementation_plan(self) -> None:
         approved = self._create_phase2_run()
@@ -689,7 +698,7 @@ class PhaseThreeTest(unittest.TestCase):
         plan_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan"])
         self.assertTrue(plan_path.exists())
         content = plan_path.read_text(encoding="utf-8")
-        self.assertIn("Implementation Plan V4", content)
+        self.assertIn("Implementation Plan V5", content)
         self.assertIn("Component Work Units", content)
         self.assertIn("Repo Evidence", content)
         self.assertIn("Implementation Steps", content)
@@ -708,8 +717,18 @@ class PhaseThreeTest(unittest.TestCase):
 
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
-        self.assertEqual(structured["planning_mode"], "llm_component_aware_plan_v1")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v5")
+        self.assertEqual(
+            structured["planning_mode"],
+            "llm_component_aware_scenario_sliced_v1",
+        )
+        self.assertEqual(
+            structured["developer_llm"]["planning_scenarios"],
+            ["SC-1"],
+        )
+        self.assertEqual(structured["inputs"]["repo_runtime_config"]["schema_version"], "repo_runtime_config_v1")
+        self.assertEqual(structured["runtime_config_impact"]["status"], "not_required")
+        self.assertIn("## Runtime Configuration", content)
         self.assertTrue(structured["work_units"])
         self.assertEqual(structured["repo_context"]["mode"], "fake_codegraph_context_v1")
         self.assertTrue(structured["implementation_steps"])
@@ -729,7 +748,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(review["repair_iterations"], 0)
         self.assertEqual(
             review["implementation_plan_contract_version"],
-            "implementation_plan_structured_v4",
+            "implementation_plan_structured_v5",
         )
         self.assertRegex(review["implementation_plan_sha256"], r"^sha256:[0-9a-f]{64}$")
 
@@ -791,7 +810,7 @@ class PhaseThreeTest(unittest.TestCase):
             planned["latest_artifacts"]["implementation_plan_structured"]
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v5")
         self.assertIn("apps/api/src/ExistingService.ts", structured["repo_context"]["source_files"])
         self.assertTrue(
             all(path.endswith((".ts", ".tsx")) for path in structured["repo_context"]["source_files"])
@@ -849,7 +868,7 @@ class PhaseThreeTest(unittest.TestCase):
             )
         )
         self.assertEqual(len(signature_targets), len(set(signature_targets)))
-        self.assertIn("# Implementation Plan V4", plan_markdown)
+        self.assertIn("# Implementation Plan V5", plan_markdown)
         self.assertIn("## Approved Implementation Signatures", plan_markdown)
         self.assertIn("## Verification Plan", plan_markdown)
         self.assertIn("Stage `unit`", plan_markdown)
@@ -1027,7 +1046,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(workflow.store.read_state(run_id), state_before)
 
     @pytest.mark.journey
-    def test_v2_phase4_runs_canonical_ids_through_qa(self) -> None:
+    def test_v2_phase4_traces_every_canonical_id(self) -> None:
         approved = self._create_phase2_run_fresh()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
@@ -1043,101 +1062,22 @@ class PhaseThreeTest(unittest.TestCase):
         for _ in range(3):
             response = workflow.continue_run(run_id=run_id)
             self.assertNotEqual(response["status"], "blocked", response)
-        workflow.verification_runner.run = lambda **kwargs: VerificationResult(
-            status="passed",
-            command="fixture QA runner",
-            cwd=str(kwargs["target_path"]),
-            exit_code=0,
-            duration_seconds=0.01,
-            stdout="fixture QA passed",
-            stderr="",
-            reason="Fixture QA execution passed.",
-            selected_test_files=tuple(kwargs.get("required_test_files") or []),
-            verified_test_files=tuple(kwargs.get("required_test_files") or []),
-        )
-        response = workflow.continue_run(run_id=run_id)
 
-        self.assertEqual(response["status"], "qa_tested", response)
+        self.assertEqual(response["status"], "implementation_traced", response)
         self.assertEqual(response["requirement_contract_version"], "v2")
         trace = json.loads(
             (self.repo_root / response["latest_artifacts"]["requirement_design_code_trace"]).read_text(
                 encoding="utf-8"
             )
         )
-        qa_generated = json.loads(
-            (self.repo_root / response["latest_artifacts"]["qa_generated_tests"]).read_text(encoding="utf-8")
-        )
         trace_ids = {item["requirement_ref"] for item in trace["mappings"]}
-        qa_ids = {
-            requirement_id
-            for scenario in qa_generated["scenarios"]
-            for requirement_id in scenario["requirement_ids"]
-        }
-        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v3")
-        self.assertEqual(trace_ids, qa_ids)
+        self.assertEqual(trace["mode"], "scenario_boundary_code_validation_v1")
+        self.assertEqual(trace_ids, {item["id"] for item in packet["canonical_requirements"]})
         self.assertEqual(trace["stats"]["requirements_covered"], trace["stats"]["requirement_count"])
 
-    @pytest.mark.journey
-    def test_v2_phase4_runs_to_code_review_approved_with_stable_ids(self) -> None:
-        approved = self._create_phase2_run_fresh()
-        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
-        run_id = str(phase3["run_id"])
-        response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
-        packet = json.loads(
-            (self.repo_root / response["latest_artifacts"]["developer_work_packet"]).read_text(encoding="utf-8")
-        )
-        canonical_ids = {item["id"] for item in packet["canonical_requirements"]}
-        revision = packet["requirement_contract"]["revision"]
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(packet)
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-
-        statuses = []
-        for _ in range(4):
-            response = workflow.continue_run(run_id=run_id)
-            self.assertNotEqual(response["status"], "blocked", response)
-            statuses.append(response["status"])
-        self.assertEqual(
-            statuses,
-            ["implementation_written", "implementation_tested", "implementation_traced", "qa_tested"],
-        )
-
-        workflow.github_publisher = RecordingPublisher()
-        with patch(
-            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
-            return_value="example/target",
-        ):
-            published = workflow.continue_run(run_id=run_id)
-        ready = workflow.continue_run(run_id=run_id)
-        workflow.github_approver = RecordingApprover()
-        with patch(
-            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
-            return_value="example/target",
-        ):
-            final = workflow.approve_code_review_checkpoint(
-                run_id=run_id,
-                checkpoint_id=str(ready["pending_checkpoint"]["checkpoint_id"]),
-            )
-
-        self.assertEqual(published["status"], "code_review_published")
-        self.assertEqual(ready["status"], "code_review_ready")
-        self.assertEqual(final["status"], "code_review_approved")
-        self.assertEqual(final["requirement_contract_version"], "v2")
-        pr_body = (self.repo_root / final["latest_artifacts"]["github_pr_body"]).read_text(encoding="utf-8")
-        jira_sync = (self.runtime_root / "runs" / run_id / "sync" / "code-review-jira-comment.md").read_text(
-            encoding="utf-8"
-        )
-        confluence_sync = (
-            self.runtime_root / "runs" / run_id / "sync" / "code-review-confluence-page.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn(f"Requirement contract: `v2` revision `{revision}`", pr_body)
-        for requirement_id in canonical_ids:
-            self.assertIn(requirement_id, pr_body)
-            self.assertIn(requirement_id, jira_sync)
-            self.assertIn(requirement_id, confluence_sync)
 
     @pytest.mark.journey
-    def test_v2_phase4_repair_loops_preserve_contract_and_stable_ids(self) -> None:
+    def test_v2_phase4_repair_loop_preserves_contract_and_stable_ids(self) -> None:
         approved = self._create_phase2_run_fresh()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
@@ -1174,36 +1114,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(repaired_packet["requirement_contract"]["revision"], revision)
         self.assertEqual({item["id"] for item in repaired_packet["canonical_requirements"]}, canonical_ids)
         self.assertEqual({item["requirement_ref"] for item in repaired_trace["mappings"]}, canonical_ids)
-
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        qa_repair_needed = workflow.continue_run(run_id=run_id)
-        self.assertEqual(qa_repair_needed["status"], "qa_repair_needed")
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-        qa_tested = workflow.continue_run(run_id=run_id)
-
-        self.assertEqual(qa_tested["status"], "qa_tested")
-        final_packet = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["developer_work_packet"]).read_text(encoding="utf-8")
-        )
-        final_trace = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["requirement_design_code_trace"]).read_text(
-                encoding="utf-8"
-            )
-        )
-        qa_generated = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["qa_generated_tests"]).read_text(encoding="utf-8")
-        )
-        qa_ids = {
-            requirement_id
-            for scenario in qa_generated["scenarios"]
-            for requirement_id in scenario["requirement_ids"]
-        }
-        self.assertEqual(final_packet["requirement_contract"]["revision"], revision)
-        self.assertEqual({item["id"] for item in final_packet["canonical_requirements"]}, canonical_ids)
-        self.assertEqual({item["requirement_ref"] for item in final_trace["mappings"]}, canonical_ids)
-        self.assertEqual(qa_ids, canonical_ids)
-        self.assertEqual(qa_tested["implementation_repair_iterations"], 1)
-        self.assertEqual(qa_tested["qa_repair_iterations"], 1)
+        self.assertEqual(traced["implementation_repair_iterations"], 1)
 
     def test_cli_approve_checkpoint_rejects_legacy_design_run(self) -> None:
         approved = self._create_phase2_run()
@@ -1242,83 +1153,6 @@ class PhaseThreeTest(unittest.TestCase):
         settings = self._settings(SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT="0")
 
         self.assertEqual(settings.implementation_plan_repair_limit, 0)
-
-    def test_developer_plan_parser_accepts_fenced_json_with_prose(self) -> None:
-        payload = _parse_developer_plan_payload(
-            """Here is the plan:
-```json
-{
-  "summary": "Implement approved delete flow",
-  "repo_evidence": ["CulturalHeritage.java exists"],
-  "implementation_steps": [
-    {
-      "order": 1,
-      "title": "Add delete service",
-      "description": "Implement deletion",
-      "files": ["src/main/java/DeleteService.java"],
-      "design_refs": ["method:DeleteService.delete"]
-    }
-  ],
-  "proposed_files": [],
-  "design_mappings": [],
-  "test_intents": [],
-  "assumptions": [],
-  "open_questions": []
-}
-```
-Thanks."""
-        )
-
-        self.assertEqual(payload["summary"], "Implement approved delete flow")
-        self.assertEqual(payload["repo_evidence"], ["CulturalHeritage.java exists"])
-        self.assertEqual(payload["implementation_steps"][0]["order"], 1)
-
-    def test_developer_plan_falls_back_when_llm_returns_invalid_json(self) -> None:
-        project = get_project_profile("typescript_fullstack_v1")
-        planning_policy = build_planning_path_policy(
-            project=project,
-            language=get_language_profile(project.language_profile_id),
-        )
-        draft = DeveloperPlanAgent(BadJsonLlm()).plan(
-            run_id="run_test",
-            source_ref="jira_issue:SDLC-1",
-            issue_key="SDLC-1",
-            requirement_packet="# Requirement\nDelete an item.",
-            design_artifact="# Design\nDeleteCulturalHeritageService.deleteHeritage",
-            requirement_design_trace={
-                "version": "requirement_design_trace_v1",
-                "class_trace": [],
-                "sequence_trace": [],
-            },
-            class_graph={
-                "version": "class_diagram_graph_v1",
-                "nodes": [
-                    {
-                        "id": "DeleteCulturalHeritageService",
-                        "className": "DeleteCulturalHeritageService",
-                        "methods": [{"name": "deleteHeritage"}],
-                    }
-                ],
-            },
-            sequence_graph={"version": "sequence_diagram_graph_v1", "sequenceDiagrams": []},
-            target_repo_path=str(self.target_repo),
-            target_repo_remote=self.remote_url,
-            target_base_branch="main",
-            planned_branch="feature/sdlc-1-implementation",
-            target_files=[
-                "apps/api/src/DeleteCulturalHeritageService.ts"
-            ],
-            repo_context={"mode": "fake_codegraph_context_v1", "evidence": "service exists"},
-            planning_policy=planning_policy,
-            verification_policy=build_verification_stage_policy(project=project),
-        )
-
-        self.assertEqual(
-            draft.structured["planning_mode"],
-            "deterministic_graph_mapping_after_llm_parse_error_v1",
-        )
-        self.assertIn("Developer.plan LLM did not return valid JSON", draft.structured["developer_llm"]["parse_error"])
-        self.assertTrue(draft.structured["implementation_steps"])
 
     def test_sync_run_resyncs_implementation_plan_checkpoint(self) -> None:
         approved = self._create_phase2_run()
@@ -1402,7 +1236,7 @@ Thanks."""
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
         self.assertIn("Design-to-code mappings", confluence_body)
-        self.assertIn("Implementation Plan V4", confluence_body)
+        self.assertIn("Implementation Plan V5", confluence_body)
         self.assertNotIn("<p>| Design element | Type | Planned code target | Reason | Test intent |</p>", confluence_body)
         jira_payload = calls[1][2]
         self.assertIsNotNone(jira_payload)
@@ -1739,6 +1573,52 @@ Thanks."""
         self.assertEqual(state["last_error"]["error_code"], "implementation_plan_developer_failed")
         self.assertEqual(state["last_error"]["run_id"], approved["run_id"])
 
+    def test_admission_failure_after_checkpoint_clear_marks_run_instead_of_stalling(self) -> None:
+        approved = self._create_phase2_run()
+        run_id = str(approved["run_id"])
+        cases = {
+            "implementation_plan_contract_invalid": ("implementation_planning", "failed"),
+            "implementation_plan_design_composition_blocked": ("design_review", "blocked"),
+            "implementation_plan_ui_runtime_blocked": ("design_review", "blocked"),
+        }
+        for error_code, (phase, status) in cases.items():
+            with self.subTest(error_code=error_code):
+                workflow = PhaseThreeWorkflow(self.settings)
+                state = workflow.store.read_state(run_id)
+                state.update({"current_phase": "design_review", "status": "waiting_design_approval"})
+                workflow.store.write_state(state)
+
+                def fail_admission(**_kwargs: object) -> None:
+                    raise HarnessError(error_code, "admission failed")
+
+                workflow._component_plan_context = fail_admission  # type: ignore[method-assign]
+                with self.assertRaises(HarnessError) as ctx:
+                    workflow._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
+
+                self.assertEqual(ctx.exception.error_code, error_code)
+                recovered = workflow.store.read_state(run_id)
+                self.assertEqual(recovered["current_phase"], phase)
+                self.assertEqual(recovered["status"], status)
+                self.assertIsNone(recovered["pending_checkpoint"])
+                self.assertEqual(recovered["last_error"]["error_code"], error_code)
+
+    def test_corrupt_design_artifact_after_checkpoint_clear_marks_run_failed(self) -> None:
+        approved = self._create_phase2_run()
+        run_id = str(approved["run_id"])
+        workflow = PhaseThreeWorkflow(self.settings)
+        state = workflow.store.read_state(run_id)
+        (self.repo_root / str(state["latest_artifacts"]["class_diagram_graph"])).write_text(
+            "{not json", encoding="utf-8"
+        )
+
+        with self.assertRaises(HarnessError):
+            workflow._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
+
+        recovered = workflow.store.read_state(run_id)
+        self.assertEqual(recovered["current_phase"], "implementation_planning")
+        self.assertEqual(recovered["status"], "failed")
+        self.assertIsNone(recovered["pending_checkpoint"])
+
     def test_component_routing_failure_returns_run_to_design_revalidation(self) -> None:
         approved = self._create_phase2_run()
         workflow = PhaseThreeWorkflow(self.settings)
@@ -1814,7 +1694,8 @@ Thanks."""
         self.assertFalse((self.runtime_root / "runs" / str(approved["run_id"]) / "sync" / "tool_sync_report_v3.json").exists())
 
     def test_validator_llm_invalid_json_blocks_with_review_report(self) -> None:
-        settings = self._settings(SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT="0")
+        # Repairs are allowed, but unparsable Validator output must never feed one.
+        settings = self._settings(SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT="2")
         approved = PhaseOneWorkflow(settings).start_or_get_run(
             dataset="eTour",
             use_case="UC1",
@@ -1827,100 +1708,14 @@ Thanks."""
         response = workflow.approve_design_checkpoint(run_id=str(approved["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_plan_review_failed")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_plan_review_inconclusive")
         report = response["quality_reports"]["implementation_plan_review"]
         self.assertFalse(report["ok"])
-        self.assertEqual(report["llm_review"]["parse_error"], "Implementation plan LLM review did not return valid JSON.")
+        self.assertTrue(report["inconclusive"])
+        self.assertEqual(report["issue_count"], 0)
+        self.assertIn("did not return valid JSON", report["llm_review"]["reason"])
+        self.assertEqual(report["versions"], ["v1"])
         self.assertTrue(response["latest_artifacts"]["implementation_plan_review"].endswith("implementation_plan_review_v1.json"))
-
-    def test_validator_review_detects_scope_violation(self) -> None:
-        review = ImplementationPlanValidator().review(
-            structured_plan={
-                "target_repository": {
-                    "local_path": str(self.target_repo),
-                    "remote": self.remote_url,
-                    "base_branch": "main",
-                    "planned_branch": "feature/test",
-                },
-                "design_mappings": [
-                    {
-                        "design_element_id": "class:InventedService",
-                        "design_element_name": "InventedService",
-                        "planned_code_target": "src/main/java/com/sdlc/etour/heritage/InventedService.java",
-                        "test_intent": "test invented behavior",
-                    }
-                ],
-                "test_intents": [{"scope": "unit", "intent": "run tests", "command": "scripts/test.ps1"}],
-            },
-            requirement_design_trace={"class_trace": [], "sequence_trace": []},
-            class_graph={"nodes": []},
-            sequence_graph={"sequenceDiagrams": []},
-        )
-
-        self.assertFalse(review.ok)
-        self.assertTrue(review.scope_issues)
-
-    def test_v2_validator_hard_gates_malformed_requirement_coverage(self) -> None:
-        review = ImplementationPlanValidator().review_rules(
-            structured_plan={
-                "target_repository": {
-                    "local_path": str(self.target_repo),
-                    "remote": self.remote_url,
-                    "base_branch": "main",
-                    "planned_branch": "feature/test",
-                },
-                "design_mappings": [
-                    {
-                        "design_element_id": "class:ApprovedService",
-                        "design_element_name": "ApprovedService",
-                        "planned_code_target": "src/main/java/ApprovedService.java",
-                        "test_intent": "test approved behavior",
-                    }
-                ],
-                "test_intents": [{"scope": "unit", "intent": "run tests", "command": "scripts/test.ps1"}],
-                "requirement_coverage": [
-                    {
-                        "requirement_id": "R-1",
-                        "content": "approved",
-                        "design_targets": ["InventedService"],
-                        "design_element_ids": [],
-                        "planned_code_targets": [],
-                        "test_intents": [],
-                    },
-                    {
-                        "requirement_id": "R-UNKNOWN",
-                        "content": "invented",
-                        "design_targets": ["InventedService"],
-                        "design_element_ids": [],
-                        "planned_code_targets": [],
-                        "test_intents": [],
-                    }
-                ],
-            },
-            requirement_design_trace={
-                "class_trace": [
-                    {"requirement": "R-1", "links": [{"target": "ApprovedService", "reason": "covered"}]}
-                ],
-                "sequence_trace": [{"requirement": "R-1", "links": []}],
-            },
-            class_graph={"nodes": [{"id": "ApprovedService", "className": "ApprovedService", "methods": []}]},
-            sequence_graph={"sequenceDiagrams": []},
-            requirement_graph={
-                "requirements": [
-                    {"id": "R-1", "content": "approved"},
-                    {"id": "R-2", "content": "also approved"},
-                ]
-            },
-            requirement_contract_version="v2",
-        )
-
-        self.assertFalse(review.ok)
-        self.assertEqual(review.mode, "implementation_plan_rule_review_v2")
-        self.assertTrue(any("Missing requirement coverage" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("invented unknown" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("outside its approved trace" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("no planned code target" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("no test intent" in item for item in review.requirement_coverage_issues))
 
     def test_direct_phase2_still_rejects_design_checkpoint(self) -> None:
         approved = self._create_phase2_run()

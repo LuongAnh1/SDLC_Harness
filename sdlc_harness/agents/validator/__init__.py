@@ -8,10 +8,7 @@ from .code_trace import CodeTraceResult, CodeTraceValidator
 from .design_validation import DesignFinding, DesignValidationResult, DesignValidator
 from .traceability import (
     TraceabilityResult,
-    ValidatorAgent,
-    build_requirement_graph,
     build_requirement_graph_v2,
-    compute_missing_links,
 )
 from .vertical_trace import (
     VERTICAL_TRACE_MODE_STATE_KEY,
@@ -40,10 +37,7 @@ __all__ = [
     "TraceabilityResult",
     "TypeScriptAstEvidence",
     "TypeScriptAstExtractor",
-    "ValidatorAgent",
-    "build_requirement_graph",
     "build_requirement_graph_v2",
-    "compute_missing_links",
     "VERTICAL_TRACE_GRAPH_VERSION",
     "VERTICAL_TRACE_MODE_STATE_KEY",
     "VERTICAL_TRACE_MODES",

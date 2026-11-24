@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.config import Settings
+from ..workflows.graph import dashboard_workflow
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -21,7 +22,6 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "optional": {"checkpoint_id"},
         "overrides": {
             "design_repair_limit",
-            "design_validation_trials",
             "design_llm_call_budget",
             "implementation_plan_repair_limit",
             "implementation_repair_limit",
@@ -47,7 +47,7 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "command": "continue-run",
         "required": set(),
         "optional": {"step_review_call_id", "step_review_decision", "step_review_note"},
-        "overrides": {"implementation_repair_limit", "qa_repair_limit"},
+        "overrides": {"implementation_repair_limit"},
         "confirmation": "standard",
     },
     "sync_run": {
@@ -61,14 +61,14 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "command": "revalidate-design",
         "required": set(),
         "optional": set(),
-        "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
+        "overrides": {"design_repair_limit", "design_llm_call_budget"},
         "confirmation": "standard",
     },
     "restart_design": {
         "command": "restart-design",
         "required": set(),
         "optional": set(),
-        "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
+        "overrides": {"design_repair_limit", "design_llm_call_budget"},
         "confirmation": "confirm",
     },
     "revalidate_requirement": {
@@ -92,6 +92,34 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": {"implementation_repair_limit"},
         "confirmation": "standard",
     },
+    "run_until_checkpoint": {
+        "command": "run-until-checkpoint",
+        "required": set(),
+        "optional": {"max_steps"},
+        "overrides": set(),
+        "confirmation": "standard",
+    },
+    "set_step_review": {
+        "command": "set-step-review",
+        "required": {"enabled", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
+    "rewind_run": {
+        "command": "rewind-run",
+        "required": {"node", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
+    "adjust_budget": {
+        "command": "adjust-budget",
+        "required": {"budget_id", "limit", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "adopt_run_workspace": {
         "command": "adopt-run-workspace",
         "required": set(),
@@ -111,55 +139,9 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
 
 OVERRIDE_SETTINGS = {
     "design_repair_limit": ("SDLC_DESIGN_REPAIR_LIMIT", 0),
-    "design_validation_trials": ("SDLC_DESIGN_VALIDATION_TRIALS", 1),
     "design_llm_call_budget": ("SDLC_DESIGN_LLM_CALL_BUDGET", 1),
     "implementation_plan_repair_limit": ("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", 0),
     "implementation_repair_limit": ("SDLC_IMPLEMENTATION_REPAIR_LIMIT", 0),
-    "qa_repair_limit": ("SDLC_QA_REPAIR_LIMIT", 0),
-}
-
-
-WORKFLOW_NODES = (
-    {"id": "requirement", "label": "Requirement"},
-    {"id": "design", "label": "Design"},
-    {"id": "plan", "label": "Implementation Plan"},
-    {"id": "developer", "label": "Developer"},
-    {"id": "verification", "label": "Verification"},
-    {"id": "validator", "label": "Validator"},
-    {"id": "qa", "label": "QA"},
-    {"id": "review", "label": "Draft PR / Review"},
-)
-
-PHASE_NODES = {
-    "requirement_drafting": "requirement",
-    "requirement_clarification": "requirement",
-    "waiting_requirement_clarification_continue": "requirement",
-    "waiting_requirement_approval": "requirement",
-    "design_drafting": "design",
-    "design_revalidating": "design",
-    "design_validating": "design",
-    "design_repairing": "design",
-    "design_review": "design",
-    "implementation_planning": "plan",
-    "implementation_plan_revalidating": "plan",
-    "implementation_plan_validating": "plan",
-    "implementation_plan_repairing": "plan",
-    "implementation_preparing": "developer",
-    "implementation_writing": "developer",
-    "implementation_repair": "developer",
-    "qa_repair": "developer",
-    "implementation_testing": "verification",
-    "qa_testing": "qa",
-    "code_review_publishing": "review",
-    "code_review_syncing": "review",
-    "code_review": "review",
-    "code_review_approval": "review",
-    "code_review_approved": "review",
-}
-
-STATUS_NODES = {
-    "implementation_tested": "validator",
-    "implementation_traced": "qa",
 }
 
 
@@ -183,14 +165,11 @@ def public_dashboard_schema(settings: Settings) -> dict[str, object]:
         },
         "actions": actions,
         "workflow": {
-            "nodes": [dict(node) for node in WORKFLOW_NODES],
-            "phase_nodes": dict(PHASE_NODES),
-            "status_nodes": dict(STATUS_NODES),
+            **dashboard_workflow(),
             "repair_defaults": {
                 "design": settings.design_repair_limit,
                 "plan": settings.implementation_plan_repair_limit,
                 "implementation": settings.implementation_repair_limit,
-                "qa": settings.qa_repair_limit,
             },
         },
         "refresh_seconds": {"snapshot": 5, "active_run": 3, "operation": 2},

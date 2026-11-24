@@ -9,22 +9,29 @@ import re
 def fake_completion(prompt: str) -> str:
     """Fake output theo loại prompt để test không gọi API thật."""
 
+    # Closure prompts embed repository source, so match them first by their exact JSON marker.
+    if prompt.startswith('{\n  "prompt_kind": "Runtime Closure Planner v1"'):
+        return fake_runtime_closure_plan(prompt)
+    if prompt.startswith(
+        ('{\n  "prompt_kind": "Runtime Closure Contract Review v1"', '{\n  "prompt_kind": "Runtime Closure Code Review v1"')
+    ):
+        return fake_runtime_closure_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser Journey Planner v1"'):
+        return fake_browser_journey_plan(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "UI Polish Planner v1"'):
+        return fake_ui_polish_plan(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "UI Polish Contract Review v1"'):
+        return fake_ui_polish_review(prompt)
+    if prompt.startswith('{"prompt_kind": "UI Polish Result Review v1"'):
+        return fake_ui_polish_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser QA Scenario Review v1"'):
+        return fake_browser_qa_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser Journey Execution Review v1"'):
+        return fake_browser_journey_review(prompt)
     if "# Requirement Source Tool Loop" in prompt:
         return fake_requirement_source_action(prompt)
     if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
         return fake_requirement_model_v2(prompt)
-    if "UML Audit / Report" in prompt and "updated Class Diagram" in prompt:
-        return fake_design_model()
-    if "both a Class Diagram and Sequence Diagrams" in prompt:
-        return fake_design_model()
-    if "very concise architecture recommendation" in prompt:
-        return fake_architecture_recommendation()
-    if "requirements-to-design traceability" in prompt and "Class diagram:" in prompt:
-        return fake_traceability_class(prompt)
-    if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
-        return fake_traceability_sequence(prompt)
-    if "Design Semantic Review v3" in prompt:
-        return fake_design_semantic_review(prompt)
     if (
         "Design Semantic Scenario Review v2" in prompt
         or "Design Semantic Runtime Review v2" in prompt
@@ -33,30 +40,382 @@ def fake_completion(prompt: str) -> str:
         return fake_design_semantic_specialist_review(prompt)
     if "Design Semantic Coherence Review v2" in prompt:
         return fake_design_semantic_coherence_review()
-    if "Design Semantic Adjudication v1" in prompt:
-        return fake_design_semantic_adjudication()
+    if "Design Semantic Adjudication v2" in prompt:
+        return fake_design_semantic_adjudication(prompt)
     if "Progressive Semantic Claim Review" in prompt:
         return fake_progressive_semantic_review(prompt)
     if "Progressive Targeted Repair Verification" in prompt:
         return fake_progressive_targeted_review(prompt)
     if "Progressive Bounded Semantic Adjudication" in prompt:
         return fake_progressive_adjudication(prompt)
-    if "Component-aware Implementation Plan V4" in prompt:
+    if "Component-aware Implementation Plan V4" in prompt or "Component-aware Implementation Plan V5" in prompt:
         return fake_component_aware_implementation_plan(prompt)
-    if "Implementation Plan LLM Review v1" in prompt:
-        return fake_implementation_plan_review()
+    if "Implementation Plan LLM Review v1" in prompt or "Implementation Plan LLM Review V5" in prompt:
+        return fake_implementation_plan_review(prompt)
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan(prompt)
+    if "Scenario + Boundary Code Validation v1" in prompt:
+        return fake_code_validation_task(prompt)
     if "Code Trace LLM Review v1" in prompt:
         return fake_code_trace_review(prompt)
-    if (
-        "QA Tester Generate Acceptance Tests v1" in prompt
-        or "QA Tester Generate Profiled Acceptance Tests v1" in prompt
-    ):
-        return fake_qa_generated_tests(prompt)
-    if "QA Tester Acceptance Review v1" in prompt:
-        return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
+
+
+def _closure_prompt_payload(prompt: str) -> dict[str, object]:
+    # A contract retry appends plain text after the JSON prompt.
+    payload, _ = json.JSONDecoder().raw_decode(prompt)
+    return payload if isinstance(payload, dict) else {}
+
+
+def fake_runtime_closure_plan(prompt: str) -> str:
+    """Resolve every input generically so the contract passes G1-G15 in fake mode."""
+
+    payload = _closure_prompt_payload(prompt)
+    context = payload.get("closure_context") or {}
+    policy = payload.get("path_policy") or {}
+    roots = policy.get("component_editable_roots") or {}
+    browser_component = str(policy.get("browser_test_component_id") or "e2e")
+    browser_root = str(policy.get("browser_test_root") or "tests/e2e")
+    inputs = [item for item in context.get("runtime_inputs") or [] if isinstance(item, dict)]
+
+    def component_of(path: str) -> str:
+        matches = [
+            (len(root), component)
+            for component, component_roots in roots.items()
+            for root in component_roots
+            if path.startswith(f"{root}/")
+        ]
+        return max(matches)[1] if matches else next(iter(roots), "")
+
+    units: dict[str, dict[str, object]] = {}
+
+    def unit_for(component: str) -> dict[str, object]:
+        return units.setdefault(
+            component,
+            {
+                "key": f"{component}-closure",
+                "component_id": component,
+                "objective": f"Provide approved runtime inputs owned by {component}.",
+                "depends_on": [],
+                "resolves_input_ids": [],
+                "write_paths": [],
+                "test_target_paths": [],
+                "required_stage_ids": ["typecheck"],
+                "test_intents": [],
+                "context_paths": [],
+            },
+        )
+
+    resolutions: list[dict[str, object]] = []
+    demo_inputs: list[str] = []
+    stand_ins: list[dict[str, object]] = []
+    for index, item in enumerate(inputs, start=1):
+        input_id = str(item.get("input_id") or "")
+        source = item.get("design_source")
+        env = item.get("env") if isinstance(item.get("env"), dict) else None
+        if env:
+            resolutions.append(
+                {
+                    "input_id": input_id,
+                    "kind": "existing_runtime",
+                    "provider": {"kind": "env_var", "env_key": env["env_key"], "read_by": env["read_by"], "change_ref": "plan"},
+                    "decision_ref": None,
+                    "reason": "Production keeps the approved environment default.",
+                }
+            )
+            module = f"{browser_root}/support/closure-stand-in-{index}.ts"
+            unit = unit_for(browser_component)
+            unit["write_paths"].append(module)
+            unit["resolves_input_ids"].append(input_id)
+            stand_ins.append(
+                {
+                    "stand_in_id": f"VS-{len(stand_ins) + 1}",
+                    "for_input_id": input_id,
+                    "decision_ref": "",
+                    "module": module,
+                    "start_export": f"startClosureStandIn{index}",
+                    "env_key": env["env_key"],
+                }
+            )
+            continue
+        if source == "existing_runtime":
+            resolutions.append(
+                {
+                    "input_id": input_id,
+                    "kind": "existing_runtime",
+                    "provider": {"kind": "symbol", "ref": item.get("provided_by")},
+                    "decision_ref": None,
+                    "reason": "The provider already exists.",
+                }
+            )
+            continue
+        component = component_of(str(item.get("consumer") or "").split("#", 1)[0])
+        root = (roots.get(component) or [""])[0]
+        path = f"{root}/closure-provider-{index}.ts"
+        decision = None
+        if source == "demo_fixture":
+            decision = (item.get("design_decision_refs") or [None])[0]
+        elif source != "new_boundary":
+            demo_inputs.append(input_id)
+            decision = "CD-1"
+        resolutions.append(
+            {
+                "input_id": input_id,
+                "kind": "new_boundary" if source == "new_boundary" else "approved_demo_fixture",
+                "provider": {"kind": "symbol", "ref": f"{path}#closureProvider{index}"},
+                "decision_ref": decision,
+                "reason": "Closure writes the provider.",
+            }
+        )
+        unit = unit_for(component)
+        unit["write_paths"].append(path)
+        unit["resolves_input_ids"].append(input_id)
+
+    decisions: list[dict[str, object]] = []
+    if demo_inputs:
+        decisions.append(
+            {"id": "CD-1", "input_ids": demo_inputs, "statement": "Serve demo data locally.", "scope": "demo_and_verification_only"}
+        )
+    if stand_ins:
+        stand_in_decision = f"CD-{len(decisions) + 1}"
+        decisions.append(
+            {
+                "id": stand_in_decision,
+                "input_ids": [item["for_input_id"] for item in stand_ins],
+                "statement": "Use a local stand-in for the external system during verification only.",
+                "scope": "demo_and_verification_only",
+            }
+        )
+        for item in stand_ins:
+            item["decision_ref"] = stand_in_decision
+
+    probes = []
+    for index, scenario_id in enumerate(str(item) for item in context.get("scenario_ids") or []):
+        proves = [str(item["input_id"]) for item in inputs if scenario_id in (item.get("scenario_ids") or [])]
+        if index == 0:
+            proves += [str(item["input_id"]) for item in inputs if not item.get("scenario_ids")]
+        probes.append(
+            {
+                "probe_id": f"RP-{index + 1}",
+                "scenario_ids": [scenario_id],
+                "service": "api",
+                "method": "GET",
+                "path": "/health",
+                "headers_from_input_ids": [],
+                "expect_status": 200,
+                "expect_json_array_min_items": None,
+                "proves_input_ids": proves,
+            }
+        )
+    return json.dumps(
+        {
+            "resolutions": resolutions,
+            "closure_declared_inputs": [],
+            "demo_decisions": decisions,
+            "closure_units": list(units.values()),
+            "runtime_config_changes": [],
+            "runtime_probes": probes,
+            "verification_stand_ins": stand_ins,
+            "unresolved": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_browser_journey_plan(prompt: str) -> str:
+    """One `goto /` view per runnable scenario citing that scenario's obligations; passes J1-J6."""
+
+    payload = _closure_prompt_payload(prompt)
+    obligations = [item for item in payload.get("obligations") or [] if isinstance(item, dict)]
+    views = []
+    cited: set[str] = set()
+    for index, scenario_id in enumerate(str(item) for item in payload.get("runnable_scenario_ids") or []):
+        refs = [
+            str(item["obligation_id"])
+            for item in obligations
+            if scenario_id in (item.get("scenario_ids") or []) and str(item["obligation_id"]) not in cited
+        ]
+        cited.update(refs)
+        nodes = sorted(
+            {str(item["design_node_id"]) for item in obligations if str(item["obligation_id"]) in refs}
+        ) or list((payload.get("scenario_design_nodes") or {}).get(scenario_id) or [])[:1]
+        views.append(
+            {
+                "key": f"scenario-{index + 1}",
+                "scenario_id": scenario_id,
+                "design_node_ids": nodes,
+                "obligation_refs": refs,
+                "steps": [{"action": "goto", "path": "/"}],
+            }
+        )
+    return json.dumps({"views": views, "not_reachable": [], "observations": []}, ensure_ascii=False)
+
+
+def fake_runtime_closure_review(prompt: str) -> str:
+    contract = _closure_prompt_payload(prompt).get("contract") or {}
+    return json.dumps(
+        {
+            "summary": "Fake closure review passed.",
+            "reviewed_input_ids": [
+                str(item.get("input_id") or "") for item in contract.get("runtime_inputs") or [] if isinstance(item, dict)
+            ],
+            "findings": [],
+        }
+    )
+
+
+def fake_code_validation_task(prompt: str) -> str:
+    payload = json.loads(prompt)
+    contract = payload.get("task_contract") if isinstance(payload, dict) else {}
+    contract = contract if isinstance(contract, dict) else {}
+    return json.dumps(
+        {
+            "task_id": contract.get("task_id", ""),
+            "reviewed_claim_ids": list(contract.get("authority_claim_ids") or []),
+            "reviewed_design_ids": list(contract.get("required_reviewed_design_ids") or []),
+            "reviewed_boundary_contract_ids": list(
+                contract.get("required_reviewed_boundary_contract_ids") or []
+            ),
+            "claim_assessments": [
+                {"claim_id": claim_id, "verdict": "pass", "finding_ids": []}
+                for claim_id in list(contract.get("authority_claim_ids") or [])
+            ],
+            "ok": True,
+            "summary": "Fake Scenario + Boundary task passed.",
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_ui_polish_plan(prompt: str) -> str:
+    """One presentation-only unit over the first eligible UI path."""
+
+    payload = _closure_prompt_payload(prompt)
+    context = payload.get("planner_context") if isinstance(payload.get("planner_context"), dict) else {}
+    candidates = [str(item) for item in context.get("candidate_paths") or [] if str(item)]
+    design_ids = [str(item) for item in context.get("design_node_ids") or [] if str(item)]
+    tokens = [str(item) for item in context.get("profile_token_keys") or [] if str(item)]
+    refs = [*(design_ids[:1]), *(tokens[:1])]
+    return json.dumps(
+        {
+            "authority": {
+                "visual_profile_ref": context.get("visual_profile_ref") or {},
+                "design_node_ids": design_ids,
+            },
+            "polish_units": [
+                {
+                    "key": "app-shell-polish",
+                    "objective": "Improve visual hierarchy, spacing and shell consistency without changing behavior.",
+                    "write_paths": candidates[:1],
+                    "new_paths": [],
+                    "depends_on": [],
+                    "authority_refs": refs,
+                }
+            ],
+            "out_of_scope": ["Behavior, data flow, copy and accessibility semantics remain unchanged."],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_ui_polish_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    contract = payload.get("contract") if isinstance(payload.get("contract"), dict) else {}
+    unit_ids = [str(item.get("unit_id")) for item in contract.get("polish_units") or [] if isinstance(item, dict)]
+    return json.dumps(
+        {
+            "summary": "Fake UI Polish contract stays presentation-only and follows the approved authority.",
+            "reviewed_unit_ids": unit_ids,
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_browser_qa_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    scenario = payload.get("scenario") if isinstance(payload.get("scenario"), dict) else {}
+    obligations = [item for item in scenario.get("obligations") or [] if isinstance(item, dict)]
+    evidence = payload.get("review_context") if isinstance(payload.get("review_context"), dict) else {}
+    refs = [
+        str(item.get("evidence_ref") or "")
+        for item in evidence.get("evidence") or []
+        if isinstance(item, dict) and str(item.get("evidence_ref") or "")
+    ]
+    return json.dumps(
+        {
+            "summary": "Fake Browser QA scenario review passed.",
+            "reviewed_obligation_ids": [str(item.get("obligation_id") or "") for item in obligations],
+            "verdicts": [
+                {
+                    "obligation_id": str(item.get("obligation_id") or ""),
+                    "verdict": "satisfied",
+                    "evidence_refs": refs[:1],
+                }
+                for item in obligations
+            ],
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_browser_journey_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    scenario = payload.get("scenario") if isinstance(payload.get("scenario"), dict) else {}
+    views = [item for item in scenario.get("views") or [] if isinstance(item, dict)]
+    not_reachable = [item for item in scenario.get("not_reachable") or [] if isinstance(item, dict)]
+    context = payload.get("review_context") if isinstance(payload.get("review_context"), dict) else {}
+    evidence = [item for item in context.get("evidence") or [] if isinstance(item, dict)]
+    return json.dumps(
+        {
+            "summary": "Fake browser journey execution review passed.",
+            "reviewed_view_ids": [str(item.get("view_id") or "") for item in views],
+            "reviewed_not_reachable_obligation_ids": [
+                str(item.get("obligation_id") or "") for item in not_reachable
+            ],
+            "view_evidence": [
+                {
+                    "view_id": str(view.get("view_id") or ""),
+                    "evidence_refs": [
+                        str(item.get("evidence_ref") or "")
+                        for item in evidence
+                        if str(item.get("view_id") or "") == str(view.get("view_id") or "")
+                        and str(item.get("evidence_ref") or "")
+                    ][:1],
+                }
+                for view in views
+            ],
+            "obligation_verdicts": fake_journey_obligation_verdicts(views, evidence),
+            "not_reachable_verdicts": [
+                {"obligation_id": str(item.get("obligation_id") or ""), "verdict": "justified"}
+                for item in not_reachable
+            ],
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_journey_obligation_verdicts(views: list[dict], evidence: list[dict]) -> list[dict[str, object]]:
+    """One `satisfied` verdict per obligation the views cite, on the first capture of a view that cites it."""
+
+    first_ref: dict[str, str] = {}
+    for item in evidence:
+        first_ref.setdefault(str(item.get("view_id") or ""), str(item.get("evidence_ref") or ""))
+    cited: dict[str, str] = {}
+    for view in views:
+        for obligation_id in view.get("obligation_refs") or []:
+            cited.setdefault(str(obligation_id), first_ref.get(str(view.get("view_id") or ""), ""))
+    return [
+        {"obligation_id": obligation_id, "verdict": "satisfied", "evidence_refs": [ref]}
+        for obligation_id, ref in sorted(cited.items())
+    ]
 
 
 def fake_requirement_source_action(prompt: str) -> str:
@@ -395,107 +754,33 @@ Cho phép Agency Operator xóa một cultural heritage object đã chọn trong 
 """.strip()
 
 
-def fake_architecture_recommendation() -> str:
-    """Khuyến nghị kiến trúc giả lập cho Designer.analysis."""
-
-    return (
-        "Use a layered architecture with a boundary/controller, domain service, "
-        "and repository. This separates user interaction, business rules, and "
-        "persistence concerns while keeping the use case small enough for direct "
-        "traceability."
-    )
-
-
-def fake_design_model() -> str:
-    """Design PlantUML ổn định cho Designer.act trong fake mode."""
-
-    return """## Class Diagram
-@startuml
-class DeleteCulturalHeritageBoundary <<api>> {
-  +requestDeletion(heritageId : String) : void
-  +showConfirmation() : void
-  +showResult(message : String) : void
-}
-
-class DeleteCulturalHeritageService <<api>> {
-  +validateDeletion(heritageId : String) : boolean
-  +deleteHeritage(heritageId : String) : void
-  +cancelDeletion() : void
-}
-
-class CulturalHeritageRepository <<database>> {
-  +findById(heritageId : String) : CulturalHeritage
-  +delete(heritageId : String) : void
-}
-
-class CulturalHeritage <<contracts>> {
-  - id : String
-  - name : String
-}
-
-DeleteCulturalHeritageBoundary --> DeleteCulturalHeritageService
-DeleteCulturalHeritageService --> CulturalHeritageRepository
-CulturalHeritageRepository --> CulturalHeritage
-@enduml
-
-## Sequence Diagrams
-### Sequence Diagram for Use Case:
-@startuml
-actor "Agency Operator" as AO
-participant DeleteCulturalHeritageBoundary as Boundary
-participant DeleteCulturalHeritageService as Service
-database CulturalHeritageRepository as Repository
-
-AO -> Boundary: requestDeletion(heritageId)
-Boundary -> Boundary: showConfirmation()
-AO -> Boundary: confirm deletion
-Boundary -> Service: validateDeletion(heritageId)
-Service -> Repository: findById(heritageId)
-Repository --> Service: CulturalHeritage
-Service -> Repository: delete(heritageId)
-Repository --> Service: deletion saved
-Service --> Boundary: success
-Boundary --> AO: showResult(success message)
-@enduml""".strip()
-
-
-def fake_traceability_class(prompt: str) -> str:
-    """Trace class giả lập theo requirement JSON trong prompt."""
-
-    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="Class diagram:")
-    trace = []
-    for requirement in requirements:
-        content = str(requirement.get("content", ""))
-        trace.append(
-            {
-                "requirement": requirement.get("id"),
-                "content": content,
-                "links": _fake_class_links(content),
-            }
-        )
-    return json.dumps(trace, ensure_ascii=False, indent=2)
-
-
-def fake_traceability_sequence(prompt: str) -> str:
-    """Trace sequence giả lập theo requirement JSON trong prompt."""
-
-    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="sequence diagram:")
-    trace = []
-    for requirement in requirements:
-        content = str(requirement.get("content", ""))
-        trace.append(
-            {
-                "requirement": requirement.get("id"),
-                "content": content,
-                "links": _fake_sequence_links(content),
-            }
-        )
-    return json.dumps(trace, ensure_ascii=False, indent=2)
-
-
-def fake_implementation_plan_review() -> str:
+def fake_implementation_plan_review(prompt: str = "") -> str:
     """LLM review giả lập cho Phase 3 implementation plan."""
 
+    if '"findings": [' in prompt:
+        plan = _json_object_after_marker(prompt, "Structured implementation plan JSON:\n")
+        reviewed_design_ids = sorted(
+            {
+                str(design_id)
+                for unit in plan.get("work_units", [])
+                if isinstance(unit, dict)
+                for field in ("design_node_ids", "design_edge_ids")
+                for design_id in unit.get(field, [])
+                if str(design_id).strip()
+            }
+        )
+        return json.dumps(
+            {
+                "summary": (
+                    "Implementation plan covers the approved requirement/design graph, "
+                    "keeps Phase 3 read-only, and gives Phase 4 enough code/test targets."
+                ),
+                "reviewed_design_ids": reviewed_design_ids,
+                "findings": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
     return json.dumps(
         {
             "ok": True,
@@ -509,62 +794,6 @@ def fake_implementation_plan_review() -> str:
             "test_issues": [],
             "scope_issues": [],
             "developer_feedback": "",
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def fake_design_semantic_review(prompt: str = "") -> str:
-    """Semantic design review fixture for offline Phase 2 tests."""
-
-    requirement_view = _json_object_after_marker(prompt, "Canonical Requirement review packet:\n")
-    design_view = _json_object_after_marker(prompt, "Canonical Vertical Design Graph semantic view:\n")
-    claims = requirement_view.get("claims") if isinstance(requirement_view.get("claims"), list) else []
-    nodes = design_view.get("nodes") if isinstance(design_view.get("nodes"), list) else []
-    assessments = []
-    for raw_claim in claims:
-        if not isinstance(raw_claim, dict):
-            continue
-        scenario_id = str(raw_claim.get("scenario_id") or "")
-        surface = str(raw_claim.get("surface") or "")
-        requirement_ids = {
-            str(item) for item in raw_claim.get("requirement_ids", []) if str(item)
-        }
-        candidates = [
-            item
-            for item in nodes
-            if isinstance(item, dict)
-            and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
-            and (not surface or str(item.get("surface") or "") == surface)
-            and (
-                not requirement_ids
-                or requirement_ids.intersection(str(ref) for ref in item.get("requirement_refs", []))
-            )
-        ]
-        if not candidates:
-            candidates = [
-                item
-                for item in nodes
-                if isinstance(item, dict)
-                and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
-            ]
-        design_ref = str(candidates[0].get("id") or "") if candidates else ""
-        assessments.append(
-            {
-                "claim_id": str(raw_claim.get("claim_id") or ""),
-                "status": "satisfied",
-                "design_refs": [design_ref] if design_ref else [],
-                "reason": "Fake Design evidence satisfies the claim.",
-            }
-        )
-
-    return json.dumps(
-        {
-            "ok": True,
-            "summary": "The fake design is behaviorally consistent with the approved requirement.",
-            "assessments": assessments,
-            "findings": [],
         },
         ensure_ascii=False,
         indent=2,
@@ -621,22 +850,76 @@ def fake_design_semantic_coherence_review() -> str:
     )
 
 
-def fake_design_semantic_adjudication() -> str:
+def fake_design_semantic_adjudication(prompt: str) -> str:
+    findings = _json_value_after_marker(prompt, "Existing findings:")
+    evidence = _json_value_after_marker(prompt, "Exact Design evidence:")
+    nodes = {
+        str(item.get("id") or ""): item
+        for item in (evidence.get("nodes", []) if isinstance(evidence, dict) else [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    edges = {
+        str(item.get("id") or ""): item
+        for item in (evidence.get("edges", []) if isinstance(evidence, dict) else [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    routes = []
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict) or str(finding.get("severity") or "") != "blocking":
+            continue
+        diagram_ids = [str(item) for item in finding.get("diagram_ids", []) if str(item)]
+        node = next((nodes.get(ref) for ref in diagram_ids if nodes.get(ref)), None)
+        if node is None:
+            edge = next((edges.get(ref) for ref in diagram_ids if edges.get(ref)), None)
+            node = nodes.get(str((edge or {}).get("from") or ""))
+        scenario_id = str((node or {}).get("scenario_id") or "")
+        component_id = str((node or {}).get("component_id") or "")
+        target_id = f"{scenario_id}@{component_id}" if scenario_id and component_id else ""
+        routes.append(
+            {
+                "finding_id": str(finding.get("id") or ""),
+                "remediation_mode": "local_patch" if target_id else "inconclusive",
+                "reason": "Fake adjudication selected the existing owning partition.",
+                "repair_steps": (
+                    [
+                        {
+                            "target_id": target_id,
+                            "diagram_ids": [str(node.get("id") or "")],
+                            "expected_change": str(finding.get("expected_change") or "Repair the existing node."),
+                            "depends_on": [],
+                        }
+                    ]
+                    if target_id
+                    else []
+                ),
+            }
+        )
     return json.dumps(
-        {"ok": True, "summary": "Fake conflict resolved.", "drop_finding_ids": [], "findings": []},
+        {
+            "ok": True,
+            "summary": "Fake conflict resolved.",
+            "drop_finding_ids": [],
+            "remediation_modes": routes,
+            "findings": [],
+        },
         ensure_ascii=False,
         indent=2,
     )
 
 
-def _json_object_after_marker(prompt: str, marker: str) -> dict[str, object]:
+def _json_value_after_marker(prompt: str, marker: str) -> object:
     if marker not in prompt:
-        return {}
+        return None
     text = prompt.split(marker, 1)[1].lstrip()
     try:
         value, _ = json.JSONDecoder().raw_decode(text)
     except json.JSONDecodeError:
-        return {}
+        return None
+    return value
+
+
+def _json_object_after_marker(prompt: str, marker: str) -> dict[str, object]:
+    value = _json_value_after_marker(prompt, marker)
     return value if isinstance(value, dict) else {}
 
 
@@ -644,7 +927,6 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
     """Developer.plan giả lập để test Smart Developer không gọi API thật."""
 
     typescript = '"prompt_directive_id": "typescript_prompt_v1"' in prompt
-    stage_only = '"policy_version": "verification_stage_policy_v1"' in prompt
     service_path = (
         "apps/api/src/DeleteCulturalHeritageService.ts"
         if typescript
@@ -713,19 +995,6 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
                     {
                         "scope": "unit_or_service",
                         "intent": "Validate delete success, cancel, connection interruption, and duplicate submission prevention.",
-                        "stage_id": "unit",
-                    },
-                    {
-                        "scope": "regression",
-                        "intent": "Run profile-owned static verification after Phase 4 code changes.",
-                        "stage_id": "typecheck",
-                    },
-                ]
-                if stage_only
-                else [
-                    {
-                        "scope": "unit_or_service",
-                        "intent": "Validate delete success, cancel, connection interruption, and duplicate submission prevention.",
                         "command": "powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
                     },
                     {
@@ -755,7 +1024,7 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
     units = _fake_json_prompt_value(
         prompt=prompt,
         start="Harness-owned work units:",
-        end="Vertical Design slice:",
+        end="Prior scenario plan context",
     )
     policy = _fake_json_prompt_value(
         prompt=prompt,
@@ -818,6 +1087,9 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
         test_root = str(component.get("source_root") or "apps/api/src").rstrip("/")
         test_suffix = str(component.get("test_suffix") or ".test.ts")
         test_path = f"{test_root}/DeleteCulturalHeritageFlow{test_suffix}"
+        obligation_ids = [
+            str(item.get("id") or "") for item in unit.get("ui_obligations", []) if isinstance(item, dict)
+        ]
         update: dict[str, object] = {
             "unit_id": unit_id,
             "title": str(unit.get("title") or f"Implement {component_id} change"),
@@ -829,6 +1101,7 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
                     "intent": f"Verify the approved behavior for {unit_id}.",
                     "acceptance_refs": acceptance_refs,
                     "target_paths": [test_path],
+                    **({"obligation_refs": obligation_ids} if obligation_ids else {}),
                 }
             ],
             "repo_evidence_refs": list(unit.get("repo_evidence_refs", [])),
@@ -840,11 +1113,26 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
                 "targets": [],
             }
         updates.append(update)
+    scenario_match = re.search(
+        r"This call plans exactly scenario `([^`]+)`", prompt
+    )
     return json.dumps(
         {
+            **({"scenario_id": scenario_match.group(1)} if scenario_match else {}),
             "summary": "Fake component-aware plan enriched every Harness-owned work unit.",
             "repo_evidence": ["Fake mode uses the frozen planning policy and approved graph bindings."],
             "work_unit_updates": updates,
+            **(
+                {
+                    "runtime_config_impact": {
+                        "status": "not_required",
+                        "reason": "Fake mode plans no environment-specific configuration.",
+                        "changes": [],
+                    }
+                }
+                if "Runtime configuration rules:" in prompt
+                else {}
+            ),
             "implementation_signature_contract": _fake_typescript_implementation_signature_contract(
                 prompt,
                 unit_updates=updates,
@@ -874,7 +1162,10 @@ def _fake_typescript_implementation_signature_contract(
             end="Legacy Sequence graph (signature contract only):",
         )
     component_symbols = _fake_component_symbols(prompt, unit_updates=unit_updates)
-    component_aware = "Component-aware Implementation Plan V4" in prompt
+    component_aware = (
+        "Component-aware Implementation Plan V4" in prompt
+        or "Component-aware Implementation Plan V5" in prompt
+    )
     if component_aware:
         targets = _fake_json_prompt_value(
             prompt=prompt,
@@ -1068,225 +1359,6 @@ def _fake_typescript_type(value: object) -> str:
     return replacements.get(text, text)
 
 
-def fake_developer_act(prompt: str = "") -> str:
-    """Sinh fake output từ chính work packet; legacy không prompt giữ fixture cũ."""
-
-    packet = _fake_json_after_marker(prompt, "DeveloperWorkPacket:")
-    if packet and str(packet.get("schema_version") or "").startswith("developer_work_packet_profiled_"):
-        from ..agents.developer.fake_generation import fake_developer_files
-
-        return json.dumps(
-            {
-                "summary": "Fake Developer.act generated profile-aware changes.",
-                "files": fake_developer_files(packet),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    return _fake_legacy_developer_act()
-
-
-def _fake_legacy_developer_act() -> str:
-    """Developer.act giả lập để test Phase 4 không gọi API thật."""
-
-    return json.dumps(
-        {
-            "summary": "Fake Developer.act generated delete heritage code changes from the approved work packet.",
-            "files": [
-                {
-                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
-                    "operation": "create_or_update",
-                    "content": """package com.sdlc.etour.heritage;
-
-import java.util.HashSet;
-import java.util.Objects;
-import java.util.Set;
-
-public final class DeleteCulturalHeritageService {
-    private final Set<String> deletedHeritageIds = new HashSet<>();
-    private boolean operationInProgress;
-
-    public boolean validateDeletion(String heritageId) {
-        return heritageId != null && !heritageId.isBlank() && !operationInProgress;
-    }
-
-    public boolean deleteHeritage(String heritageId) {
-        if (!validateDeletion(heritageId)) {
-            return false;
-        }
-        operationInProgress = true;
-        try {
-            deletedHeritageIds.add(Objects.requireNonNull(heritageId));
-            return true;
-        } finally {
-            operationInProgress = false;
-        }
-    }
-
-    public void cancelDeletion() {
-        operationInProgress = false;
-    }
-
-    public boolean isDeleted(String heritageId) {
-        return deletedHeritageIds.contains(heritageId);
-    }
-}
-""",
-                    "reason": "Implements the approved delete, validate, cancel and duplicate-submit guard behavior.",
-                    "covered_design_elements": [
-                        "class:DeleteCulturalHeritageService",
-                        "method:DeleteCulturalHeritageService.deleteHeritage",
-                    ],
-                },
-                {
-                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageBoundary.java",
-                    "operation": "create_or_update",
-                    "content": """package com.sdlc.etour.heritage;
-
-public final class DeleteCulturalHeritageBoundary {
-    private final DeleteCulturalHeritageService service;
-    private boolean confirmationShown;
-    private String lastResult = "";
-
-    public DeleteCulturalHeritageBoundary(DeleteCulturalHeritageService service) {
-        this.service = service;
-    }
-
-    public boolean requestDeletion(String heritageId) {
-        showConfirmation();
-        boolean success = service.deleteHeritage(heritageId);
-        showResult(success ? "success" : "failed");
-        return success;
-    }
-
-    public void showConfirmation() {
-        confirmationShown = true;
-    }
-
-    public boolean confirmdeletion(String heritageId) {
-        return requestDeletion(heritageId);
-    }
-
-    public void showResult(String result) {
-        lastResult = result;
-    }
-
-    public boolean wasConfirmationShown() {
-        return confirmationShown;
-    }
-
-    public String lastResult() {
-        return lastResult;
-    }
-}
-""",
-                    "reason": "Implements the approved boundary interaction from the sequence diagram.",
-                    "covered_design_elements": [
-                        "class:DeleteCulturalHeritageBoundary",
-                        "method:DeleteCulturalHeritageBoundary.requestDeletion",
-                        "method:DeleteCulturalHeritageBoundary.showConfirmation",
-                        "method:DeleteCulturalHeritageBoundary.showResult",
-                    ],
-                },
-                {
-                    "path": "src/main/java/com/sdlc/etour/heritage/CulturalHeritageRepository.java",
-                    "operation": "create_or_update",
-                    "content": """package com.sdlc.etour.heritage;
-
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Optional;
-
-public final class CulturalHeritageRepository {
-    private final Map<String, CulturalHeritage> records = new HashMap<>();
-
-    public Optional<CulturalHeritage> findById(String heritageId) {
-        return Optional.ofNullable(records.get(heritageId));
-    }
-
-    public void save(String heritageId, CulturalHeritage heritage) {
-        records.put(heritageId, heritage);
-    }
-
-    public boolean delete(String heritageId) {
-        return records.remove(heritageId) != null;
-    }
-}
-""",
-                    "reason": "Implements repository operations referenced by the approved design.",
-                    "covered_design_elements": [
-                        "class:CulturalHeritageRepository",
-                        "method:CulturalHeritageRepository.findById",
-                        "method:CulturalHeritageRepository.delete",
-                    ],
-                },
-                {
-                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
-                    "operation": "create_or_update",
-                    "content": """package com.sdlc.etour.heritage;
-
-public final class DeleteCulturalHeritageFlowTest {
-    public static void main(String[] args) {
-        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
-        if (!service.deleteHeritage("heritage-1")) {
-            throw new IllegalStateException("Expected delete operation to succeed");
-        }
-        if (!service.isDeleted("heritage-1")) {
-            throw new IllegalStateException("Expected heritage id to be marked deleted");
-        }
-    }
-}
-""",
-                    "reason": "Captures the approved success path for later test runner integration.",
-                    "covered_design_elements": ["sequence:delete_cultural_heritage_main:1"],
-                },
-                {
-                    "path": "src/test/java/com/sdlc/etour/heritage/CulturalHeritageRepositoryTest.java",
-                    "operation": "create_or_update",
-                    "content": """package com.sdlc.etour.heritage;
-
-public final class CulturalHeritageRepositoryTest {
-    public static void main(String[] args) {
-        CulturalHeritageRepository repository = new CulturalHeritageRepository();
-        repository.save("heritage-1", new CulturalHeritage());
-        if (repository.findById("heritage-1").isEmpty()) {
-            throw new IllegalStateException("Expected saved heritage to be found");
-        }
-        if (!repository.delete("heritage-1")) {
-            throw new IllegalStateException("Expected repository delete to succeed");
-        }
-    }
-}
-""",
-                    "reason": "Covers the repository file required by the approved implementation plan.",
-                    "covered_design_elements": [
-                        "class:CulturalHeritageRepository",
-                        "method:CulturalHeritageRepository.findById",
-                        "method:CulturalHeritageRepository.delete",
-                    ],
-                },
-            ],
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def fake_developer_repair(prompt: str) -> str:
-    """Return a valid repair batch that differs from the current fake act output."""
-
-    payload = json.loads(fake_developer_act(prompt))
-    marker = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
-    for item in payload["files"]:
-        path = str(item.get("path") or "").casefold()
-        comment = "--" if path.endswith(".sql") else "//"
-        item["content"] = (
-            f"{str(item['content']).rstrip()}\n\n{comment} Fake repair marker: {marker}\n"
-        )
-    payload["summary"] = "Fake Developer.repair generated an effective code change from current feedback."
-    return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
 def fake_code_trace_review(prompt: str = "") -> str:
     """LLM review giả lập cho code trace hybrid rule + LLM."""
 
@@ -1327,133 +1399,6 @@ def fake_code_trace_review(prompt: str = "") -> str:
     )
 
 
-def fake_qa_generated_tests(prompt: str = "") -> str:
-    """Fake QA-generated tests so Phase 4 can execute the QA slice deterministically."""
-
-    requirement_ids: list[str] = []
-    qa_policy = _fake_json_prompt_section(
-        prompt,
-        start="QA Test Policy:",
-        end="QA Generation Packet:",
-    )
-    packet: dict[str, object] = {}
-    marker = "QA Generation Packet:"
-    if marker in prompt:
-        try:
-            packet = json.loads(prompt.split(marker, 1)[1].strip())
-        except json.JSONDecodeError:
-            packet = {}
-        canonical = packet.get("canonical_requirements") if isinstance(packet, dict) else None
-        if isinstance(canonical, list):
-            requirement_ids = [
-                str(item.get("id") or "").strip()
-                for item in canonical
-                if isinstance(item, dict) and str(item.get("id") or "").strip()
-            ]
-
-    if qa_policy.get("language_profile_id") == "typescript_v1":
-        components = qa_policy.get("components")
-        code_under_test = packet.get("code_under_test") if isinstance(packet, dict) else {}
-        code_files = code_under_test.get("files") if isinstance(code_under_test, dict) else []
-        production_paths = (
-            [
-                str(item.get("path") or "").replace("\\", "/")
-                for item in code_files
-                if isinstance(item, dict)
-            ]
-            if isinstance(code_files, list)
-            else []
-        )
-        component_items = (
-            [item for item in components if isinstance(item, dict)]
-            if isinstance(components, list)
-            else []
-        )
-        component = next(
-            (
-                item
-                for item in component_items
-                if any(
-                    path.startswith(f"{str(item.get('test_root') or '').rstrip('/')}/")
-                    for path in production_paths
-                )
-            ),
-            component_items[0] if component_items else {},
-        )
-        test_root = str(component.get("test_root") or "apps/api/src").rstrip("/")
-        test_suffix = str(component.get("test_suffix") or ".test.ts")
-        test_path = f"{test_root}/GeneratedQaAcceptance{test_suffix}"
-        return json.dumps(
-            {
-                "summary": "Fake QA generated a profile-owned Vitest acceptance test.",
-                "test_files": [
-                    {
-                        "path": test_path,
-                        "content": (
-                            'import { describe, expect, it } from "vitest";\n\n'
-                            'describe("generated QA acceptance", () => {\n'
-                            '  it("executes the approved fake scenario", () => {\n'
-                            '    expect(true).toBe(true);\n'
-                            '  });\n'
-                            '});\n'
-                        ),
-                        "scenarios": ["Profiled fake acceptance scenario"],
-                    }
-                ],
-                "scenarios": [
-                    {
-                        "name": "Profiled fake acceptance scenario",
-                        "expected_result": "The generated Vitest scenario passes.",
-                        "test_file": test_path,
-                        "risk": "",
-                        "requirement_ids": requirement_ids,
-                    }
-                ],
-                "risks": [],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    return json.dumps(
-        {
-            "summary": "Fake QA generated acceptance tests for the implemented delete heritage flow.",
-            "test_files": [
-                {
-                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java",
-                    "content": """package com.sdlc.etour.heritage;
-
-public final class DeleteCulturalHeritageQaAcceptanceTest {
-    public static void main(String[] args) {
-        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
-        if (!service.deleteHeritage(\"qa-heritage-1\")) {
-            throw new IllegalStateException(\"Expected delete operation to succeed\");
-        }
-        if (!service.isDeleted(\"qa-heritage-1\")) {
-            throw new IllegalStateException(\"Expected deleted heritage to be observable\");
-        }
-    }
-}
-""",
-                    "scenarios": ["Delete cultural heritage success path"],
-                }
-            ],
-            "scenarios": [
-                {
-                    "name": "Delete cultural heritage success path",
-                    "expected_result": "Selected heritage is marked deleted after confirmation.",
-                    "test_file": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java",
-                    "risk": "",
-                    "requirement_ids": requirement_ids,
-                }
-            ],
-            "risks": [],
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
 def _fake_json_after_marker(prompt: str, marker: str) -> dict[str, object]:
     """Đọc JSON object đầu tiên sau marker mà không phụ thuộc phần prompt theo sau."""
 
@@ -1465,83 +1410,4 @@ def _fake_json_after_marker(prompt: str, marker: str) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def fake_qa_tester_review() -> str:
-    """QA review giả lập để Phase 4 có acceptance gate ổn định trong test."""
-
-    return json.dumps(
-        {
-            "status": "pass",
-            "summary": "Fake QA accepts the implemented use case after verification and code trace have passed.",
-            "scenarios": [
-                {
-                    "name": "Delete cultural heritage happy path",
-                    "result": "pass",
-                    "evidence": "Requirement, design, test report, and code trace artifacts are present.",
-                    "risk": "",
-                }
-            ],
-            "evidence": ["Verification Runner passed before QA acceptance review."],
-            "risks": [],
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _extract_requirements_from_trace_prompt(prompt: str, *, next_marker: str) -> list[dict[str, object]]:
-    marker = "Requirements:"
-    start = prompt.find(marker)
-    if start < 0:
-        return []
-    start += len(marker)
-    end = prompt.find(next_marker, start)
-    if end < 0:
-        end = len(prompt)
-    raw = prompt[start:end].strip()
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return parsed if isinstance(parsed, list) else []
-
-
-def _fake_class_links(content: str) -> list[dict[str, str]]:
-    lowered = content.lower()
-    if any(term in lowered for term in ("cancel", "hủy", "huy")):
-        target = "DeleteCulturalHeritageService.cancelDeletion"
-    elif any(term in lowered for term in ("confirm", "xác nhận", "xac nhan", "confirmation")):
-        target = "DeleteCulturalHeritageBoundary.showConfirmation"
-    elif any(term in lowered for term in ("notify", "thông báo", "thong bao", "success")):
-        target = "DeleteCulturalHeritageBoundary.showResult"
-    elif any(term in lowered for term in ("delete", "xóa", "xoa", "elimination")):
-        target = "DeleteCulturalHeritageService.deleteHeritage"
-    elif any(term in lowered for term in ("logged", "đăng nhập", "dang nhap", "selected", "chọn", "chon")):
-        target = "DeleteCulturalHeritageBoundary.requestDeletion"
-    elif any(term in lowered for term in ("connection", "kết nối", "ket noi", "interruption")):
-        target = "DeleteCulturalHeritageService.validateDeletion"
-    else:
-        target = "DeleteCulturalHeritageService.validateDeletion"
-    return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]
-
-
-def _fake_sequence_links(content: str) -> list[dict[str, str]]:
-    lowered = content.lower()
-    if any(term in lowered for term in ("cancel", "hủy", "huy")):
-        target = "confirm deletion"
-    elif any(term in lowered for term in ("confirm", "xác nhận", "xac nhan", "confirmation")):
-        target = "showConfirmation()"
-    elif any(term in lowered for term in ("notify", "thông báo", "thong bao", "success")):
-        target = "showResult(success message)"
-    elif any(term in lowered for term in ("delete", "xóa", "xoa", "elimination")):
-        target = "delete(heritageId)"
-    elif any(term in lowered for term in ("logged", "đăng nhập", "dang nhap", "selected", "chọn", "chon")):
-        target = "requestDeletion(heritageId)"
-    elif any(term in lowered for term in ("connection", "kết nối", "ket noi", "interruption")):
-        target = "validateDeletion(heritageId)"
-    else:
-        target = "validateDeletion(heritageId)"
-    return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]
-
 

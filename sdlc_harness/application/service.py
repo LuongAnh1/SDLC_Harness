@@ -18,9 +18,10 @@ from ..profiles import (
 )
 from ..sources.fixtures import source_ref_for
 from ..sources.jira import jira_source_ref_for
-from ..storage.runtime import RuntimeStore
+from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..workspaces.manager import RunWorkspaceManager
 from ..workflows.approval import CheckpointApprovalWorkflow
+from ..workflows.graph import PHASE_FOUR, PHASE_ONE, PHASE_THREE, PHASE_TWO, node_for
 from ..workflows.phase1 import PhaseOneWorkflow
 from ..workflows.phase2 import PhaseTwoWorkflow
 from ..workflows.phase3 import PhaseThreeWorkflow
@@ -98,6 +99,10 @@ class ApplicationService:
             "answer-clarification",
             "adopt-run-workspace",
             "cleanup-run-workspace",
+            "rewind-run",
+            "adjust-budget",
+            "run-until-checkpoint",
+            "set-step-review",
         }:
             run_id = self._required_text(command, "run_id")
             with store.run_lock(run_id):
@@ -238,47 +243,8 @@ class ApplicationService:
             run_id = self._required_text(command, "run_id")
             phase_one = PhaseOneWorkflow(settings)
             state = phase_one.store.read_state(run_id)
-            if str(state.get("status") or "") in {
-                "requirement_drafting",
-                "requirement_paused",
-            }:
-                return phase_one.continue_requirement_run(run_id=run_id)
-            if str(state.get("status") or "") == "repo_discovery_paused":
-                return PhaseTwoWorkflow(settings).continue_repo_discovery(run_id=run_id)
-            if str(state.get("status") or "") == "design_paused":
-                review: dict[str, object] = {}
-                for argument_name, review_key in (
-                    ("step_review_call_id", "call_id"),
-                    ("step_review_decision", "decision"),
-                    ("step_review_note", "note"),
-                ):
-                    value = self._optional_text(command, argument_name)
-                    if value is not None:
-                        review[review_key] = value
-                return PhaseTwoWorkflow(
-                    settings,
-                    designer_step_review={"enabled": True, **review} if review else None,
-                ).continue_design(run_id=run_id)
-            if str(state.get("status") or "") == "implementation_plan_step_review_required":
-                review: dict[str, object] = {"enabled": True}
-                for argument_name, review_key in (
-                    ("step_review_call_id", "call_id"),
-                    ("step_review_decision", "decision"),
-                    ("step_review_note", "note"),
-                ):
-                    value = self._optional_text(command, argument_name)
-                    if value is not None:
-                        review[review_key] = value
-                return PhaseThreeWorkflow(
-                    settings,
-                    plan_step_review=review,
-                ).continue_implementation_plan_step_review(run_id=run_id)
-            developer_review: dict[str, object] = {}
-            review_all = bool(command.arguments.get("step_review"))
-            if review_all or bool(command.arguments.get("step_review_input")):
-                developer_review["review_input"] = True
-            if review_all or bool(command.arguments.get("step_review_output")):
-                developer_review["review_output"] = True
+            node = node_for(str(state.get("status") or ""))
+            review: dict[str, object] = {}
             for argument_name, review_key in (
                 ("step_review_call_id", "call_id"),
                 ("step_review_decision", "decision"),
@@ -286,12 +252,56 @@ class ApplicationService:
             ):
                 value = self._optional_text(command, argument_name)
                 if value is not None:
-                    developer_review[review_key] = value
+                    review[review_key] = value
+            # Built per call so the classes are looked up at dispatch time.
+            workflows = {
+                PHASE_ONE: PhaseOneWorkflow,
+                PHASE_TWO: PhaseTwoWorkflow,
+                PHASE_THREE: PhaseThreeWorkflow,
+                PHASE_FOUR: PhaseFourWorkflow,
+            }
+            developer_review: dict[str, object] = {}
+            review_all = bool(command.arguments.get("step_review"))
+            if review_all or bool(command.arguments.get("step_review_input")):
+                developer_review["review_input"] = True
+            if review_all or bool(command.arguments.get("step_review_output")):
+                developer_review["review_output"] = True
+            developer_review.update(review)
             if developer_review:
                 developer_review["enabled"] = True
+            if node is not None and node.step_review is not None:
+                pause = node.step_review
+                enabled = {"enabled": True, **review} if pause.always_enabled or review else None
+                step_reviews: dict[str, object] = {pause.argument: enabled}
+                if pause.workflow == PHASE_FOUR:
+                    # Resuming one Phase 4 review can run other Phase 4 agents (a Validator approval can start a
+                    # Developer repair); they keep the per-call review the operator asked for.
+                    step_reviews = {
+                        "developer_step_review": developer_review or None,
+                        "code_validation_step_review": developer_review or None,
+                        "runtime_closure_step_review": developer_review or None,
+                        **step_reviews,
+                    }
+                return getattr(workflows[pause.workflow](settings, **step_reviews), pause.method)(run_id=run_id)
+            if node is not None and node.workflow != PHASE_FOUR and node.continue_routes:
+                if node.kind == "running":
+                    # We hold the run lock, so the command that set this in-progress status is gone.
+                    state.setdefault("recoveries", []).append(
+                        {
+                            "code": "interrupted_resume",
+                            "from_status": node.status,
+                            "handler": node.continue_routes[0].handler,
+                            "recovered_at": utc_now_iso(),
+                        }
+                    )
+                    phase_one.store.write_state(state)
+                workflow = phase_one if node.workflow == PHASE_ONE else workflows[node.workflow](settings)
+                return getattr(workflow, node.continue_routes[0].handler)(run_id=run_id)
             return PhaseFourWorkflow(
                 settings,
                 developer_step_review=developer_review or None,
+                code_validation_step_review=developer_review or None,
+                runtime_closure_step_review=developer_review or None,
             ).continue_until_implementation_checkpoint(
                 run_id=run_id
             )
@@ -310,6 +320,39 @@ class ApplicationService:
         if name == "restart-design":
             return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "run-until-checkpoint":
+            raw_steps = self._optional_text(command, "max_steps")
+            if raw_steps is not None and not raw_steps.strip().isdigit():
+                raise HarnessError("automation_max_steps_invalid", "max_steps must be a whole number of steps.")
+            return PhaseFourWorkflow(settings).run_until_checkpoint(
+                run_id=self._required_text(command, "run_id"),
+                max_steps=int(raw_steps) if raw_steps is not None else None,
+            )
+        if name == "set-step-review":
+            raw_enabled = self._required_text(command, "enabled").strip().lower()
+            if raw_enabled not in {"true", "false"}:
+                raise HarnessError("step_review_enabled_invalid", "enabled must be true or false.")
+            return PhaseFourWorkflow(settings).set_step_review(
+                run_id=self._required_text(command, "run_id"),
+                enabled=raw_enabled == "true",
+                reason=self._required_text(command, "reason"),
+            )
+        if name == "adjust-budget":
+            raw_limit = self._required_text(command, "limit")
+            if not raw_limit.strip().isdigit():
+                raise HarnessError("budget_limit_invalid", "limit must be a whole number of repair rounds.")
+            return PhaseFourWorkflow(settings).adjust_budget(
+                run_id=self._required_text(command, "run_id"),
+                budget_id=self._required_text(command, "budget_id"),
+                limit=int(raw_limit),
+                reason=self._required_text(command, "reason"),
+            )
+        if name == "rewind-run":
+            return PhaseFourWorkflow(settings).rewind_run(
+                run_id=self._required_text(command, "run_id"),
+                node=self._required_text(command, "node"),
+                reason=self._required_text(command, "reason"),
             )
         if name == "revalidate-requirement":
             return PhaseOneWorkflow(settings).revalidate_requirement(

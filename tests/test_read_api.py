@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
+import hashlib
 import json
 import os
 import unittest
@@ -22,6 +23,7 @@ from sdlc_harness.events import EventStore
 from sdlc_harness.interfaces.http import ApiServerConfig, create_server
 from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.storage.runtime import RuntimeStore
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 
 
 class ReadApiFixture(unittest.TestCase):
@@ -54,7 +56,7 @@ class ReadApiFixture(unittest.TestCase):
             "run_id": self.run_id,
             "source_ref": "jira:SDLC-42",
             "requirement_contract_version": "v2",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
             "created_at": "2026-10-18T01:00:00Z",
             "updated_at": "2026-10-18T02:00:00Z",
             "current_phase": "design_review",
@@ -87,6 +89,34 @@ class ReadApiFixture(unittest.TestCase):
         }
         self.store.write_state(self.state)
         self.read_service = ApplicationReadService(root=self.root, runtime_root=self.runtime_root)
+
+    def install_browser_evidence(self) -> tuple[bytes, Path]:
+        content = b"\x89PNG\r\n\x1a\nread-api-evidence"
+        evidence_dir = self.store.run_dir(self.run_id) / "browser_execution" / "baseline" / "v1" / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        image_path = evidence_dir / "V-0__desktop__s00.png"
+        image_path.write_bytes(content)
+        manifest_path = self.store.write_json_artifact(
+            self.run_id,
+            "browser_baseline_evidence_manifest_v1.json",
+            {
+                "schema_version": "browser_evidence_v1",
+                "evidence_dir": "browser_execution/baseline/v1/evidence",
+                "records": [
+                    {
+                        "capture_key": "V-0:desktop:s00",
+                        "view_id": "V-0",
+                        "viewport_id": "desktop",
+                        "step": 0,
+                        "screenshot": {"file": image_path.name, "sha256": hashlib.sha256(content).hexdigest()},
+                    }
+                ],
+            },
+        )
+        state = self.store.read_state(self.run_id)
+        state["latest_artifacts"]["browser_baseline_evidence_manifest"] = str(manifest_path)
+        self.store.write_state(state)
+        return content, manifest_path
 
     def tearDown(self) -> None:
         self.env.stop()
@@ -207,7 +237,7 @@ class ApplicationReadServiceTests(ReadApiFixture):
 
         expected = {
             "classification": "profiled",
-            "snapshot_version": "profile_snapshot_v1",
+            "snapshot_version": "profile_snapshot_v2",
             "project_profile_id": "typescript_fullstack_v1",
             "language_profile_id": "typescript_v1",
         }
@@ -224,6 +254,49 @@ class ApplicationReadServiceTests(ReadApiFixture):
 
         self.assertEqual(result["media_type"], "application/json")
         self.assertEqual(result["content"]["stable_id"], "UC-S2")
+
+    def test_browser_evidence_image_requires_a_manifest_capture_key_and_matching_hash(self) -> None:
+        content, manifest_path = self.install_browser_evidence()
+
+        result = self.read_service.read_browser_evidence_image(
+            run_id=self.run_id,
+            manifest_key="browser_baseline_evidence_manifest",
+            capture_key="V-0:desktop:s00",
+        )
+        self.assertEqual((result["media_type"], result["content"]), ("image/png", content))
+
+        with self.assertRaises(HarnessError) as missing:
+            self.read_service.read_browser_evidence_image(
+                run_id=self.run_id,
+                manifest_key="browser_baseline_evidence_manifest",
+                capture_key="V-0:mobile:s00",
+            )
+        self.assertEqual(missing.exception.error_code, "artifact_not_found")
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["records"][0]["screenshot"]["sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaises(HarnessError) as changed:
+            self.read_service.read_browser_evidence_image(
+                run_id=self.run_id,
+                manifest_key="browser_baseline_evidence_manifest",
+                capture_key="V-0:desktop:s00",
+            )
+        self.assertEqual(changed.exception.error_code, "artifact_corrupted")
+
+    def test_browser_evidence_image_cannot_escape_the_run_directory(self) -> None:
+        _, manifest_path = self.install_browser_evidence()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["evidence_dir"] = "../outside"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaises(HarnessError) as escaped:
+            self.read_service.read_browser_evidence_image(
+                run_id=self.run_id,
+                manifest_key="browser_baseline_evidence_manifest",
+                capture_key="V-0:desktop:s00",
+            )
+        self.assertEqual(escaped.exception.error_code, "artifact_not_found")
 
     def test_read_repo_landscape_artifact(self) -> None:
         landscape_path = self.store.write_json_artifact(
@@ -464,7 +537,26 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(status, 200)
         self.assertEqual(schema["version"], "dashboard_schema_v1")
         self.assertEqual(set(schema["actions"]), set(ACTION_SPECS))
-        self.assertEqual(len(schema["workflow"]["nodes"]), 8)
+        self.assertEqual(len(schema["workflow"]["nodes"]), 12)
+
+    def test_browser_evidence_route_returns_png_bytes_and_requires_auth(self) -> None:
+        content, _ = self.install_browser_evidence()
+        path = (
+            f"/api/v1/runs/{self.run_id}/browser-evidence/"
+            "browser_baseline_evidence_manifest/V-0%3Adesktop%3As00"
+        )
+        request = Request(
+            f"{self.base_url}{path}",
+            headers={"Authorization": f"Bearer {self.api_token}"},
+        )
+        response = urlopen(request, timeout=3)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.headers["Content-Type"].startswith("image/png"))
+        self.assertEqual(response.read(), content)
+
+        status, _, payload = self.request(path)
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error_code"], "unauthorized")
 
     def test_http_status_exposes_profile_ids_without_target_remote_or_branch(self) -> None:
         state = dict(self.state)

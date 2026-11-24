@@ -13,23 +13,168 @@ from ..core.errors import HarnessError
 from .model import ProjectProfile
 from .planning import PlanningPathPolicy
 from .signature import implementation_signature_contract_issues
+from ..core.coerce import dict_items as _dict_items, string_items as _string_items
 
 if TYPE_CHECKING:
     from .snapshot import ProfileSnapshotV1
 
 
-VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v1"
-LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
-PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
-PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VERSION
-COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v4"
-LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
-PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v2"
+VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v2"
+# Pinned per run in state.runtime_closure, never in profile_snapshot (L5.3).
+RUNTIME_CLOSURE_STAGE_POLICY_VERSION = "runtime_closure_stage_policy_v1"
+# Pinned per run in state.browser_stages, never in profile_snapshot (L5.4).
+# v2 (L5.5.6) adds repository_e2e: the target's own Playwright specs, run as CI runs them.
+BROWSER_STAGE_POLICY_VERSION = "browser_stage_policy_v2"
+# Harness-owned stages that execute a catalog stage's reviewed command; the target's
+# protected profile manifest only lists catalog stages, so it stays unchanged.
+_CATALOG_STAGE_ALIASES = {
+    "runtime_probe": "browser_e2e",
+    "browser_capture": "browser_e2e",
+    "repository_e2e": "browser_e2e",
+}
+COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v5"
 UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v3"
-_ACTIVE_STAGE_IDS_BY_PROJECT = {
-    # Chặng A chỉ chạy smoke suite. Catalog full-stack trong ProjectProfile vẫn
-    # bất biến; Chặng B phải phát hành policy/profile version mới để mở rộng.
-    "typescript_fullstack_v1": ("typecheck", "unit"),
+_ACTIVE_STAGE_IDS_BY_POLICY = {
+    VERIFICATION_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": (
+            "database_ready",
+            "migrate_and_seed",
+            "typecheck",
+            "unit",
+            "api_database_integration",
+            "frontend_build",
+            "service_health",
+            "browser_e2e",
+            "cleanup",
+        ),
+    },
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": (
+            "database_ready",
+            "migrate_and_seed",
+            "typecheck",
+            "unit",
+            "api_database_integration",
+            "frontend_build",
+            "service_health",
+            "runtime_probe",
+            "cleanup",
+        ),
+    },
+    BROWSER_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": (
+            "database_ready",
+            "migrate_and_seed",
+            "typecheck",
+            "unit",
+            "api_database_integration",
+            "frontend_build",
+            "service_health",
+            "repository_e2e",
+            "runtime_probe",
+            "browser_capture",
+            "cleanup",
+        ),
+    },
+}
+DEVELOPER_INTENT_STAGE_OWNER = "developer_intent"
+QA_INTENT_STAGE_OWNER = "qa_intent"
+HARNESS_GLOBAL_STAGE_OWNER = "harness_global"
+_STAGE_OWNERS_BY_POLICY = {
+    VERIFICATION_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": {
+            "database_ready": HARNESS_GLOBAL_STAGE_OWNER,
+            "migrate_and_seed": HARNESS_GLOBAL_STAGE_OWNER,
+            "typecheck": DEVELOPER_INTENT_STAGE_OWNER,
+            "unit": DEVELOPER_INTENT_STAGE_OWNER,
+            "api_database_integration": HARNESS_GLOBAL_STAGE_OWNER,
+            "frontend_build": HARNESS_GLOBAL_STAGE_OWNER,
+            "service_health": HARNESS_GLOBAL_STAGE_OWNER,
+            "browser_e2e": QA_INTENT_STAGE_OWNER,
+            "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
+        },
+    },
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": {
+            "database_ready": HARNESS_GLOBAL_STAGE_OWNER,
+            "migrate_and_seed": HARNESS_GLOBAL_STAGE_OWNER,
+            "typecheck": DEVELOPER_INTENT_STAGE_OWNER,
+            "unit": DEVELOPER_INTENT_STAGE_OWNER,
+            "api_database_integration": HARNESS_GLOBAL_STAGE_OWNER,
+            "frontend_build": HARNESS_GLOBAL_STAGE_OWNER,
+            "service_health": HARNESS_GLOBAL_STAGE_OWNER,
+            "runtime_probe": HARNESS_GLOBAL_STAGE_OWNER,
+            "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
+        },
+    },
+    BROWSER_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": {
+            "database_ready": HARNESS_GLOBAL_STAGE_OWNER,
+            "migrate_and_seed": HARNESS_GLOBAL_STAGE_OWNER,
+            "typecheck": DEVELOPER_INTENT_STAGE_OWNER,
+            "unit": DEVELOPER_INTENT_STAGE_OWNER,
+            "api_database_integration": HARNESS_GLOBAL_STAGE_OWNER,
+            "frontend_build": HARNESS_GLOBAL_STAGE_OWNER,
+            "service_health": HARNESS_GLOBAL_STAGE_OWNER,
+            "repository_e2e": HARNESS_GLOBAL_STAGE_OWNER,
+            "runtime_probe": HARNESS_GLOBAL_STAGE_OWNER,
+            "browser_capture": HARNESS_GLOBAL_STAGE_OWNER,
+            "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
+        },
+    },
+}
+_EXPLICIT_OWNERSHIP_POLICIES = {
+    VERIFICATION_STAGE_POLICY_VERSION,
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+    BROWSER_STAGE_POLICY_VERSION,
+}
+# What each active stage can observe; fixed by the profile's protected tsconfig/vitest config.
+_STAGE_CAPABILITIES_BY_PROJECT = {
+    "typescript_fullstack_v1": {
+        "typecheck": "TypeScript compiler over the workspace: proves types, imports and exported "
+        "signatures of .ts/.tsx sources; runs no code and does not read stylesheets.",
+        "unit": "Vitest in a Node environment with no DOM and no browser: runs exported TypeScript "
+        "functions and React rendered to static markup; cannot observe focus movement, keyboard "
+        "events, live-region announcements, CSS or viewport-dependent layout.",
+        "database_ready": "Starts an isolated PostgreSQL Compose project and waits for its healthcheck.",
+        "migrate_and_seed": "Applies migrations to an empty database, seeds twice and checks deterministic data setup.",
+        "api_database_integration": "Runs the target's database smoke/integration contract against the isolated database.",
+        "frontend_build": "Builds the Vite frontend and therefore observes imports, stylesheets and production bundling.",
+        "service_health": "Validates the protected web/API runtime bootstrap before browser execution.",
+        "browser_e2e": "Runs Playwright Chromium and observes DOM interaction, focus, keyboard, CSS and viewport layout.",
+        "repository_e2e": "Runs the target repository's own Playwright specs (every spec except the two the Harness "
+        "renders) exactly as CI does: production build, no demo flag, no stand-in. Catches changes that break the "
+        "repository's existing end-to-end tests.",
+        "runtime_probe": "Boots the target's API and web services through its Playwright webServer and sends the "
+        "approved request-only HTTP probes; proves each service answers with the expected status and, optionally, "
+        "a JSON array of at least N items. Observes no DOM, focus, CSS or layout.",
+        "browser_capture": "Rebuilds the web app with the Harness demo flag, boots the API and web services and "
+        "drives Playwright Chromium through Harness-rendered typed journeys at fixed desktop and mobile viewports; "
+        "after every step it records a screenshot, the ARIA snapshot, the focused element, computed styles and "
+        "layout overflow. Compares no pixels.",
+        "cleanup": "Always tears down the isolated database resources, including after failure or timeout.",
+    },
+}
+
+
+@dataclass(frozen=True)
+class BrowserStageFacts:
+    """Harness-owned browser-stage facts of a project profile; the target manifest stays unchanged."""
+
+    # Build-time flag the Harness sets to "1" only for browser stages.
+    demo_flag_env_key: str
+    # Where the web component's production build lands; scanned for demo literals (R3).
+    build_output_dir: str
+    # The component whose sources make up that browser bundle.
+    browser_component_id: str
+
+
+_BROWSER_STAGE_FACTS_BY_PROJECT = {
+    "typescript_fullstack_v1": BrowserStageFacts(
+        demo_flag_env_key="VITE_SDLC_DEMO_RUNTIME",
+        build_output_dir="apps/web/dist",
+        browser_component_id="web",
+    ),
 }
 _PROHIBITED_EXECUTION_FIELDS = {
     "command",
@@ -48,16 +193,64 @@ class VerificationStagePolicy:
     project_profile_id: str
     policy_version: str
     stage_ids: tuple[str, ...]
+    stage_ownership: tuple[tuple[str, str], ...] = ()
+
+    def owner_for_stage(self, stage_id: str) -> str:
+        explicit = dict(self.stage_ownership)
+        if stage_id in explicit:
+            return explicit[stage_id]
+        return str(
+            _STAGE_OWNERS_BY_POLICY.get(self.policy_version, {})
+            .get(self.project_profile_id, {})
+            .get(stage_id, "")
+        )
 
     def metadata(self) -> dict[str, object]:
-        return {
+        metadata: dict[str, object] = {
             "project_profile_id": self.project_profile_id,
             "policy_version": self.policy_version,
             "stage_ids": list(self.stage_ids),
         }
+        if self.stage_ownership:
+            metadata["stage_ownership"] = {
+                stage_id: self.owner_for_stage(stage_id) for stage_id in self.stage_ids
+            }
+        return metadata
 
-    def prompt_context(self) -> dict[str, object]:
-        return self.metadata()
+    def prompt_context(self, unit_test_environment: object = None) -> dict[str, object]:
+        """`unit_test_environment` is the repository's scanned test environment (Phase 3 facts)."""
+
+        capabilities = dict(_STAGE_CAPABILITIES_BY_PROJECT.get(self.project_profile_id, {}))
+        unit = _repository_unit_capability(unit_test_environment)
+        if unit and "unit" in capabilities:
+            capabilities["unit"] = unit
+        return {
+            **self.metadata(),
+            "stage_capabilities": {
+                stage_id: capabilities[stage_id] for stage_id in self.stage_ids if stage_id in capabilities
+            },
+        }
+
+
+def _repository_unit_capability(environment: object) -> str:
+    """Describe the `unit` stage as the repository's own tests run; empty keeps the profile text."""
+
+    facts = environment if isinstance(environment, dict) else {}
+    if facts.get("dom_capable") is not True:
+        return ""
+    dom = (
+        "it renders React, fires events and queries the DOM, including which element has focus; it "
+        "cannot observe CSS or viewport-dependent layout"
+    )
+    configured = str(facts.get("unit_environment") or "")
+    directive = str(facts.get("dom_test_directive") or "")
+    if not directive:
+        return f"Vitest in a {configured} DOM environment with no browser: {dom}."
+    return (
+        f"Vitest in a {configured or 'node'} environment by default: runs exported TypeScript functions "
+        f"and React rendered to static markup. A test file whose first line is `{directive}` (the "
+        f"repository's own convention) runs in a DOM: {dom}."
+    )
 
 
 def profiled_plan_contract_issues(
@@ -66,24 +259,15 @@ def profiled_plan_contract_issues(
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
     class_graph: dict[str, object] | None = None,
-    allow_legacy: bool = False,
 ) -> list[str]:
     """Kiểm contract profiled plan tại cả Validator và ranh giới Phase 4."""
 
     issues: list[str] = []
     if verification_policy.project_profile_id != planning_policy.project_profile_id:
         issues.append("Verification stages do not belong to the planning project profile.")
-    plan_version = structured_plan.get("version")
-    current = plan_version in {
-        PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    }
-    compatible = plan_version == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    if not current and not (allow_legacy and compatible):
+    if structured_plan.get("version") != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
         issues.append(
-            "Profiled implementation plan version must be "
-            f"`{PROFILED_IMPLEMENTATION_PLAN_VERSION}` or "
-            f"`{COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
+            f"Profiled implementation plan version must be `{COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
         )
     planning_profile = structured_plan.get("planning_profile")
     if not isinstance(planning_profile, dict) or planning_profile != planning_policy.metadata():
@@ -107,35 +291,29 @@ def profiled_plan_contract_issues(
             issues.append("A profiled test intent is missing stage_id.")
         elif stage_id not in allowed_stage_ids:
             issues.append(f"Test intent references an unsupported verification stage: {stage_id}")
-    if plan_version != LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-        issues.extend(
-            implementation_signature_contract_issues(
-                structured_plan.get("implementation_signature_contract"),
-                planning_policy=planning_policy,
-                mappings=_dict_items(structured_plan.get("design_mappings")),
-                class_graph=class_graph,
-                enforce_design_method_arity=(
-                    plan_version != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-                ),
-                reject_placeholder_only=(
-                    plan_version == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-                ),
-                bind_to_mapped_symbol=(
-                    plan_version == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-                ),
+        elif verification_policy.owner_for_stage(stage_id) != DEVELOPER_INTENT_STAGE_OWNER:
+            issues.append(
+                f"Developer test intent cannot claim verification stage owned by "
+                f"{verification_policy.owner_for_stage(stage_id)}: {stage_id}"
             )
+    issues.extend(
+        implementation_signature_contract_issues(
+            structured_plan.get("implementation_signature_contract"),
+            planning_policy=planning_policy,
+            mappings=_dict_items(structured_plan.get("design_mappings")),
+            class_graph=class_graph,
+            enforce_design_method_arity=False,
+            reject_placeholder_only=True,
+            bind_to_mapped_symbol=True,
         )
+    )
     return issues
 
 
 def is_profiled_work_packet_schema(value: object) -> bool:
     """Nhận diện cả packet hiện hành và packet profiled lịch sử."""
 
-    return value in {
-        UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    }
+    return value == UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
 
 
 def profiled_execution_field_paths(value: object, *, path: str = "$") -> list[str]:
@@ -157,13 +335,31 @@ def profiled_execution_field_paths(value: object, *, path: str = "$") -> list[st
 def build_verification_stage_policy(*, project: ProjectProfile) -> VerificationStagePolicy:
     """Tạo policy chỉ chứa stage ID, không chứa dữ liệu có thể thực thi."""
 
-    stage_ids = _ACTIVE_STAGE_IDS_BY_PROJECT.get(project.profile_id)
+    return build_verification_stage_policy_version(
+        project=project,
+        policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+    )
+
+
+def build_verification_stage_policy_version(
+    *,
+    project: ProjectProfile,
+    policy_version: str,
+) -> VerificationStagePolicy:
+    """Build one explicitly pinned verification policy without changing historical runs."""
+
+    policies = _ACTIVE_STAGE_IDS_BY_POLICY.get(policy_version)
+    stage_ids = policies.get(project.profile_id) if policies else None
     if not stage_ids:
         raise HarnessError(
             "verification_stage_policy_invalid",
             f"Project profile has no active verification suite: {project.profile_id}",
         )
-    unsupported = [stage_id for stage_id in stage_ids if stage_id not in project.verification_stage_ids]
+    unsupported = [
+        stage_id
+        for stage_id in stage_ids
+        if _CATALOG_STAGE_ALIASES.get(stage_id, stage_id) not in project.verification_stage_ids
+    ]
     if unsupported:
         raise HarnessError(
             "verification_stage_policy_invalid",
@@ -171,9 +367,47 @@ def build_verification_stage_policy(*, project: ProjectProfile) -> VerificationS
         )
     return VerificationStagePolicy(
         project_profile_id=project.profile_id,
-        policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+        policy_version=policy_version,
         stage_ids=stage_ids,
+        stage_ownership=(
+            tuple(
+                _STAGE_OWNERS_BY_POLICY.get(policy_version, {})
+                .get(project.profile_id, {})
+                .items()
+            )
+            if policy_version in _EXPLICIT_OWNERSHIP_POLICIES
+            else ()
+        ),
     )
+
+
+def build_runtime_closure_stage_policy(*, project: ProjectProfile) -> VerificationStagePolicy:
+    """The closure verification suite; pinned in run state, independent of profile_snapshot."""
+
+    return build_verification_stage_policy_version(
+        project=project,
+        policy_version=RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+    )
+
+
+def build_browser_stage_policy(*, project: ProjectProfile) -> VerificationStagePolicy:
+    """The browser-stage suite (closure suite + browser_capture); pinned in run state."""
+
+    return build_verification_stage_policy_version(
+        project=project,
+        policy_version=BROWSER_STAGE_POLICY_VERSION,
+    )
+
+
+def browser_stage_facts(project_profile_id: str, *, run_id: str | None = None) -> BrowserStageFacts:
+    facts = _BROWSER_STAGE_FACTS_BY_PROJECT.get(project_profile_id)
+    if facts is None:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            f"Project profile has no browser-stage facts: {project_profile_id}",
+            run_id=run_id,
+        )
+    return facts
 
 
 def verification_stage_policy_from_snapshot(
@@ -191,20 +425,15 @@ def verification_stage_policy_from_snapshot(
         )
     project, _ = snapshot.resolve_profiles(run_id=run_id)
     try:
-        return build_verification_stage_policy(project=project)
+        return build_verification_stage_policy_version(
+            project=project,
+            policy_version=str(
+                getattr(snapshot, "verification_policy_version", "")
+                or VERIFICATION_STAGE_POLICY_VERSION
+            ),
+        )
     except HarnessError as exc:
         if run_id and exc.run_id is None:
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
         raise
 
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

@@ -52,29 +52,6 @@ def parse_first_json_object(raw: str, *, expected_keys: set[str] | None = None) 
     raise json.JSONDecodeError("No matching JSON object found", text, 0)
 
 
-def parse_first_json_array(raw: str) -> list[Any]:
-    """Tìm JSON array đầu tiên trong raw LLM response."""
-
-    text = strip_code_fence(raw).strip()
-    decoder = json.JSONDecoder()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, list):
-        return parsed
-    for index, char in enumerate(text):
-        if char != "[":
-            continue
-        try:
-            candidate, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, list):
-            return candidate
-    raise json.JSONDecodeError("No matching JSON array found", text, 0)
-
-
 def _matches_keys(parsed: dict[str, Any], expected_keys: set[str] | None) -> bool:
     if not expected_keys:
         return True

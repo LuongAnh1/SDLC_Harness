@@ -6,7 +6,8 @@ import hashlib
 import re
 from typing import Any
 
-from .graph import UI_RUNTIME_STATES, design_bundle_version_for, is_composition_wiring, layout_regions, ui_contract_v2
+from .graph import DESIGN_BUNDLE_VERSION, UI_RUNTIME_STATES, is_composition_wiring, layout_regions
+from ...core.coerce import dict_copies as _dicts
 
 UI_FEATURE_EXPERIENCE_VERSION = "ui_feature_experience_v1"
 _RUNNABLE_RANK = {"bound": 0, "fixture_required": 1, "externally_blocked": 2}
@@ -15,8 +16,6 @@ _RUNNABLE_RANK = {"bound": 0, "fixture_required": 1, "externally_blocked": 2}
 def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] | None:
     """Screen spec + Markdown wireframe projected from canonical UI contract v2 nodes; None when not applicable."""
 
-    if not ui_contract_v2(graph):
-        return None
     grouped: dict[str, list[dict[str, Any]]] = {}
     for node in _dicts(graph.get("nodes")):
         surface = _dict(_dict(node.get("surface_contract")).get("runtime_surface"))
@@ -473,7 +472,7 @@ def build_deterministic_trace(
 def projection_manifest(*, graph: dict[str, object], artifacts: dict[str, str]) -> dict[str, object]:
     return {
         "schema_version": "design_projection_manifest_v1",
-        "design_bundle_contract_version": design_bundle_version_for(str(graph.get("schema_version") or "")),
+        "design_bundle_contract_version": DESIGN_BUNDLE_VERSION,
         "graph_revision": int(graph.get("revision") or 0),
         "graph_digest": str(graph.get("artifact_digest") or ""),
         "projections": [
@@ -851,6 +850,16 @@ def _surface_view(
         **grouped,
         "coverage": coverage,
         "not_applicable": not_applicable,
+        # Where the Designer placed a scenario's business rule (e.g. in the UI), shown to the owner at approval.
+        "surface_placements": [
+            {key: item.get(key) for key in ("scenario_id", "surface", "component_id", "reason")}
+            for item in _dicts(graph.get("surface_placements"))
+        ],
+        # Required surfaces the Designer declared this scenario never reaches, shown to the owner at approval.
+        "surface_not_exercised": [
+            {key: item.get(key) for key in ("scenario_id", "surface", "reason")}
+            for item in _dicts(graph.get("surface_not_exercised"))
+        ],
         "ui_state_diagrams": _ui_state_diagrams(grouped["ui"]),
         "data_model_plantuml": _data_model_plantuml(grouped["data"]),
         "change_impact": projected,
@@ -951,10 +960,6 @@ def _slug(value: str) -> str:
 
 def _uml_id(value: str) -> str:
     return "N_" + re.sub(r"[^A-Za-z0-9_]", "_", value)
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _dict(value: object) -> dict[str, Any]:

@@ -6,20 +6,24 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
 
 from ...core.errors import HarnessError
 from ...repo_context import CodeGraphContextProvider
 from .graph import apply_designer_delta
 from .uiux import UiUxGuidanceProvider, guidance_evidence_ref
+from ...core.coerce import dict_copies as _dicts
 
 
 MAX_RESULTS = 20
 MAX_READ_LINES = 200
 MAX_FILE_CHARS = 8_000
 MAX_OUTPUT_CHARS = 12_000
+# design_v17/v18: the first SC-1|web call wanted 8 files (664 lines) and filled a 4-file batch both times.
+MAX_BATCH_READS = 8
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9_.$:/# -]{1,200}$")
 _SAFE_FILE_FILTER = re.compile(r"^[A-Za-z0-9_./*-]{0,200}$")
+# A compound name: camelCase/PascalCase boundary, acronym run, separator or digit.
+_CODE_IDENTIFIER = re.compile(r"[a-z][A-Z]|[A-Z]{2}[a-z]|[_\-.$\d]")
 
 
 class DesignerToolRegistry:
@@ -34,7 +38,6 @@ class DesignerToolRegistry:
         graph: dict[str, object],
         fake_mode: bool,
         uiux_provider: UiUxGuidanceProvider | None = None,
-        uiux_mode: str = "off",
         expected_codegraph_digest: str = "",
     ):
         self.run_id = run_id
@@ -43,7 +46,6 @@ class DesignerToolRegistry:
         self.graph = graph
         self.codegraph = CodeGraphContextProvider(fake_mode=fake_mode)
         self.uiux_provider = uiux_provider
-        self.uiux_mode = uiux_mode
         roots = {
             str(root)
             for component in _dicts(landscape.get("components"))
@@ -92,12 +94,22 @@ class DesignerToolRegistry:
             return self._record_evidence(self._repo_search(args))
         if tool_id == "repo.read":
             return self._record_evidence(self._repo_read(args))
+        if tool_id == "repo.read_batch":
+            return self._record_evidence(self._repo_read_batch(args))
         if tool_id == "codegraph.query":
             return self._record_evidence(self._codegraph_query(args))
         if tool_id == "uiux.search_guidance":
             return self._record_guidance(self._uiux_search(args))
         if tool_id == "design.inspect_partition":
             return self._record_evidence(self._inspect_partition(args))
+        if tool_id == "design.report_blocker":
+            if (set(args) != {"target_ref", "missing_facts", "reason"}
+                    or not isinstance(args.get("target_ref"), str) or not args["target_ref"].strip()
+                    or not isinstance(args.get("reason"), str) or not args["reason"].strip()
+                    or not isinstance(args.get("missing_facts"), list) or not args["missing_facts"]
+                    or not all(isinstance(x, str) and x.strip() for x in args["missing_facts"])):
+                raise HarnessError("designer_tool_input_invalid", "Evidence blocker needs target_ref, nonempty missing_facts and reason.", run_id=self.run_id)
+            return {"status": "evidence_blocked", **args}, []
         if tool_id == "design.propose_delta":
             candidate, temp_refs = apply_designer_delta(
                 self.graph,
@@ -221,7 +233,9 @@ class DesignerToolRegistry:
     def _repo_read(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         relative = str(args.get("path") or "").strip().replace("\\", "/")
         start = max(1, int(args.get("start_line") or 1))
-        end = max(start, int(args.get("end_line") or start + 79))
+        # Without end_line read up to the line/char cap: an 80-line default cut ProfilePage, ArticlesViewer and the
+        # API client of Conduit and cost another read each.
+        end = max(start, int(args.get("end_line") or start + MAX_READ_LINES - 1))
         end = min(end, start + MAX_READ_LINES - 1)
         path = self._safe_file(relative)
         if not path.is_file():
@@ -239,6 +253,40 @@ class DesignerToolRegistry:
             "truncated": len(excerpt) >= MAX_FILE_CHARS or end < len(lines),
             "evidence_ref": ref,
         }, [ref]
+
+    def _repo_read_batch(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+        requests = args.get("requests")
+        if (
+            set(args) != {"requests"}
+            or not isinstance(requests, list)
+            or not 1 <= len(requests) <= MAX_BATCH_READS
+            or not all(isinstance(item, dict) and str(item.get("path") or "").strip() for item in requests)
+        ):
+            raise HarnessError(
+                "designer_tool_input_invalid",
+                f"repo.read_batch needs requests: 1-{MAX_BATCH_READS} objects {{path, start_line?, end_line?}}.",
+                run_id=self.run_id,
+            )
+        results: list[dict[str, object]] = []
+        refs: list[str] = []
+        for index, request in enumerate(requests):
+            try:
+                output, read_refs = self._repo_read(dict(request))
+            except HarnessError as exc:
+                if exc.error_code not in {"designer_evidence_not_found", "designer_repo_path_unsafe"}:
+                    raise
+                # One wrong path does not waste the other reads of the call.
+                results.append({"request_index": index, "path": str(request.get("path")), "error": exc.error_code, "message": exc.message})
+                continue
+            results.append({"request_index": index, **output})
+            refs.extend(read_refs)
+        if not refs:
+            raise HarnessError(
+                "designer_evidence_not_found",
+                "No file of repo.read_batch could be read: " + "; ".join(str(item["message"]) for item in results),
+                run_id=self.run_id,
+            )
+        return {"results": results}, refs
 
     def _codegraph_query(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         operation = str(args.get("operation") or "explore").strip().lower()
@@ -296,6 +344,7 @@ class DesignerToolRegistry:
         return {
             "status": "available",
             "operation": operation,
+            "evidence_scope": "navigation_only" if operation in {"symbols", "files"} else "source_or_call_path",
             "query_digest": "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest(),
             "evidence": sanitized[:MAX_OUTPUT_CHARS],
             "truncated": len(sanitized) > MAX_OUTPUT_CHARS,
@@ -303,26 +352,33 @@ class DesignerToolRegistry:
         }, [ref]
 
     def _uiux_search(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
-        if self.uiux_mode != "enforce" or self.uiux_provider is None:
+        if self.uiux_provider is None:
             raise HarnessError(
                 "designer_tool_input_invalid",
                 "uiux.search_guidance is unavailable for this run.",
                 run_id=self.run_id,
             )
-        query = str(args.get("query") or "").strip().casefold()
-        private_terms = {
-            value.casefold()
+        # Only compound code identifiers (ArticlePage, getFeed, article-page) are repository-private: a plain word
+        # such as "article" or "state" is generic UX vocabulary even when a file happens to be named after it.
+        private_names = {
+            value.casefold(): value
             for anchor in self.anchors.values()
             for value in (
                 str(anchor.get("symbol") or "").strip(),
                 Path(str(anchor.get("path") or "")).stem.strip(),
             )
-            if len(value.strip()) >= 4
+            if len(value) >= 4 and _CODE_IDENTIFIER.search(value)
         }
-        if any(term in query for term in private_terms):
+        hits = sorted(
+            {private_names[word] for word in str(args.get("query") or "").casefold().split() if word in private_names}
+        )
+        if hits:
             raise HarnessError(
                 "designer_tool_input_invalid",
-                "uiux.search_guidance query must not contain repository-private paths or symbols.",
+                (
+                    f"uiux.search_guidance query must not contain repository names: {', '.join(hits)}. "
+                    "Describe the UX intent in generic words."
+                ),
                 run_id=self.run_id,
             )
         output = self.uiux_provider.search(args)
@@ -334,10 +390,14 @@ class DesignerToolRegistry:
     def _inspect_partition(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         scenario_id = str(args.get("scenario_id") or "").strip()
         component_id = str(args.get("component_id") or "").strip()
+        # node_ids fetches exact rows listed in the prompt's graph.index; scenario/component filters still apply.
+        wanted = {str(item).strip() for item in _strings(args.get("node_ids")) if str(item).strip()}
         node_ids = {
             str(item.get("id") or "")
             for item in _dicts(self.graph.get("nodes"))
-            if str(item.get("scenario_id") or "") == scenario_id
+            if (scenario_id or wanted)
+            and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
+            and (not wanted or str(item.get("id") or "") in wanted)
             and (not component_id or str(item.get("component_id") or "") == component_id)
         }
         return {
@@ -346,7 +406,8 @@ class DesignerToolRegistry:
             "partitions": [
                 item
                 for item in _dicts(self.graph.get("partitions"))
-                if str(item.get("scenario_id") or "") == scenario_id
+                if scenario_id
+                and str(item.get("scenario_id") or "") == scenario_id
                 and (not component_id or str(item.get("component_id") or "") == component_id)
             ],
             "nodes": [item for item in _dicts(self.graph.get("nodes")) if str(item.get("id") or "") in node_ids],
@@ -403,10 +464,6 @@ def _within(path: Path, root: Path) -> bool:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

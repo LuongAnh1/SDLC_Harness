@@ -15,7 +15,7 @@ import re
 from ..core.errors import HarnessError
 
 
-_SUPPORTED_DATASETS = {"etour": "etour"}
+_SUPPORTED_DATASETS = {"etour": "etour", "conduit": "conduit"}
 _SAFE_USE_CASE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 

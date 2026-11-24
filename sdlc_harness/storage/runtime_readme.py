@@ -10,11 +10,11 @@ from uuid import uuid4
 from ..core.errors import HarnessError
 
 
-RUNTIME_LAYOUT_VERSION = "runtime_layout_v4"
+RUNTIME_LAYOUT_VERSION = "runtime_layout_v5"
 _README_LOCK = RLock()
 RUNTIME_README = """# Dữ liệu runtime của SDLC Harness
 
-Phiên bản bố cục: `runtime_layout_v4`
+Phiên bản bố cục: `runtime_layout_v5`
 
 Thư mục `.runtime/` là kho trạng thái vận hành cục bộ của SDLC Harness. Nó chứa
 trạng thái workflow, artifact trung gian và cuối cùng, nhật ký thực thi, kết quả
@@ -58,6 +58,7 @@ của Harness và không phải nơi lưu mã nguồn mà Developer Agent sửa.
     <run_id>/
       state.json
       events.jsonl
+      artifact_index.jsonl
       artifacts/
       sync/
       developer_execution/
@@ -73,6 +74,7 @@ Design, Plan, Code hoặc QA.
 | `config.json` | Config API/Ops Dashboard qua `RuntimeConfigStore` | Các giá trị cấu hình runtime được phép sửa; có thể gồm secret | Lần dựng `Settings` kế tiếp và operation kế tiếp |
 | `index/active_runs.json` | `RuntimeStore.register_active_run` khi tạo run | Ánh xạ `source_ref -> run_id` đang hoạt động | `start_or_get_run`, chống tạo hai run chưa kết thúc cho cùng nguồn |
 | `runs/<run_id>/state.json` | Tất cả workflow qua `RuntimeStore.write_state` | Phase, status, checkpoint, action hợp lệ, artifact mới nhất, quality report, lỗi và sync gần nhất | Mọi action tiếp theo, Read API, Ops Dashboard và Niko |
+| `runs/<run_id>/artifact_index.jsonl` | `RuntimeStore.write_state` khi một con trỏ `latest_artifacts` đổi | Nguồn gốc artifact: node và handler sinh ra, đầu vào đã đọc (ref + sha256), fingerprint worktree | Kiểm tra artifact mất hiệu lực và `rewind` (G1.4); **không** thay `state.json` |
 | `runs/<run_id>/events.jsonl` | Event Store từ operation, workflow, LLM, validator, runner, QA và sync | Timeline quan sát đã lọc dữ liệu nhạy cảm | Events API và Ops Dashboard; **không** dùng để dựng lại hay cấp quyền thay cho `state.json` |
 | `operations/*.json` | HTTP write API/Operation Manager | Trạng thái bền vững của một request ghi bất đồng bộ | Poll operation, phục hồi sau restart và trả kết quả/lỗi cho client |
 | `idempotency/*.json` | Operation Store khi nhận idempotency key | Hash key, hash request và `operation_id` tương ứng | Nhận diện retry cùng request, ngăn workflow chạy hai lần và rebuild index sau crash |
@@ -142,6 +144,20 @@ quyền khóa nằm ở handle của tiến trình.
 - **Đầu vào cho:** tất cả action như `get_status`, `continue_run`,
   `approve_checkpoint`, `answer_clarification`, `revalidate_*`, `sync_run`;
   đồng thời là dữ liệu Niko dùng để báo trạng thái cho người dùng.
+
+### `runs/<run_id>/artifact_index.jsonl`
+
+- **Nguồn sinh:** `RuntimeStore.write_state` ghi nối tiếp trước khi thay `state.json`: mỗi khóa
+  `latest_artifacts` có ref mới là một dòng `artifact_index_v1`.
+- **Lưu gì:** `key`, `ref`, `sha256`, `version`, `transition` (status trước/sau), `node` và `handler`
+  của bước Phase 4 đang chạy, `inputs` (artifact bước đó đã đọc, kèm sha256 lúc đọc) và
+  `worktree_fingerprint`. Ghi ngoài một bước Phase 4 (Phase 1-3, recovery tay) có `inputs: null`,
+  nghĩa là chưa theo dõi, không phải "không có đầu vào".
+- Con trỏ bị bỏ khỏi `latest_artifacts` cũng có một dòng (`ref: null`, `previous_ref`), nên đọc lại index
+  dựng được `latest_artifacts` ở bất kỳ thời điểm nào trước đó.
+- **Đầu vào cho:** action owner `rewind_run` (tìm lần ghé gần nhất của node đích, bỏ con trỏ ghi từ đó);
+  run cũ chỉ có dòng cho con trỏ đổi sau khi nâng cấp, nên chưa rewind được về bước chạy trước đó.
+- **Phục hồi:** dòng cuối ghi dở do crash bị bỏ qua khi đọc và bị cắt trước lần ghi kế tiếp.
 
 ### `runs/<run_id>/events.jsonl`
 
@@ -255,11 +271,8 @@ plan; không coi canonical checkout bên ngoài worktree là nguồn sự thật
 | `requirement_design_code_trace_v<N>.json` | Code Trace Validator | Mapping Requirement -> Design -> code/test cùng missing links/blocker | Implementation repair gate; chỉ khi pass mới sang QA |
 | `implementation_validation_ledger_v<N>.json` | Code contract/trace validation | Ledger ổn định qua nhiều vòng validation để theo dõi finding và evidence | Lần revalidate/repair kế tiếp và quyết định hội tụ |
 | `implementation_repair_feedback_v<N>.json` | Harness từ test failure hoặc Code Trace blocker | Feedback máy đọc được, phạm vi liên quan và yêu cầu sửa | Developer implementation repair tool-loop |
-| `qa_generated_tests_v<N>.json` | QA/Tester Agent | Danh sách acceptance/system test được sinh, nội dung và requirement refs | Harness áp test vào worktree và Verification Runner chạy đúng các file đó |
-| `qa_test_execution_v<N>.md` | Verification Runner sau khi áp QA tests | Bằng chứng test QA thực sự được chạy: selected/verified files và kết quả stage | QA/Tester đánh giá cuối, repair decision và PR evidence |
-| `qa_test_report_v<N>.md` | QA/Tester Agent | Kết luận từng acceptance scenario, evidence, risk và coverage | QA gate; khi pass dùng để publish Draft PR và sync |
-| `qa_tester_raw_response_v<N>.txt` | QA/Tester khi cần lưu raw output | Nội dung LLM gốc, đặc biệt hữu ích khi parse lỗi/cắt output | Chỉ debug và retry diagnostics |
-| `qa_repair_feedback_v<N>.json` | Harness khi QA fail | Scenario thất bại, test liên quan và repair scope | Developer QA-repair tool-loop rồi chạy lại verification/QA |
+| `qa_generated_tests_v<N>.json` | Harness khi Browser QA cuối pass | Scenario/requirement refs và spec browser đã chạy, ở dạng publication đọc được | Manifest và PR body của Draft PR |
+| `qa_test_execution_v<N>.json` | Harness khi Browser QA cuối pass | Bằng chứng suite browser đã chạy: verification nguồn, evidence manifest, file đã xác minh | PR evidence và sync |
 
 Mã nguồn và test thật mà Developer/QA tạo **không nằm trong `.runtime`**. Chúng
 nằm trong Git worktree riêng của run; runtime chỉ giữ identity, packet, journal,
@@ -271,7 +284,6 @@ report và evidence để điều phối an toàn.
 runs/<run_id>/developer_execution/
   act_v1/
   implementation_repair_v<N>/
-  qa_repair_v<N>/
     manifest.json
     journal.json
     snapshots/<execution_unit_id>.json

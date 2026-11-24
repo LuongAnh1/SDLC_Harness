@@ -16,6 +16,13 @@ from ..agents.developer import (
     refresh_developer_work_packet,
     upgrade_developer_dependency_scope,
 )
+from ..agents.developer.execution import developer_session_name
+from ..agents.developer.runtime_config import (
+    env_runtime_config_changes,
+    materialize_env_example,
+    runtime_config_execution_issues,
+    worktree_dirty_paths,
+)
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -24,8 +31,8 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
+from ..llm.step_review import LlmStepReviewRequired
 from ..profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
 )
 from ..storage.runtime import utc_now_iso
@@ -45,6 +52,7 @@ from .phase4 import (
     _int_value,
     _is_repairable_code_trace_failure,
     _is_repairable_verification_failure,
+    _code_trace_artifact_version,
     _next_phase4_artifact_version,
     _nonrepairable_code_trace_error_code,
     _planning_policy_for_state,
@@ -64,6 +72,7 @@ _EXECUTION_UNIT_CONTRACT_FIELDS = {
     "migration_impact",
     "planned_code_targets",
     "runtime_bindings",
+    "runtime_config_changes",
     "write_paths",
 }
 
@@ -281,6 +290,11 @@ class PhaseFourImplementationCycle:
                     for item in previous_packet.get("requirement_coverage", [])
                     if isinstance(item, dict)
                 ],
+                approved_runtime_decisions=[
+                    dict(item)
+                    for item in previous_packet.get("approved_runtime_decisions", [])
+                    if isinstance(item, dict)
+                ],
                 effective_design_contract=_dict_value(
                     previous_packet.get("effective_design_contract")
                 ),
@@ -390,6 +404,240 @@ class PhaseFourImplementationCycle:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
 
+    def recover_runtime_config(self, *, run_id: str) -> dict[str, object]:
+        """Reopen only Plan-declared runtime-config owners before QA/publication."""
+
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            artifacts = _string_dict(state.get("latest_artifacts"))
+            if (
+                str(state.get("current_phase") or "").startswith("qa_")
+                or any(key.startswith("qa_") for key in artifacts)
+                or str(state.get("status") or "")
+                in {"qa_tested", "waiting_code_review_approval", "published", "completed"}
+            ):
+                raise HarnessError(
+                    "runtime_config_recovery_not_allowed",
+                    "Runtime-config recovery is only allowed before QA and publication.",
+                    run_id=run_id,
+                )
+
+            plan_path = _required_phase4_artifact(
+                artifacts,
+                "implementation_plan_structured",
+                run_id=run_id,
+            )
+            packet_path = _required_phase4_artifact(
+                artifacts,
+                "developer_work_packet",
+                run_id=run_id,
+            )
+            structured_plan = _read_json_artifact(
+                self._existing_artifact_path(plan_path, run_id=run_id),
+                run_id=run_id,
+            )
+            previous_packet = _read_json_artifact(
+                self._existing_artifact_path(packet_path, run_id=run_id),
+                run_id=run_id,
+            )
+            changes = env_runtime_config_changes(structured_plan.get("runtime_config_impact"))
+            owner_ids = sorted(
+                {str(change.get("unit_id") or "") for change in changes}
+            )
+            if not changes or not all(owner_ids):
+                raise HarnessError(
+                    "runtime_config_recovery_not_needed",
+                    "The approved Plan has no executable env-var change with an owner unit.",
+                    run_id=run_id,
+                )
+
+            packet_version = _next_phase4_artifact_version(self.store, run_id)
+            previous_revision = max(1, _int_value(state.get("developer_act_revision")))
+            revision = max(2, previous_revision + 1)
+            recovery_file = self.store.write_json_artifact(
+                run_id,
+                f"runtime_config_recovery_v{packet_version}.json",
+                {
+                    "schema_version": "runtime_config_recovery_v1",
+                    "run_id": run_id,
+                    "revision": revision,
+                    "source_plan": plan_path,
+                    "source_work_packet": packet_path,
+                    "owner_unit_ids": owner_ids,
+                    "changes": changes,
+                    "reason": (
+                        "Rebuild the approved runtime-config projection and rerun only its owner units."
+                    ),
+                    "created_at": utc_now_iso(),
+                },
+            )
+            recovery_path = self.store.relative(recovery_file)
+            target_info = self._workspace_target_info(run_id=run_id, allow_dirty=True)
+            workspace = self.workspace_manager.resolve(run_id)
+            packet = build_developer_work_packet(
+                run_id=run_id,
+                source_ref=str(state.get("source_ref") or ""),
+                issue_key=str(previous_packet.get("issue_key") or ""),
+                structured_plan=structured_plan,
+                target_repo_path=target_info.path,
+                run_workspace=workspace.to_dict(),
+                approved_plan_refs={
+                    **_dict_value(previous_packet.get("approved_plan")),
+                    "runtime_config_recovery": recovery_path,
+                },
+                canonical_requirements=[
+                    dict(item)
+                    for item in previous_packet.get("canonical_requirements", [])
+                    if isinstance(item, dict)
+                ],
+                requirement_contract=_dict_value(
+                    previous_packet.get("requirement_contract")
+                ),
+                requirement_coverage=[
+                    dict(item)
+                    for item in previous_packet.get("requirement_coverage", [])
+                    if isinstance(item, dict)
+                ],
+                approved_runtime_decisions=[
+                    dict(item)
+                    for item in previous_packet.get("approved_runtime_decisions", [])
+                    if isinstance(item, dict)
+                ],
+                effective_design_contract=_dict_value(
+                    previous_packet.get("effective_design_contract")
+                ),
+                planning_policy=_planning_policy_for_state(state, run_id=run_id),
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
+            selected_units = [
+                dict(unit)
+                for unit in packet.get("execution_units", [])
+                if isinstance(unit, dict) and str(unit.get("unit_id") or "") in owner_ids
+            ]
+            selected_ids = {str(unit.get("unit_id") or "") for unit in selected_units}
+            if selected_ids != set(owner_ids):
+                raise HarnessError(
+                    "runtime_config_owner_unit_missing",
+                    f"Runtime-config owner units are absent from the Developer packet: {owner_ids}",
+                    run_id=run_id,
+                )
+            for unit in selected_units:
+                unit["depends_on"] = [
+                    value
+                    for value in unit.get("depends_on", [])
+                    if isinstance(value, str) and value in selected_ids
+                ]
+                unit["test_intent_mutation_required"] = False
+            packet = {
+                **packet,
+                "version": f"developer_work_packet_v{packet_version}",
+                "mode": "runtime_config_recovery_v1",
+                "execution_units": selected_units,
+                "refreshed_at": utc_now_iso(),
+            }
+            allowed_paths = {
+                str(value).replace("\\", "/")
+                for value in _dict_value(packet.get("output_contract")).get(
+                    "allowed_paths", []
+                )
+                if isinstance(value, str) and value
+            }
+            expected_dirty_paths = [
+                path
+                for path in worktree_dirty_paths(target_info.path)
+                if path not in allowed_paths
+            ]
+            revised_packet_path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=packet,
+                version=packet_version,
+            )
+
+            history = [
+                dict(item)
+                for item in state.get("developer_execution_history", [])
+                if isinstance(item, dict)
+            ]
+            history.append(
+                {
+                    "revision": previous_revision,
+                    "execution": _dict_value(state.get("developer_execution")),
+                    "manifest": artifacts.get("developer_execution_manifest", ""),
+                    "journal": artifacts.get("developer_execution_journal", ""),
+                    "session": artifacts.get("developer_execution_session", ""),
+                    "test_report": artifacts.get("test_report", ""),
+                    "code_trace": artifacts.get("requirement_design_code_trace", ""),
+                    "validation_ledger": artifacts.get(
+                        "implementation_validation_ledger", ""
+                    ),
+                    "superseded_at": utc_now_iso(),
+                    "reason": "runtime_config_recovery",
+                }
+            )
+            latest_artifacts = {
+                **artifacts,
+                "runtime_config_recovery": recovery_path,
+                "developer_work_packet": revised_packet_path,
+            }
+            for key in (
+                "developer_execution_manifest",
+                "developer_execution_journal",
+                "developer_execution_session",
+                "developer_failure_classification",
+                "code_change_report",
+                "test_report",
+                "requirement_design_code_trace",
+                "implementation_validation_ledger",
+                "implementation_repair_feedback",
+                "runtime_config_execution",
+                "runtime_config_validation",
+            ):
+                latest_artifacts.pop(key, None)
+            quality_reports = _dict_value(state.get("quality_reports"))
+            for key in (
+                "verification",
+                "implementation_traceability",
+                "implementation_repair",
+            ):
+                quality_reports.pop(key, None)
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_preparing",
+                    "status": "implementation_ready",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_READY_ACTIONS,
+                    "last_error": None,
+                    "developer_act_revision": revision,
+                    "developer_execution_contract_version": "developer_execution_units_v1",
+                    "developer_expected_dirty_paths": expected_dirty_paths,
+                    "developer_execution_history": history,
+                    "developer_execution": {
+                        "schema_version": "developer_execution_state_v2",
+                        "contract_version": "developer_execution_units_v1",
+                        "executor": "tool_loop",
+                        "mode": "developer_act",
+                        "session_id": f"developer_act-v{revision}",
+                        "repair_iteration": 0,
+                        "session_iteration": revision,
+                        "artifact_version": revision,
+                        "status": "pending",
+                        "total_units": len(selected_units),
+                        "remaining_units": len(selected_units),
+                        "pending_unit_ids": owner_ids,
+                    },
+                    "summary_for_user": (
+                        f"Runtime-config recovery V{revision} prepared for run {run_id}; "
+                        f"only owner units will rerun: {', '.join(owner_ids)}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification and Validator for a blocked, pending-repair, or traced snapshot."""
 
@@ -480,6 +728,72 @@ class PhaseFourImplementationCycle:
             execution_state.pop("pending_step_review", None)
         return execution_state
 
+    def _materialize_runtime_config(
+        self,
+        *,
+        run_id: str,
+        work_packet: dict[str, object],
+        target_path: Path,
+        artifact_version: int,
+        latest_artifacts: dict[str, str],
+    ) -> list[dict[str, object]]:
+        """Materialize Harness-owned runtime config after Developer source changes."""
+
+        changes = env_runtime_config_changes(work_packet.get("runtime_config_impact"))
+        if not changes:
+            return []
+        receipt = {
+            **materialize_env_example(
+                repo_root=target_path,
+                changes=changes,
+                run_id=run_id,
+            ),
+            "run_id": run_id,
+            "created_at": utc_now_iso(),
+        }
+        receipt_file = self.store.write_json_artifact(
+            run_id,
+            f"runtime_config_execution_v{artifact_version}.json",
+            receipt,
+        )
+        issues = runtime_config_execution_issues(
+            repo_root=target_path,
+            changes=changes,
+        )
+        validation = {
+            "schema_version": "runtime_config_validation_v1",
+            "run_id": run_id,
+            "status": "passed" if not issues else "failed",
+            "changes": changes,
+            "issues": issues,
+            "execution_receipt": self.store.relative(receipt_file),
+            "created_at": utc_now_iso(),
+        }
+        validation_file = self.store.write_json_artifact(
+            run_id,
+            f"runtime_config_validation_v{artifact_version}.json",
+            validation,
+        )
+        latest_artifacts["runtime_config_execution"] = self.store.relative(receipt_file)
+        latest_artifacts["runtime_config_validation"] = self.store.relative(validation_file)
+        if issues:
+            raise HarnessError(
+                "runtime_config_execution_invalid",
+                f"Runtime configuration closure failed: {issues}",
+                run_id=run_id,
+            )
+        if not receipt.get("changed_paths"):
+            return []
+        return [
+            {
+                "path": ".env.example",
+                "operation": "harness_materialize_runtime_config",
+                "before_sha256": receipt.get("before_sha256"),
+                "after_sha256": receipt.get("after_sha256"),
+                "harness_owned": True,
+            }
+        ]
+
     def _execute_developer_tool_loop(
         self,
         *,
@@ -498,9 +812,36 @@ class PhaseFourImplementationCycle:
         repair_feedback: dict[str, object] | None = None,
         repair_scope: str = "implementation",
         expected_dirty_paths: list[str] | None = None,
+        session_scope: str = "",
     ) -> DeveloperExecutionResult:
         """Chạy một durable tool-loop session và phản chiếu tiến độ vào workflow state."""
 
+        runtime_config_ref = str(latest_artifacts.get("runtime_config_execution") or "")
+        if runtime_config_ref:
+            runtime_config_receipt = _read_json_artifact(
+                self._existing_artifact_path(runtime_config_ref, run_id=run_id),
+                run_id=run_id,
+            )
+            expected_dirty_paths = list(
+                dict.fromkeys(
+                    [
+                        *(expected_dirty_paths or []),
+                        *[
+                            path
+                            for path in runtime_config_receipt.get("changed_paths", [])
+                            if isinstance(path, str) and path
+                        ],
+                        # An `unchanged` receipt still owns the file an earlier receipt materialized.
+                        *[
+                            path
+                            for path in [runtime_config_receipt.get("path")]
+                            if runtime_config_receipt.get("status") == "unchanged"
+                            and isinstance(path, str)
+                            and path
+                        ],
+                    ]
+                )
+            )
         unit_aware = bool(work_packet.get("execution_units"))
         session_key = manifest_key.replace("_manifest", "_session")
         state.update(
@@ -561,15 +902,17 @@ class PhaseFourImplementationCycle:
                 expected_dirty_paths=expected_dirty_paths,
                 verification_policy=_verification_policy_for_state(state, run_id=run_id),
                 on_progress=persist_progress,
+                **({"session_scope": session_scope} if session_scope else {}),
             )
         except DeveloperExecutionError:
             raise
         except HarnessError as exc:
-            session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = (
-                f"{repair_scope}_repair_v{session_ordinal}"
-                if repair_feedback
-                else f"act_v{max(1, session_ordinal)}"
+            session_name = developer_session_name(
+                repair_feedback=bool(repair_feedback),
+                repair_scope=repair_scope,
+                session_scope=session_scope,
+                repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
             )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
@@ -591,11 +934,12 @@ class PhaseFourImplementationCycle:
                 },
             ) from exc
         except Exception as exc:
-            session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = (
-                f"{repair_scope}_repair_v{session_ordinal}"
-                if repair_feedback
-                else f"act_v{max(1, session_ordinal)}"
+            session_name = developer_session_name(
+                repair_feedback=bool(repair_feedback),
+                repair_scope=repair_scope,
+                session_scope=session_scope,
+                repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
             )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
@@ -690,8 +1034,20 @@ class PhaseFourImplementationCycle:
                 artifact_version=act_revision,
                 manifest_key="developer_execution_manifest",
                 journal_key="developer_execution_journal",
+                expected_dirty_paths=[
+                    value
+                    for value in state.get("developer_expected_dirty_paths", [])
+                    if isinstance(value, str)
+                ],
             )
-            applied_files = result.files
+            runtime_config_files = self._materialize_runtime_config(
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                artifact_version=act_revision,
+                latest_artifacts=latest_artifacts,
+            )
+            applied_files = [*result.files, *runtime_config_files]
             report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -793,7 +1149,7 @@ class PhaseFourImplementationCycle:
         run_id: str,
         work_packet: dict[str, object],
     ) -> tuple[dict[str, object], str]:
-        """Upgrade an approved Plan V4 packet before the first Developer mutation only."""
+        """Upgrade an approved component-aware packet before the first Developer mutation only."""
 
         if work_packet.get("execution_units"):
             target_info = self._workspace_target_info(
@@ -868,8 +1224,6 @@ class PhaseFourImplementationCycle:
             self._existing_artifact_path(structured_ref, run_id=run_id),
             run_id=run_id,
         )
-        if structured_plan.get("version") != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-            return work_packet, ""
         target_info = self._workspace_target_info(
             run_id=run_id,
             work_packet=work_packet,
@@ -893,6 +1247,11 @@ class PhaseFourImplementationCycle:
             requirement_coverage=[
                 dict(item)
                 for item in work_packet.get("requirement_coverage", [])
+                if isinstance(item, dict)
+            ],
+            approved_runtime_decisions=[
+                dict(item)
+                for item in work_packet.get("approved_runtime_decisions", [])
                 if isinstance(item, dict)
             ],
             effective_design_contract=_dict_value(work_packet.get("effective_design_contract")),
@@ -1133,7 +1492,7 @@ class PhaseFourImplementationCycle:
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
-            _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
+            test_report_path = _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
             for key in (
                 "design_artifact",
                 "requirement_design_trace",
@@ -1141,6 +1500,8 @@ class PhaseFourImplementationCycle:
                 "sequence_diagram_graph",
             ):
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            # A resumed or repeated trace must not overwrite the evidence of an earlier one.
+            artifact_version = _code_trace_artifact_version(self.store, run_id, test_report_path)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             trace_result = self._validate_code_trace_snapshot(
@@ -1162,12 +1523,18 @@ class PhaseFourImplementationCycle:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
-                version=1,
+                version=artifact_version,
             )
             ledger_path = self._write_implementation_validation_ledger(
                 run_id=run_id,
                 trace_result=trace_result,
-                version=1,
+                version=artifact_version,
+            )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
             )
         except HarnessError as exc:
             state.update(
@@ -1219,14 +1586,14 @@ class PhaseFourImplementationCycle:
                 trace_path=trace_path,
                 target_repo=str(target_info.path),
                 branch=target_info.current_branch,
-                feedback_version=1,
+                feedback_version=artifact_version,
                 repair_iteration=0,
             )
             feedback_path = write_phase4_repair_feedback(
                 store=self.store,
                 run_id=run_id,
                 feedback=feedback,
-                version=1,
+                version=artifact_version,
             )
             latest_artifacts = {
                 **latest_artifacts,
@@ -1242,6 +1609,12 @@ class PhaseFourImplementationCycle:
                     "summary": trace_result.summary,
                 },
             }
+            _supersede_active_repair_execution(
+                state,
+                repair_objective_id=str(
+                    _dict_value(feedback.get("repair_objective")).get("objective_id") or ""
+                ),
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1255,7 +1628,7 @@ class PhaseFourImplementationCycle:
                     "implementation_repair_iterations": 0,
                     "summary_for_user": (
                         f"Validator code trace còn thiếu link có thể sửa ở code/test cho run {run_id}: "
-                        f"{trace_result.summary} Đã ghi implementation_repair_feedback_v1.json. "
+                        f"{trace_result.summary} Đã ghi {Path(feedback_path).name}. "
                         "Lần continue-run tiếp theo sẽ giao Developer.repair xử lý feedback này."
                     ),
                 }
@@ -1412,6 +1785,16 @@ class PhaseFourImplementationCycle:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
 
+        # A Code Validator step-review pause resumes through the normal code-trace step, never back
+        # into the pre-revalidation status (`implementation_repair_needed` would rerun its stale repair).
+        state.update(
+            {
+                "status": "implementation_tested",
+                "current_phase": "implementation_testing",
+                "latest_artifacts": latest_artifacts,
+                "quality_reports": quality_reports,
+            }
+        )
         try:
             trace_result = self._validate_code_trace_snapshot(
                 state=state,
@@ -1441,6 +1824,12 @@ class PhaseFourImplementationCycle:
                 run_id=run_id,
                 trace_result=trace_result,
                 version=artifact_version,
+            )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
             )
         except HarnessError as exc:
             state.update(
@@ -1535,6 +1924,12 @@ class PhaseFourImplementationCycle:
                 "previous_repair_iterations": previous_iterations,
                 "summary": trace_result.summary,
             }
+            _supersede_active_repair_execution(
+                state,
+                repair_objective_id=str(
+                    _dict_value(feedback.get("repair_objective")).get("objective_id") or ""
+                ),
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1662,6 +2057,14 @@ class PhaseFourImplementationCycle:
             if resume_tool_loop:
                 refreshed_packet_path = packet_path
             else:
+                work_packet = self._restore_missing_repair_units(
+                    state=state,
+                    run_id=run_id,
+                    artifact_paths=artifact_paths,
+                    work_packet=work_packet,
+                    repair_feedback=repair_feedback,
+                    target_path=target_info.path,
+                )
                 work_packet = refresh_developer_work_packet(
                     packet=work_packet,
                     target_repo_path=target_info.path,
@@ -1696,7 +2099,14 @@ class PhaseFourImplementationCycle:
                 repair_feedback=repair_feedback,
                 repair_scope="implementation",
             )
-            applied_files = result.files
+            runtime_config_files = self._materialize_runtime_config(
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                artifact_version=artifact_version,
+                latest_artifacts=latest_artifacts,
+            )
+            applied_files = [*result.files, *runtime_config_files]
             developer_summary = result.summary
             change_report = {
                 "run_id": run_id,
@@ -1890,6 +2300,12 @@ class PhaseFourImplementationCycle:
                 trace_result=trace_result,
                 version=artifact_version,
             )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+            )
         except HarnessError as exc:
             state.update(
                 {
@@ -2029,6 +2445,86 @@ class PhaseFourImplementationCycle:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _restore_missing_repair_units(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        artifact_paths: dict[str, str],
+        work_packet: dict[str, object],
+        repair_feedback: dict[str, object],
+        target_path: Path,
+    ) -> dict[str, object]:
+        repair_unit_ids = {
+            unit_id
+            for finding in _dict_value(repair_feedback.get("repair_objective")).get("contract_findings", [])
+            if isinstance(finding, dict)
+            for unit_id in finding.get("unit_ids", [])
+            if isinstance(unit_id, str) and unit_id
+        }
+        packet_unit_ids = {
+            str(unit.get("unit_id") or "")
+            for unit in work_packet.get("execution_units", [])
+            if isinstance(unit, dict) and str(unit.get("unit_id") or "")
+        }
+        if repair_unit_ids <= packet_unit_ids:
+            return work_packet
+
+        structured_ref = _required_phase4_artifact(
+            artifact_paths,
+            "implementation_plan_structured",
+            run_id=run_id,
+        )
+        structured_plan = _read_json_artifact(
+            self._existing_artifact_path(structured_ref, run_id=run_id),
+            run_id=run_id,
+        )
+        approved_plan = {
+            **_string_dict(work_packet.get("approved_plan")),
+            "implementation_plan_structured": structured_ref,
+        }
+        restored = build_developer_work_packet(
+            run_id=run_id,
+            source_ref=str(work_packet.get("source_ref") or state.get("source_ref") or ""),
+            issue_key=str(work_packet.get("issue_key") or ""),
+            structured_plan=structured_plan,
+            target_repo_path=target_path,
+            run_workspace=self.workspace_manager.resolve(run_id).to_dict(),
+            approved_plan_refs=approved_plan,
+            canonical_requirements=[
+                dict(item)
+                for item in work_packet.get("canonical_requirements", [])
+                if isinstance(item, dict)
+            ],
+            requirement_contract=_dict_value(work_packet.get("requirement_contract")),
+            requirement_coverage=[
+                dict(item)
+                for item in work_packet.get("requirement_coverage", [])
+                if isinstance(item, dict)
+            ],
+            approved_runtime_decisions=[
+                dict(item)
+                for item in work_packet.get("approved_runtime_decisions", [])
+                if isinstance(item, dict)
+            ],
+            effective_design_contract=_dict_value(work_packet.get("effective_design_contract")),
+            planning_policy=_planning_policy_for_state(state, run_id=run_id),
+            verification_policy=_verification_policy_for_state(state, run_id=run_id),
+        )
+        restored_unit_ids = {
+            str(unit.get("unit_id") or "")
+            for unit in restored.get("execution_units", [])
+            if isinstance(unit, dict) and str(unit.get("unit_id") or "")
+        }
+        missing = sorted(repair_unit_ids - restored_unit_ids)
+        if missing:
+            raise HarnessError(
+                "developer_repair_unit_ids_invalid",
+                f"Validator repair findings reference unknown approved execution units: {missing}",
+                run_id=run_id,
+            )
+        return restored
+
     def _bound_repair_work_packet_path(
         self,
         *,
@@ -2078,4 +2574,26 @@ class PhaseFourImplementationCycle:
                 if match:
                     highest = max(highest, int(match.group("ordinal")))
         return max(1, minimum, highest + 1)
+
+
+def _supersede_active_repair_execution(
+    state: dict[str, object],
+    *,
+    repair_objective_id: str,
+) -> None:
+    """Do not resume an older repair session against newly generated Validator feedback."""
+
+    execution = _dict_value(state.get("developer_execution"))
+    if (
+        execution.get("mode") != "implementation_repair"
+        or execution.get("status") not in {"executing", "paused", "blocked"}
+    ):
+        return
+    state["developer_execution"] = {
+        **execution,
+        "status": "superseded",
+        "superseded_at": utc_now_iso(),
+        "superseded_reason": "new_validator_repair_objective",
+        "superseded_by_repair_objective_id": repair_objective_id,
+    }
 

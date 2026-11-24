@@ -33,6 +33,7 @@ from sdlc_harness.sources.jira import load_jira_issue_source
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.atlassian import real_sync_requirement_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 
 
 class PhaseOneTest(unittest.TestCase):
@@ -72,6 +73,15 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(source.locator, "fixtures/etour/UC1.txt")
         self.assertIsNone(source.revision)
         self.assertIn("DeleteCulturalHeritage", source.text)
+
+    def test_fixture_loader_reads_every_conduit_use_case(self) -> None:
+        names = sorted(path.stem for path in (self.repo_root / "fixtures" / "conduit").glob("UC*.txt"))
+        self.assertEqual(names, ["UC1", "UC3", "UC4", "UC5", "UC6"])
+        for name in names:
+            source = load_use_case(dataset="conduit", use_case=name, repo_root=self.repo_root)
+            self.assertEqual(source.source_ref, f"dataset_use_case:conduit:{name}")
+            self.assertEqual(source.locator, f"fixtures/conduit/{name}.txt")
+            self.assertTrue(source.text.startswith("Use case name: "))
 
     def test_fixture_loader_rejects_unsupported_dataset(self) -> None:
         with self.assertRaises(HarnessError) as ctx:
@@ -227,8 +237,6 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_trace_dev_role_prompts_are_available(self) -> None:
         prompt_paths = [
-            self.repo_root / "sdlc_harness" / "agents" / "designer" / "prompts" / "designer.txt",
-            self.repo_root / "sdlc_harness" / "agents" / "validator" / "prompts" / "validator.txt",
             self.repo_root / "sdlc_harness" / "agents" / "developer" / "prompts" / "developer.txt",
             self.repo_root / "sdlc_harness" / "agents" / "tester" / "prompts" / "tester.txt",
         ]
@@ -510,6 +518,7 @@ class PhaseOneTest(unittest.TestCase):
                     "placeholders",
                 )
             ],
+            "interpretations": [],
             "question_candidates": [
                 {
                     "category": "completion_signals",
@@ -660,7 +669,7 @@ class PhaseOneTest(unittest.TestCase):
 
         self.assertTrue(second["created_new_run"])
         self.assertNotEqual(first["run_id"], second["run_id"])
-        self.assertEqual(second["designer_contract_version"], "vertical_design_graph_v1")
+        self.assertEqual(second["designer_contract_version"], "vertical_design_graph_v2")
 
     def test_clean_default_start_snapshots_typescript_profile_in_fake_mock_mode(self) -> None:
         with (
@@ -716,7 +725,7 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "test_stop")
         snapshot = observed["profile_snapshot"]
         self.assertIsInstance(snapshot, dict)
-        self.assertEqual(snapshot["version"], "profile_snapshot_v1")
+        self.assertEqual(snapshot["version"], "profile_snapshot_v2")
         self.assertEqual(snapshot["project_profile_id"], "typescript_fullstack_v1")
         self.assertEqual(snapshot["language_profile_id"], "typescript_v1")
         self.assertEqual(snapshot["target_remote"], "https://github.com/example/typescript-target.git")
@@ -740,7 +749,7 @@ class PhaseOneTest(unittest.TestCase):
             response["execution_profile"],
             {
                 "classification": "profiled",
-                "snapshot_version": "profile_snapshot_v1",
+                "snapshot_version": "profile_snapshot_v2",
                 "project_profile_id": "typescript_fullstack_v1",
                 "language_profile_id": "typescript_v1",
             },
@@ -962,7 +971,7 @@ class PhaseOneTest(unittest.TestCase):
             {
                 "run_id": run_id,
                 "profile_snapshot": self.profile_snapshot(),
-                "designer_contract_version": "vertical_design_graph_v1",
+                **CURRENT_CONTRACT_PINS,
             }
         )
         response = {
@@ -1000,7 +1009,7 @@ class PhaseOneTest(unittest.TestCase):
             {
                 "run_id": run_id,
                 "profile_snapshot": self.profile_snapshot(),
-                "designer_contract_version": "vertical_design_graph_v1",
+                **CURRENT_CONTRACT_PINS,
             }
         )
         stdout = io.StringIO()

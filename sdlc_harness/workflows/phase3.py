@@ -18,12 +18,11 @@ import re
 
 from ..agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     DeveloperPlanAgent,
-    resolve_implementation_plan_contract,
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION_V2,
     design_bundle_findings,
     validate_vertical_design_graph,
 )
@@ -48,15 +47,22 @@ from ..profiles import (
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
+from ..profiles.runtime_config import runtime_config_policy
+from ..repo_context.landscape import after_mount_middleware
+from ..repo_context.runtime_config import collect_repo_runtime_config
 from ..repo_context import (
     CodeGraphContextProvider,
     discover_profile_source_files,
     validate_repo_landscape,
 )
+from ..storage.artifact_index import record_read
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..workspaces import RunWorkspaceManager
+from ..core.coerce import dict_items as _dict_items
+from ..core.coerce import dict_value as _dict_value
+from ..agents.designer.ui_context import build_ui_repo_context
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "approve_checkpoint",
@@ -73,6 +79,8 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
         "implementation_target_component_invalid",
         "implementation_plan_component_invalid",
         "implementation_plan_dependency_cycle",
+        "implementation_plan_design_composition_blocked",
+        "implementation_plan_ui_runtime_blocked",
     }
 )
 
@@ -133,13 +141,17 @@ class PhaseThreeWorkflow:
         """Replay approved Phase 3 exchanges and pause at the next provider output."""
 
         state = self.store.read_state(run_id)
-        if str(state.get("status") or "") != "implementation_plan_step_review_required":
+        pinned_review = state.get("implementation_plan_step_review")
+        status = str(state.get("status") or "")
+        # A plan run killed mid-way leaves an in-flight status: plan again from the frozen inputs; with review on,
+        # approved exchanges replay identically.
+        interrupted = status in _INTERRUPTED_PLAN_STATUSES
+        if status != "implementation_plan_step_review_required" and not interrupted:
             raise HarnessError(
                 "implementation_plan_step_review_not_pending",
                 f"Run has no pending Phase 3 step review: {run_id}",
                 run_id=run_id,
             )
-        pinned_review = state.get("implementation_plan_step_review")
         if isinstance(pinned_review, dict):
             decision = {
                 key: self.plan_step_review[key]
@@ -158,17 +170,9 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
-        last_error = _dict_value(state.get("last_error"))
-        recoverable_step_review_drift = (
-            status == "failed"
-            and str(last_error.get("error_code") or "") == "implementation_plan_step_review_drift"
-        )
         if (
             str(state.get("current_phase") or "") != "implementation_planning"
-            or (
-                status not in {"waiting_implementation_plan_review", "blocked"}
-                and not recoverable_step_review_drift
-            )
+            or status not in {"waiting_implementation_plan_review", "blocked"}
         ):
             raise HarnessError(
                 "implementation_plan_revalidation_not_allowed",
@@ -181,6 +185,12 @@ class PhaseThreeWorkflow:
                 return self._revalidate_implementation_plan_locked(run_id=run_id)
             except LlmStepReviewRequired as exc:
                 return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
+            except HarnessError as exc:
+                if exc.error_code not in DESIGN_ROUTING_ERROR_CODES:
+                    raise
+                state = self.store.read_state(run_id)
+                self._mark_phase3_failed(state, run_id=run_id, error=exc)
+                return self._status_response(self.store.read_state(run_id), created_new_run=False)
 
     def _revalidate_implementation_plan_locked(self, *, run_id: str) -> dict[str, object]:
         state = self.store.read_state(run_id)
@@ -220,8 +230,27 @@ class PhaseThreeWorkflow:
             state=state,
             run_id=run_id,
         )
+        component_plan_inputs = _with_runtime_config(
+            component_plan_inputs,
+            planning_policy=planning_policy,
+            target_path=target_path,
+            target_files=target_files,
+        )
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
+        component_plan_inputs = _with_repo_target_facts(
+            component_plan_inputs,
+            provider=self.repo_context_provider,
+            target_path=target_path,
+            vertical_design_graph=vertical_design_graph,
+            target_files=target_files,
+        )
+        component_plan_inputs = _with_unit_test_environment(
+            component_plan_inputs,
+            state=state,
+            target_path=target_path,
+            repo_landscape=repo_landscape,
+        )
         repo_context = self.repo_context_provider.collect(
             target_path=target_path,
             target_files=target_files,
@@ -256,7 +285,6 @@ class PhaseThreeWorkflow:
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
-            contract_version=plan_contract_version,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
             repo_landscape=repo_landscape,
@@ -276,6 +304,8 @@ class PhaseThreeWorkflow:
         previous_fingerprint = ""
         stalled = False
         repair_limit = self.settings.implementation_plan_repair_limit
+        prior_plan: dict[str, object] = {}
+        prior_review = None
         for repair_iteration in range(repair_limit + 1):
             version = start_version + repair_iteration
             state.update(
@@ -289,6 +319,11 @@ class PhaseThreeWorkflow:
                 }
             )
             self.store.write_state(state)
+            previous_round = (
+                _previous_review_round(prior_plan, plan_draft.structured, prior_review)
+                if prior_review is not None
+                else None
+            )
             review = self.validator.review(
                 structured_plan=plan_draft.structured,
                 requirement_packet=requirement_packet,
@@ -307,6 +342,7 @@ class PhaseThreeWorkflow:
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
+                previous_round=previous_round,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -342,13 +378,14 @@ class PhaseThreeWorkflow:
             }
             state.update({"latest_artifacts": merged_artifacts, "quality_reports": quality_reports})
             self.store.write_state(state)
-            if review.ok or repair_iteration >= repair_limit:
+            if review.ok or review.inconclusive or repair_iteration >= repair_limit:
                 break
             fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
             if fingerprint == previous_fingerprint:
                 stalled = True
                 break
             previous_fingerprint = fingerprint
+            prior_plan, prior_review = plan_draft.structured, review
             feedback = review.developer_feedback or "\n".join(review.issues)
             plan_draft = self.developer.repair_plan(
                 previous_draft=plan_draft,
@@ -379,17 +416,20 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
-                contract_version=plan_contract_version,
                 vertical_design_graph=vertical_design_graph,
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
             )
         if review is None or not review.ok:
-            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
+            error_code = _plan_review_error_code(review, stalled=stalled)
             error = HarnessError(
                 error_code,
-                f"Implementation plan revalidation stopped with {len(review.issues) if review else 0} issue(s).",
+                (
+                    review.summary
+                    if review is not None and review.inconclusive
+                    else f"Implementation plan revalidation stopped with {len(review.issues) if review else 0} issue(s)."
+                ),
                 run_id=run_id,
             )
             state.update(
@@ -503,33 +543,53 @@ class PhaseThreeWorkflow:
         self.store.write_state(state)
 
         requirement_packet = frozen_requirement.requirement_packet
-        design_artifact = design_abs_path.read_text(encoding="utf-8")
-        requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
-        class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
-        sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
-        (
-            plan_contract_version,
-            vertical_design_graph,
-            vertical_trace_graph,
-            repo_landscape,
-            component_plan_inputs,
-        ) = self._component_plan_context(
-            state=state,
-            run_id=run_id,
-            artifact_paths=artifact_paths,
-            requirement_revision=frozen_requirement.canonical_model.revision,
-            requirement_contract_version=frozen_requirement.contract_version,
-        )
         issue_key = _issue_key_from_state(state)
-        repo_context = self.repo_context_provider.collect(
-            target_path=target_path,
-            target_files=target_files,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            issue_key=issue_key,
-            vertical_design_graph=vertical_design_graph,
-        ).to_dict()
         try:
+            # State already left the Design checkpoint, so admission failures must still mark the run.
+            design_artifact = design_abs_path.read_text(encoding="utf-8")
+            requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
+            class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
+            sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
+            (
+                plan_contract_version,
+                vertical_design_graph,
+                vertical_trace_graph,
+                repo_landscape,
+                component_plan_inputs,
+            ) = self._component_plan_context(
+                state=state,
+                run_id=run_id,
+                artifact_paths=artifact_paths,
+                requirement_revision=frozen_requirement.canonical_model.revision,
+                requirement_contract_version=frozen_requirement.contract_version,
+            )
+            component_plan_inputs = _with_runtime_config(
+                component_plan_inputs,
+                planning_policy=planning_policy,
+                target_path=target_path,
+                target_files=target_files,
+            )
+            component_plan_inputs = _with_repo_target_facts(
+                component_plan_inputs,
+                provider=self.repo_context_provider,
+                target_path=target_path,
+                vertical_design_graph=vertical_design_graph,
+                target_files=target_files,
+            )
+            component_plan_inputs = _with_unit_test_environment(
+                component_plan_inputs,
+                state=state,
+                target_path=target_path,
+                repo_landscape=repo_landscape,
+            )
+            repo_context = self.repo_context_provider.collect(
+                target_path=target_path,
+                target_files=target_files,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                issue_key=issue_key,
+                vertical_design_graph=vertical_design_graph,
+            ).to_dict()
             plan_draft = self.developer.plan(
                 run_id=run_id,
                 source_ref=str(state.get("source_ref") or ""),
@@ -555,7 +615,6 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
-                contract_version=plan_contract_version,
                 vertical_design_graph=vertical_design_graph,
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
@@ -575,6 +634,8 @@ class PhaseThreeWorkflow:
         previous_fingerprint = ""
         stalled = False
         repair_limit = self.settings.implementation_plan_repair_limit
+        prior_plan: dict[str, object] = {}
+        prior_review = None
         for repair_iteration in range(repair_limit + 1):
             version = repair_iteration + 1
             if repair_iteration == 0:
@@ -603,6 +664,11 @@ class PhaseThreeWorkflow:
                 )
             self.store.write_state(state)
 
+            previous_round = (
+                _previous_review_round(prior_plan, plan_draft.structured, prior_review)
+                if prior_review is not None
+                else None
+            )
             review = self.validator.review(
                 structured_plan=plan_draft.structured,
                 requirement_packet=requirement_packet,
@@ -621,6 +687,7 @@ class PhaseThreeWorkflow:
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
+                previous_round=previous_round,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -663,7 +730,7 @@ class PhaseThreeWorkflow:
                 }
             )
             self.store.write_state(state)
-            if review.ok or repair_iteration >= repair_limit:
+            if review.ok or review.inconclusive or repair_iteration >= repair_limit:
                 break
 
             fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
@@ -671,6 +738,7 @@ class PhaseThreeWorkflow:
                 stalled = True
                 break
             previous_fingerprint = fingerprint
+            prior_plan, prior_review = plan_draft.structured, review
             feedback = review.developer_feedback or "\n".join(review.issues)
             try:
                 plan_draft = self.developer.repair_plan(
@@ -702,7 +770,6 @@ class PhaseThreeWorkflow:
                     planning_policy=planning_policy,
                     prompt_directive=prompt_directive,
                     verification_policy=verification_policy,
-                    contract_version=plan_contract_version,
                     vertical_design_graph=vertical_design_graph,
                     vertical_trace_graph=vertical_trace_graph,
                     repo_landscape=repo_landscape,
@@ -720,11 +787,13 @@ class PhaseThreeWorkflow:
                 run_id=run_id,
             )
         if not review.ok:
-            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
+            error_code = _plan_review_error_code(review, stalled=stalled)
             error = HarnessError(
                 error_code,
                 (
-                    f"Validator.review_plan found {len(review.issues)} issue(s) "
+                    review.summary
+                    if review.inconclusive
+                    else f"Validator.review_plan found {len(review.issues)} issue(s) "
                     f"after {review.repair_iterations} repair iteration(s)."
                 ),
                 run_id=run_id,
@@ -842,27 +911,16 @@ class PhaseThreeWorkflow:
         dict[str, object],
         dict[str, object],
     ]:
-        """Load the immutable Vertical Design inputs only for V4 runs."""
+        """Load the immutable Vertical Design inputs only for V5 runs."""
 
-        contract_version = resolve_implementation_plan_contract(state)
-        if (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION_V2
-            and contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
-        ):
-            raise HarnessError(
-                "implementation_plan_contract_invalid",
-                "Vertical Design Graph V2 requires Component-aware Plan V4.",
-                run_id=run_id,
-            )
-        if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
-            return contract_version, {}, {}, {}, {}
+        contract_version = COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
         if (
             str(state.get(VERTICAL_TRACE_STATE_KEY) or "") != VERTICAL_TRACE_GRAPH_VERSION
             or str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") != "enforce"
         ):
             raise HarnessError(
                 "implementation_plan_contract_invalid",
-                "Component-aware Plan V4 requires enforced Vertical Design traceability.",
+                "Component-aware Plan V5 requires enforced Vertical Design traceability.",
                 run_id=run_id,
             )
         design_ref = _required_artifact(artifact_paths, "vertical_design_graph", run_id=run_id)
@@ -890,7 +948,7 @@ class PhaseThreeWorkflow:
         composition_findings = design_bundle_findings(design_graph, landscape=landscape)
         if composition_findings:
             raise HarnessError(
-                "implementation_plan_contract_invalid",
+                "implementation_plan_design_composition_blocked",
                 f"Vertical Design graph has {len(composition_findings)} unresolved runtime composition blocker(s).",
                 run_id=run_id,
             )
@@ -1096,8 +1154,114 @@ class PhaseThreeWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
-            "implementation_plan_contract_version": resolve_implementation_plan_contract(state),
+            "implementation_plan_contract_version": state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY),
         }
+
+
+def _with_runtime_config(
+    inputs: dict[str, object],
+    *,
+    planning_policy,
+    target_path: Path,
+    target_files: list[str],
+) -> dict[str, object]:
+    """Bind a V5 plan to the runtime config facts the Planner and Validator both see."""
+
+    if not runtime_config_policy(
+        planning_policy.project_profile_id
+    ):
+        return inputs
+    return {
+        **inputs,
+        "repo_runtime_config": collect_repo_runtime_config(target_path=target_path, source_files=target_files),
+    }
+
+
+def _with_repo_target_facts(
+    inputs: dict[str, object],
+    *,
+    provider,
+    target_path: Path,
+    vertical_design_graph: dict[str, object],
+    target_files: list[str] | None = None,
+) -> dict[str, object]:
+    """Record repository facts about runtime targets that the Planner cannot see in the Design.
+
+    `repo_symbol_kinds`: whether a target named like its file is a class or a function.
+    `repo_target_callers`: the other files that call or register an existing target.
+    `repo_target_tests`: the existing tests that import a target or attachment-owner file.
+    `repo_after_mount_middleware`: middleware (error handlers) registered after a target's file or
+    its registering file is mounted.
+    """
+
+    targets: list[tuple[str, str]] = []
+    files: set[str] = set()
+    for node in _dict_items(vertical_design_graph.get("nodes")):
+        binding = node.get("runtime_binding")
+        if not isinstance(binding, dict):
+            continue
+        target = binding.get("target") if isinstance(binding.get("target"), dict) else {}
+        path = str(target.get("path") or "").strip().replace("\\", "/")
+        symbol = str(target.get("symbol") or "").strip()
+        if path and symbol and (target_path / path).is_file():
+            targets.append((path, symbol))
+        attachment = binding.get("attachment") if isinstance(binding.get("attachment"), dict) else {}
+        for candidate in (path, str(attachment.get("owner_path") or "").strip().replace("\\", "/")):
+            if candidate and (target_path / candidate).is_file():
+                files.add(candidate)
+    # Only these targets are ambiguous: the Planner binds legacy methods to them by kind.
+    same_name = [
+        (path, symbol)
+        for path, symbol in targets
+        if path.endswith(".ts") and Path(path).stem.lower() == symbol.lower()
+    ]
+    facts: dict[str, object] = {}
+    if same_name:
+        facts["repo_symbol_kinds"] = provider.symbol_kinds(target_path, same_name)
+    if targets:
+        facts["repo_target_callers"] = provider.target_callers(target_path, targets)
+        mounted = sorted(
+            {path for path, _ in targets}
+            | {
+                str(caller.get("path") or "")
+                for item in _dict_items(facts["repo_target_callers"])
+                for caller in _dict_items(item.get("callers"))
+            }
+            - {""}
+        )
+        middleware = after_mount_middleware(target_path, files=mounted, source_files=list(target_files or []))
+        if middleware:
+            facts["repo_after_mount_middleware"] = [
+                {"path": path, "middleware": items} for path, items in middleware.items()
+            ]
+    if files:
+        facts["repo_target_tests"] = provider.target_tests(target_path, sorted(files))
+    return {**inputs, **facts} if facts else inputs
+
+
+def _with_unit_test_environment(
+    inputs: dict[str, object],
+    *,
+    state: dict[str, object],
+    target_path: Path,
+    repo_landscape: dict[str, object],
+) -> dict[str, object]:
+    """Record how the repository's unit tests run, from the same scan the Designer's UI context uses."""
+
+    profile = _dict_value(state.get("profile_snapshot"))
+    context = build_ui_repo_context(
+        target_path=target_path,
+        landscape=repo_landscape,
+        project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
+        verification_policy_version=str(profile.get("verification_policy_version") or ""),
+    )
+    verification = _dict_value(_dict_value(context).get("verification"))
+    environment = {
+        key: verification[key]
+        for key in ("unit_environment", "dom_capable", "dom_test_directive")
+        if key in verification
+    }
+    return {**inputs, "repo_unit_test_environment": environment} if environment else inputs
 
 
 def _target_source_files(
@@ -1142,6 +1306,44 @@ def _next_implementation_plan_version(artifact_dir: Path) -> int:
         if match:
             versions.append(int(match.group(1)))
     return max(versions, default=0) + 1
+
+
+# In-progress plan statuses; finding one under the run lock means the plan run was killed (graph `running` nodes).
+_INTERRUPTED_PLAN_STATUSES = {
+    "implementation_planning",
+    "implementation_plan_validating",
+    "implementation_plan_repairing",
+    "implementation_plan_revalidating",
+}
+
+
+def _previous_review_round(
+    previous_plan: dict[str, object],
+    plan: dict[str, object],
+    review: object,
+) -> dict[str, object]:
+    """What the next Validator round re-checks: the last blocking issues and what the repair changed."""
+
+    before = {str(unit.get("unit_id") or ""): unit for unit in _dict_list(previous_plan.get("work_units"))}
+    return {
+        "blocking_issues": list(getattr(review, "issues", [])),
+        "changed_unit_ids": sorted(
+            str(unit.get("unit_id") or "")
+            for unit in _dict_list(plan.get("work_units"))
+            if unit != before.get(str(unit.get("unit_id") or ""))
+        ),
+        "changed_plan_fields": [
+            key
+            for key in ("runtime_config_impact", "implementation_signature_contract")
+            if previous_plan.get(key) != plan.get(key)
+        ],
+    }
+
+
+def _plan_review_error_code(review: object, *, stalled: bool) -> str:
+    if getattr(review, "inconclusive", False):
+        return "implementation_plan_review_inconclusive"
+    return "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
 
 
 def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[str]) -> str:
@@ -1196,6 +1398,7 @@ def _optional_artifacts(artifact_paths: dict[str, str], *keys: str) -> dict[str,
 
 
 def _read_json_artifact(path: Path, *, run_id: str) -> dict[str, object]:
+    record_read(path)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -1211,10 +1414,6 @@ def _read_json_artifact(path: Path, *, run_id: str) -> dict[str, object]:
             run_id=run_id,
         )
     return parsed
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
 
 
 def _string_dict(value: object) -> dict[str, str]:

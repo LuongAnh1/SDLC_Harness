@@ -7,35 +7,41 @@ capability already exist so runtime surface bindings can be checked without an L
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 from pathlib import Path
 import re
 
-from ...profiles import build_verification_stage_policy, get_project_profile
+from ...profiles import (
+    VERIFICATION_STAGE_POLICY_VERSION,
+    build_verification_stage_policy_version,
+    get_project_profile,
+)
+from ...core.coerce import dict_copies as _dicts
+from ...core.errors import HarnessError
+from ..validator.typescript_ast import TypeScriptAstExtractor
 
-UI_REPO_CONTEXT_VERSION = "ui_repo_experience_context_v1"
+UI_REPO_CONTEXT_VERSION = "ui_repo_experience_context_v2"
 WEB_COMPONENT_ID = "web"
 MAX_WEB_FILES = 200
 MAX_FILE_BYTES = 200_000
 
-# shortcut: regex parse cho profile React/TS cố định, thay bằng AST/CodeGraph khi hỗ trợ profile khác.
-_COMPONENT_DECL = re.compile(r"^(?:export\s+)?(?:default\s+)?function\s+([A-Z][A-Za-z0-9_]*)\s*\(", re.M)
-_IMPORT = re.compile(
-    r"import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,?\s*)?(?:\{([^}]*)\})?\s*from\s*[\"'](\.{1,2}/[^\"']+)[\"']"
-)
-_JSX_TAG = re.compile(r"<([A-Z][A-Za-z0-9_]*)((?:[^<>]|=>)*?)/?>", re.S)
-_JSX_ATTR = re.compile(r"(?:^|\s)([A-Za-z_][\w]*)\s*=")
-_DESTRUCTURED_SIGNATURE = re.compile(r"\(\s*\{([^)]*?)\}\s*:\s*([A-Z][\w]*)")
-_NAMED_SIGNATURE = re.compile(r"\(\s*[A-Za-z_]\w*\s*:\s*([A-Z][\w]*)")
-_PROP_FIELD = re.compile(r"(?:^|[;,{\n])\s*(?:readonly\s+)?([A-Za-z_]\w*)(\?)?\s*:", re.M)
-_INLINE_SIGNATURE = re.compile(r"\(\s*\{([^)]*?)\}\s*:\s*\{([^)]*)\}\s*\)")
-_DEFAULTED = re.compile(r"([A-Za-z_]\w*)\s*=")
 _ASYNC_EXPORT = re.compile(r"export\s+async\s+function\s+([A-Za-z_]\w*)")
 _AUTH_SIGNAL = re.compile(r"\b(session\w*|auth\w*|login\w*|bearer\w*|accessToken\w*)\b", re.I)
 _VITEST_ENV = re.compile(r"environment\s*:\s*[\"']([\w-]+)[\"']")
+# Per-file opt-in, valid only in a test file's leading comment block.
+_VITEST_ENV_DIRECTIVE = re.compile(r"^\s*(?://|/\*+|\*)\s*@vitest-environment\s+([\w-]+)", re.M)
+_DIRECTIVE_SCAN_CHARS = 2000
+_DOM_ENVIRONMENTS = frozenset({"jsdom", "happy-dom"})
+# HTTP clients: a default/namespace import from a package (or an instance it `.create()`s)
+# called with a literal URL, e.g. `axios.get("articles")`, `ky.post(`url`)`.
+_PACKAGE_DEFAULT_IMPORT = re.compile(
+    r"import\s+(?:([A-Za-z_$][\w$]*)|\*\s+as\s+([A-Za-z_$][\w$]*))\s*(?:,\s*\{[^}]*\})?\s*from\s*[\"']([^\"'.][^\"']*)[\"']"
+)
+_CLIENT_FACTORY = re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.create\s*\(")
+_HTTP_METHOD_CALL = r"(?<![\w$.]){name}\.(?:get|post|put|patch|delete|head|options|request)\s*\(\s*[\"'`]"
 _STYLE_SUFFIXES = (".css", ".scss", ".sass", ".less")
-_SKIP_TAGS = frozenset({"StrictMode", "Fragment", "Suspense"})
 
 
 def build_ui_repo_context(
@@ -43,8 +49,14 @@ def build_ui_repo_context(
     target_path: Path,
     landscape: dict[str, object],
     project_profile_id: str,
+    verification_policy_version: str = "",
+    ast_extractor: TypeScriptAstExtractor | None = None,
+    typescript_package_root: Path | None = None,
 ) -> dict[str, object] | None:
-    """Return the UI baseline, or None when the frozen landscape has no web component."""
+    """Return the UI baseline, or None when the frozen landscape has no web component.
+
+    ``verification_policy_version`` is the run's pinned stage policy; empty means the current policy.
+    """
 
     web = next(
         (item for item in _dicts(landscape.get("components")) if item.get("component_id") == WEB_COMPONENT_ID),
@@ -58,6 +70,7 @@ def build_ui_repo_context(
     file_hashes: dict[str, str] = {}
     style_hashes: dict[str, str] = {}
     styles: list[str] = []
+    test_environments: list[str] = []
     for root in roots:
         base = (root_path / root).resolve()
         if not base.is_dir() or not _within(base, root_path):
@@ -69,7 +82,12 @@ def build_ui_repo_context(
             if path.suffix in _STYLE_SUFFIXES:
                 styles.append(relative)
                 style_hashes[relative] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-            elif path.suffix in {".ts", ".tsx"} and ".test." not in path.name and ".spec." not in path.name:
+            elif path.suffix in {".ts", ".tsx"} and (".test." in path.name or ".spec." in path.name):
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    found = _VITEST_ENV_DIRECTIVE.search(handle.read(_DIRECTIVE_SCAN_CHARS))
+                if found:
+                    test_environments.append(found.group(1))
+            elif path.suffix in {".ts", ".tsx"}:
                 if path.stat().st_size <= MAX_FILE_BYTES:
                     raw = path.read_bytes()
                     # Same hash as DesignerToolRegistry repo refs so the Designer can cite either.
@@ -79,25 +97,36 @@ def build_ui_repo_context(
     evidence: set[str] = set()
     uncertainty: list[str] = []
     components: dict[str, dict[str, object]] = {}
-    bodies: dict[str, str] = {}
-    imports: dict[str, dict[str, str]] = {}
-    for relative, text in sources.items():
-        imports[relative] = _resolve_imports(relative, text, sources)
-        declarations = list(_COMPONENT_DECL.finditer(text))
-        for index, match in enumerate(declarations):
-            symbol = match.group(1)
-            end = declarations[index + 1].start() if index + 1 < len(declarations) else len(text)
-            body = text[match.start():end]
-            ref = f"{relative}#{symbol}"
-            line = text.count("\n", 0, match.start()) + 1
+    try:
+        facts = (ast_extractor or TypeScriptAstExtractor()).extract_ui_facts(
+            target_path=root_path, source_paths=list(sources), typescript_package_root=typescript_package_root,
+        )
+        extraction_status = "complete"
+    except HarnessError as exc:
+        facts = {}
+        extraction_status = "unavailable"
+        uncertainty.append(f"UI AST extraction unavailable ({exc.error_code}): {exc.message}")
+    render_facts: dict[str, dict[str, object]] = {}
+    for relative, file in facts.items():
+        if file.get("content_sha256") != file_hashes[relative]:
+            extraction_status = "partial"
+            uncertainty.append(f"Source changed during UI extraction: {relative}.")
+            continue
+        if file.get("diagnostics"):
+            extraction_status = "partial"
+            uncertainty.append(f"TypeScript parse diagnostics in {relative}: {file['diagnostics']}")
+        for component in _dicts(file.get("components")):
+            ref = f"{relative}#{component['symbol']}"
+            line = component["start_line"]
             evidence_ref = f"repo:{relative}#L{line}@{file_hashes[relative]}"
             components[ref] = {
-                "path": relative,
-                "symbol": symbol,
-                "props": _props(body, text),
-                "evidence_ref": evidence_ref,
+                "path": relative, "symbol": component["symbol"], "props": component["props"],
+                "props_status": component["props_status"], "evidence_ref": evidence_ref,
             }
-            bodies[ref] = body
+            render_facts[ref] = {**component, "renders_status": "unknown" if file.get("diagnostics") else ("partial" if component.get("unresolved_tags") else "known")}
+            if component.get("uncertainty") or component.get("unresolved_tags"):
+                extraction_status = "partial"
+                uncertainty.append(f"{ref}: {component.get('uncertainty') or component.get('unresolved_tags')}")
 
     entry_anchor = next(
         (
@@ -110,17 +139,8 @@ def build_ui_repo_context(
     entrypoint: dict[str, object] | None = None
     if entry_anchor is not None and str(entry_anchor.get("path") or "") in sources:
         entry_path = str(entry_anchor.get("path"))
-        entry_text = sources[entry_path]
-        render_at = entry_text.find(".render(")
-        ref = next(
-            (
-                candidate
-                for tag, _ in _JSX_TAG.findall(entry_text[render_at:] if render_at >= 0 else "")
-                for candidate in (imports[entry_path].get(tag) or f"{entry_path}#{tag}",)
-                if tag not in _SKIP_TAGS and candidate in components
-            ),
-            "",
-        )
+        ref = next((candidate for candidate in _strings(_dict(facts.get(entry_path)).get("entrypoint_candidates"))
+                    if candidate in components), "")
         root_symbol = ref.rpartition("#")[2]
         if ref:
             entrypoint = {"ref": ref, "path": ref.rpartition("#")[0], "symbol": root_symbol}
@@ -139,18 +159,10 @@ def build_ui_repo_context(
                 continue
             seen.add(ref)
             path = str(components[ref]["path"])
-            renders: list[str] = []
-            passes: dict[str, list[str]] = {}
-            for tag, attrs in _JSX_TAG.findall(bodies[ref]):
-                if tag in _SKIP_TAGS or tag == components[ref]["symbol"]:
-                    continue
-                child = imports[path].get(tag) or f"{path}#{tag}"
-                if child not in components:
-                    continue
-                if child not in renders:
-                    renders.append(child)
-                passes[child] = sorted({*passes.get(child, []), *_JSX_ATTR.findall(attrs)})
-                queue.append(child)
+            component_facts = render_facts[ref]
+            renders = [str(edge["ref"]) for edge in _dicts(component_facts.get("renders")) if edge["ref"] in components]
+            passes = {str(edge["ref"]): _strings(edge.get("props")) for edge in _dicts(component_facts.get("renders"))}
+            queue.extend(renders)
             chain.append(
                 {
                     "ref": ref,
@@ -158,6 +170,7 @@ def build_ui_repo_context(
                     "symbol": components[ref]["symbol"],
                     "renders": renders,
                     "passes_props": passes,
+                    "renders_status": component_facts["renders_status"],
                     "evidence_ref": components[ref]["evidence_ref"],
                 }
             )
@@ -166,14 +179,19 @@ def build_ui_repo_context(
     data_clients = [
         {"ref": f"{relative}#{symbol}", "path": relative, "symbol": symbol}
         for relative, text in sources.items()
-        if "fetch(" in text
+        if _performs_http(text)
         for symbol in _ASYNC_EXPORT.findall(text)
     ]
     auth_paths = sorted(relative for relative, text in sources.items() if _AUTH_SIGNAL.search(text))
     inline_styles = sum(text.count("style={") for text in sources.values())
     class_names = sum(text.count("className=") for text in sources.values())
 
-    stage_ids = list(build_verification_stage_policy(project=get_project_profile(project_profile_id)).stage_ids)
+    stage_ids = list(
+        build_verification_stage_policy_version(
+            project=get_project_profile(project_profile_id),
+            policy_version=verification_policy_version or VERIFICATION_STAGE_POLICY_VERSION,
+        ).stage_ids
+    )
     unit_environment = ""
     for candidate in ("vitest.config.ts", *(f"{Path(root).parent.as_posix()}/vitest.config.ts" for root in roots)):
         config_path = root_path / candidate
@@ -181,16 +199,24 @@ def build_ui_repo_context(
             found = _VITEST_ENV.search(config_path.read_text(encoding="utf-8", errors="replace"))
             unit_environment = found.group(1) if found else "node"
             break
+    dom_directives = collections.Counter(env for env in test_environments if env in _DOM_ENVIRONMENTS)
+    dom_test_directive = (
+        f"// @vitest-environment {dom_directives.most_common(1)[0][0]}"
+        if dom_directives and unit_environment not in _DOM_ENVIRONMENTS
+        else ""
+    )
 
     context: dict[str, object] = {
         "schema_version": UI_REPO_CONTEXT_VERSION,
         "project_profile_id": project_profile_id,
         "web_roots": roots,
+        "extraction": {"method": "typescript_compiler_ast_v1", "status": extraction_status},
         "entrypoint": entrypoint,
         "composition_chain": chain,
         "components": dict(sorted(components.items())),
         "data_clients": data_clients,
-        "auth": {"present": bool(auth_paths), "evidence_paths": auth_paths},
+        "auth": {"present": bool(auth_paths), "evidence_paths": auth_paths,
+                 "status": "unverified_hint", "method": "source_identifier_scan"},
         "styles": {
             "stylesheet_files": sorted(styles),
             "stylesheet_digests": dict(sorted(style_hashes.items())),
@@ -201,7 +227,9 @@ def build_ui_repo_context(
         "verification": {
             "active_stage_ids": stage_ids,
             "unit_environment": unit_environment,
-            "dom_capable": unit_environment in {"jsdom", "happy-dom"},
+            "dom_capable": unit_environment in _DOM_ENVIRONMENTS or bool(dom_directives),
+            # The config default is not a DOM: new DOM tests opt in with the same first-line directive the repo uses.
+            **({"dom_test_directive": dom_test_directive} if dom_test_directive else {}),
             "browser_stage_active": "browser_e2e" in stage_ids,
         },
         "evidence_refs": sorted(evidence),
@@ -240,67 +268,14 @@ def chain_path_to(context: dict[str, object], ref: str) -> list[str]:
     return []
 
 
-def _props(body: str, text: str) -> list[dict[str, object]]:
-    signature = body[: body.find("{", body.find(")")) + 1] if ")" in body else body[:400]
-    inline = _INLINE_SIGNATURE.search(signature)
-    if inline is not None:
-        defaults = set(_DEFAULTED.findall(inline.group(1)))
-        return [
-            {"name": name, "optional": bool(optional), "has_default": name in defaults}
-            for name, optional in _PROP_FIELD.findall(inline.group(2))
-        ]
-    destructured = _DESTRUCTURED_SIGNATURE.search(signature)
-    type_name = destructured.group(2) if destructured else ""
-    defaults = set(_DEFAULTED.findall(destructured.group(1))) if destructured else set()
-    if not type_name:
-        named = _NAMED_SIGNATURE.search(signature)
-        type_name = named.group(1) if named else ""
-    if not type_name:
-        return []
-    block = re.search(
-        rf"(?:interface\s+{re.escape(type_name)}\s*\{{|type\s+{re.escape(type_name)}\s*=\s*\{{)(.*?)\n\}}",
-        text,
-        re.S,
-    )
-    if block is None:
-        return []
-    return [
-        {"name": name, "optional": bool(optional), "has_default": name in defaults}
-        for name, optional in _PROP_FIELD.findall(block.group(1))
-    ]
+def _performs_http(text: str) -> bool:
+    """True for a module that calls ``fetch(`` or an HTTP client imported from a package with a literal URL."""
 
-
-def _resolve_imports(relative: str, text: str, sources: dict[str, str]) -> dict[str, str]:
-    resolved: dict[str, str] = {}
-    base = Path(relative).parent
-    for default_name, named, spec in _IMPORT.findall(text):
-        target = ""
-        stem = (base / spec).as_posix()
-        for candidate in (f"{stem}.tsx", f"{stem}.ts", f"{stem}/index.tsx", f"{stem}/index.ts"):
-            normalized = Path(candidate).as_posix()
-            parts: list[str] = []
-            for part in normalized.split("/"):
-                if part == "..":
-                    if parts:
-                        parts.pop()
-                elif part not in {"", "."}:
-                    parts.append(part)
-            normalized = "/".join(parts)
-            if normalized in sources:
-                target = normalized
-                break
-        if not target:
-            continue
-        pairs = [(default_name, default_name)] if default_name else []
-        for item in named.split(","):
-            item = item.strip().removeprefix("type ").strip()
-            if item:
-                original, _, local = item.partition(" as ")
-                pairs.append((local.strip() or original.strip(), original.strip()))
-        for local, original in pairs:
-            if local[:1].isupper():
-                resolved[local] = f"{target}#{original}"
-    return resolved
+    if "fetch(" in text:
+        return True
+    clients = {default or namespace for default, namespace, _ in _PACKAGE_DEFAULT_IMPORT.findall(text)}
+    clients |= {name for name, factory in _CLIENT_FACTORY.findall(text) if factory in clients}
+    return any(re.search(_HTTP_METHOD_CALL.format(name=re.escape(name)), text) for name in clients)
 
 
 def _digest(value: dict[str, object]) -> str:
@@ -318,10 +293,6 @@ def _within(path: Path, root: Path) -> bool:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

@@ -1,0 +1,33 @@
+Use case name: SaveArticleAsDraft
+Description: An author can save an article as a draft, keep working on it privately and publish it later. Until it is published, a draft exists only for its author.
+Participating Actors:
+- Author: a signed-in user who writes the draft.
+- Other User: a signed-in user who did not write the draft.
+- Visitor: a person who is not signed in.
+Entry conditions: The Author is signed in.
+Flow of events User System:
+1. The Author writes a new article in the editor and chooses to save it as a draft.
+2. The system saves the draft and shows it, clearly marked as a draft that is not published.
+3. The Author opens their profile.
+4. The system shows the Author's published articles and, in a separate list that only the Author can see, their drafts.
+5. The Author opens the draft, changes it and saves it as a draft again.
+6. The system keeps it as a draft with the changes.
+7. The Author publishes the draft.
+8. The system publishes it: the article leaves the drafts list, gets an address derived from its title like every other published article, and is dated at the moment of publishing, so it appears first wherever articles are listed newest first.
+Alternative flows:
+A1. An Other User reads, changes, deletes, favorites or comments on a draft, or a Visitor reads it, through any page or any API request. The system answers that the article was not found (HTTP 404), the draft stays unchanged, and nothing in the answer reveals the draft.
+A2. The Author browses any list of articles, including their own published articles, the global feed, tag filters and favorites. A draft appears only in the Author's drafts list, never in another list, not even for the Author.
+A3. Nobody, including the Author, can favorite or comment on a draft; such a request is refused and nothing is created.
+A4. Popular tags never include a tag used only by drafts; the tag appears once an article using it is published.
+A5. A published article never becomes a draft again. A request to turn it back into a draft is refused with an error message and the article stays published, also when a draft save and the publish of the same article are sent at the same time.
+A6. The Author publishes the same draft twice, for example from two browser tabs. The system publishes it once and keeps its first publishing date.
+A7. The Author deletes a draft. The system removes it without it ever having been published.
+A8. An Other User publishes an article with the same title as an existing draft. The system accepts it as if the draft did not exist, and the draft keeps its title. A draft may also have the same title as another draft.
+A9. The Author publishes a draft whose title a published article already uses. The system refuses, tells the Author that the title is already taken, and the draft stays a draft with its changes.
+Exit conditions:
+- Every article that existed before this feature stays published and keeps its date and its place in every list.
+- For everyone, lists, article counts and pages behave as if drafts did not exist, except the Author's drafts list.
+Quality requirements:
+- Hiding a draft in the web page is not enough: the server enforces every rule above.
+- While a save or publish request is in progress, its action cannot be triggered again.
+- The demo data contains exactly one draft written by the demo user alice, also after the demo data is loaded several times.

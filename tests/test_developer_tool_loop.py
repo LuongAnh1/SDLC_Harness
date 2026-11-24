@@ -16,6 +16,9 @@ from sdlc_harness.agents.developer.execution import (
     DeveloperExecutionError,
     DeveloperToolLoopExecutor,
     _developer_action_limit,
+    _developer_uiux_available,
+    _developer_uiux_guidance,
+    _developer_uiux_success_count,
     _action_memory,
     _action_prompt,
     _build_manifest,
@@ -25,17 +28,21 @@ from sdlc_harness.agents.developer.execution import (
     _diagnostic_repeat_count,
     _execute_action,
     _execution_phase,
+    _has_successful_target_inspection,
     _merge_context_only_manifest,
     _merge_database_entrypoint_scope_manifest,
     _merge_dependency_manifest_scope_manifest,
+    _merge_runtime_authority_manifest,
+    _remember_developer_uiux_guidance,
     _new_journal,
     _new_test_context_policy_error,
+    _observation_signatures,
     _parse_action,
     _prior_attempt_feedback,
     _prepare_patch_text,
-    _reopen_database_entrypoint_items,
+    _required_test_mutation_paths,
+    _reopen_scope_expanded_items,
     _search_code,
-    _selected_repair_paths,
     _step_review_start_ordinal,
     _supersede_pending_step_review,
     _timeout_diagnostic_completion_error,
@@ -43,10 +50,16 @@ from sdlc_harness.agents.developer.execution import (
     _timeout_diagnostic_state,
     _verification_diagnostic_fingerprint,
     _verification_repair_state,
+    _write_json_atomic,
     developer_execution_retry_allowed,
 )
 from sdlc_harness.agents.developer.repair_context import build_repair_closure
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.profiles import UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+from sdlc_harness.profiles.signature import (
+    IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
+    implementation_signature_contract_digest,
+)
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.profiles import VerificationStagePolicy
@@ -70,6 +83,18 @@ class ScriptedLlm:
         return self.responses.pop(0)
 
 
+_CANONICAL_TOOL = {
+    "list_files": "repo.list",
+    "read_file": "repo.read",
+    "search_code": "repo.search",
+    "read_diff": "repo.read_diff",
+    "write_file": "repo.write_file",
+    "apply_patch": "repo.apply_patch",
+    "replace_text": "repo.replace_text",
+    "complete": "execution.complete_unit",
+}
+
+
 def action(
     name: str,
     arguments: dict[str, object],
@@ -77,7 +102,8 @@ def action(
     finish_reason: str = "stop",
     summary: str = "",
 ) -> LlmCompletion:
-    payload: dict[str, object] = {"action": name, "arguments": arguments}
+    # Every Developer session is unit-aware: scripts may still use the short names, sent as canonical v2 tool IDs.
+    payload: dict[str, object] = {"action": _CANONICAL_TOOL.get(name, name), "arguments": arguments}
     if summary:
         payload["summary"] = summary
     return LlmCompletion(
@@ -134,6 +160,28 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_atomic_json_write_retries_transient_windows_lock(self) -> None:
+        target = self.repo / "journal.json"
+        original_replace = Path.replace
+        attempts = 0
+
+        def flaky_replace(source: Path, destination: Path) -> Path:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(5, "Access is denied")
+            return original_replace(source, destination)
+
+        with (
+            patch.object(Path, "replace", autospec=True, side_effect=flaky_replace),
+            patch("sdlc_harness.agents.developer.execution.time.sleep") as sleep,
+        ):
+            _write_json_atomic(target, {"ok": True})
+
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(0.05)
 
     def test_repo_search_prunes_generated_state_but_allows_one_dependency_package(self) -> None:
         source = self.repo / "src" / "app.ts"
@@ -193,6 +241,158 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(result["truncation_reason"], "file_limit")
         self.assertEqual(result["hits"], [])
 
+    def test_read_and_search_batches_are_bounded_and_keep_independent_results(self) -> None:
+        source_dir = self.repo / "src"
+        source_dir.mkdir()
+        (source_dir / "app.ts").write_text(
+            "const authorization = 'Bearer token';\nconst status = 401;\n",
+            encoding="utf-8",
+        )
+        (source_dir / "styles.css").write_text(
+            ".notice { color: green; }\n",
+            encoding="utf-8",
+        )
+        (source_dir / "outside.ts").write_text(
+            "const authorization = 'must stay outside this unit';\n",
+            encoding="utf-8",
+        )
+        common = {
+            "run_id": "run-batch-read",
+            "work_packet": {},
+            "repo_root": self.repo,
+            "item_paths": ["src/app.ts", "src/styles.css"],
+            "item": {"required_stage_ids": []},
+            "session_dir": self.runtime,
+            "max_write_chars": 18_000,
+            "repo_context_provider": CodeGraphContextProvider(fake_mode=True),
+            "verification_runner": SimpleNamespace(),
+            "verification_policy": None,
+        }
+
+        css_read_result = _execute_action(
+            action={"action": "repo.read", "arguments": {"path": "src/styles.css"}},
+            **common,
+        )
+        outside_read_result = _execute_action(
+            action={"action": "repo.read", "arguments": {"path": "src/outside.ts"}},
+            **common,
+        )
+        read_result = _execute_action(
+            action={
+                "action": "repo.read_batch",
+                "arguments": {
+                    "requests": [
+                        {"path": "src/app.ts"},
+                        {"path": "src/styles.css"},
+                        {"path": "src/missing.ts"},
+                    ]
+                },
+            },
+            **common,
+        )
+        search_result = _execute_action(
+            action={
+                "action": "repo.search_batch",
+                "arguments": {
+                    "queries": ["authorization", "401"],
+                    "prefix": "src",
+                    "limit_per_query": 5,
+                },
+            },
+            **common,
+        )
+        over_limit = _execute_action(
+            action={
+                "action": "repo.search_batch",
+                "arguments": {"queries": ["one", "two", "three", "four", "five"]},
+            },
+            **common,
+        )
+
+        self.assertTrue(read_result["ok"])
+        self.assertTrue(css_read_result["ok"])
+        self.assertIn(".notice { color: green; }", css_read_result["content"])
+        self.assertEqual(outside_read_result["error"], "developer_unit_read_out_of_scope")
+        self.assertTrue(read_result["partial"])
+        self.assertEqual(read_result["succeeded"], 2)
+        self.assertEqual(read_result["results"][0]["path"], "src/app.ts")
+        self.assertEqual(read_result["results"][1]["path"], "src/styles.css")
+        self.assertIn(".notice { color: green; }", read_result["results"][1]["content"])
+        self.assertEqual(
+            read_result["results"][2]["error"],
+            "developer_unit_read_out_of_scope",
+        )
+        self.assertTrue(search_result["ok"])
+        self.assertEqual(
+            [[hit["line"] for hit in row["hits"]] for row in search_result["results"]],
+            [[1], [2]],
+        )
+        self.assertEqual(
+            [hit["path"] for hit in search_result["results"][0]["hits"]],
+            ["src/app.ts"],
+        )
+        self.assertEqual(over_limit["error"], "invalid_search_batch")
+
+    def test_batch_reads_feed_authoritative_memory_and_completion_inspection(self) -> None:
+        result = {
+            "ok": True,
+            "batch_kind": "read",
+            "results": [
+                {
+                    "request_index": 0,
+                    "ok": True,
+                    "path": "src/app.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "content": "1: export const app = true;",
+                },
+                {
+                    "request_index": 1,
+                    "ok": True,
+                    "path": "src/app.test.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "content": "1: test('app', () => {});",
+                },
+            ],
+        }
+        action_row = {
+            "action": "repo.read_batch",
+            "arguments": {
+                "requests": [
+                    {"path": "src/app.ts"},
+                    {"path": "src/app.test.ts"},
+                ]
+            },
+            "result": result,
+            "summary": "Inspected production and test conventions.",
+        }
+
+        memory = _action_memory(
+            [action_row],
+            target_item_paths=["src/app.ts", "src/app.test.ts"],
+            max_evidence_chars=20_000,
+        )
+        batch_signatures = _observation_signatures(
+            {"action": action_row["action"], "arguments": action_row["arguments"]},
+            result=result,
+        )
+        single_signature = _observation_signatures(
+            {"action": "repo.read", "arguments": {"path": "src/app.ts"}},
+            result=result["results"][0],
+        )
+
+        self.assertEqual(
+            {row["path"] for row in memory["inspected_sources"]},
+            {"src/app.ts", "src/app.test.ts"},
+        )
+        self.assertTrue(batch_signatures & single_signature)
+        self.assertTrue(
+            _has_successful_target_inspection([action_row], item_path="src/app.test.ts")
+        )
+
     def test_codegraph_symbols_accepts_file_scope(self) -> None:
         (self.repo / ".codegraph").mkdir()
 
@@ -222,14 +422,27 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(result["resolved_operation"], "node")
 
     def work_packet(self) -> dict[str, object]:
+        """The current unit-aware packet: one execution unit per approved file."""
+
+        return self.unit_packet()
+
+    def _base_packet(self) -> dict[str, object]:
         paths = ["src/Main.java", "src/MainTest.java"]
+        profile = {
+            "project_profile_id": "typescript_fullstack_v1",
+            "language_profile_id": "typescript_v1",
+            "policy_version": "planning_path_policy_v1",
+        }
+        signature_contract: dict[str, object] = {
+            "version": IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
+            "profile": profile,
+            "entries": [],
+        }
+        signature_contract["digest"] = implementation_signature_contract_digest(signature_contract)
         return {
-            "schema_version": "developer_work_packet_profiled_v1",
-            "planning_profile": {
-                "project_profile_id": "typescript_fullstack_v1",
-                "language_profile_id": "typescript_v1",
-                "policy_version": "planning_path_policy_v1",
-            },
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "planning_profile": profile,
+            "implementation_signature_contract": signature_contract,
             "issue_key": "SDLC-2",
             "approved_plan": {"summary": "Implement and test one behavior."},
             "effective_design_contract": {"classes": ["Main"]},
@@ -256,6 +469,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
     def one_file_packet(self) -> dict[str, object]:
         packet = self.work_packet()
+        packet["execution_units"] = packet["execution_units"][:1]
         packet["proposed_files"] = packet["proposed_files"][:1]
         packet["implementation_steps"] = packet["implementation_steps"][:1]
         packet["requirement_coverage_by_file"] = {
@@ -847,10 +1061,143 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("rules", context["test_authoring_policy"])
         self.assertIn("shape-only fake", prompt)
         self.assertIn("codegraph.query", prompt)
+        self.assertIn("repo.read_batch", prompt)
+        self.assertIn("repo.search_batch", prompt)
+        self.assertIn("not regex or Boolean syntax", prompt)
         self.assertIn("affected_tests", prompt)
-        self.assertIn("never expands execution_unit_contract.write_paths", prompt)
+        self.assertIn(
+            "never expands execution_unit_contract.read_context_paths or write_paths",
+            prompt,
+        )
+        self.assertIn("only read_context_paths are searched", prompt)
+        self.assertIn("leave its inspection and repair to the later unit", prompt)
+        self.assertIn("Do not plan or draft a later file or action", context["next_action"]["response_scope"])
+        self.assertIn("timing, fallback, and error handling", context["next_action"]["design_rule"])
+        self.assertIn("redesign that presentation choice", context["next_action"]["design_rule"])
+        self.assertIn("not its full extent", context["next_action"]["obligation_check"])
+        self.assertIn("correct it in this unit", context["next_action"]["obligation_check"])
+        self.assertIn("Do not speculate about outcomes assigned to pending Verification stages", prompt)
         available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
         self.assertNotIn("package.ensure_workspace_dependency", available)
+
+    def test_uiux_capability_is_optional_screen_sticky_and_qa_is_read_only(self) -> None:
+        item = {
+            "id": "WU-UI",
+            "paths": ["src/View.tsx"],
+            "required_stage_ids": [],
+            "surfaces": ["ui"],
+            "surface_contracts": [
+                {
+                    "surface": "ui",
+                    "surface_contract": {
+                        "runtime_surface": {"screen_id": "heritage-list"}
+                    },
+                }
+            ],
+            "ui_obligations": [{"id": "UIO-1", "kind": "focus"}],
+            "qa_test_intents": [
+                {"stage_id": "browser_e2e", "target_paths": ["tests/e2e/list.spec.ts"]}
+            ],
+        }
+        manifest = {
+            "version": "developer_execution_manifest_v8",
+            "mode": "act",
+            "base_sha": "base",
+            "uiux_capability": {"status": "available", "optional": True},
+            "approved_runtime_decisions": [
+                {"id": "D-1", "status": "accepted", "text": "Use a demo fixture."}
+            ],
+        }
+        journal: dict[str, object] = {}
+        self.assertTrue(_developer_uiux_available(manifest=manifest, journal=journal, item=item))
+        _remember_developer_uiux_guidance(
+            journal=journal,
+            item=item,
+            result={
+                "ok": True,
+                "schema_version": "uiux_pro_max_search_v1",
+                "mode": "domain",
+                "selector": "ux",
+                "query": "loading feedback",
+                "results": [{"Do": "Keep feedback visible."}],
+            },
+        )
+        self.assertEqual(_developer_uiux_success_count(journal=journal, item=item), 1)
+        guidance = _developer_uiux_guidance(journal=journal, item=item)
+        self.assertEqual(guidance[0]["screen_id"], "heritage-list")
+
+        prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            uiux_available=True,
+            uiux_guidance=guidance,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertIn("uiux.search_guidance", prompt.split("Available actions:\n", 1)[1])
+        self.assertEqual(context["working_memory"]["uiux_guidance"], guidance)
+        self.assertIn("ui_obligations", context["active_focus"]["mandatory_obligations"])
+        self.assertNotIn("qa_test_intents", context["active_focus"]["mandatory_obligations"])
+        self.assertIn("qa_test_intents", context["read_only_qa_acceptance"])
+        self.assertIn("accepted_runtime_decisions", context["read_only_qa_acceptance"])
+
+        committed_profile = {"profile_id": "VP-1", "style": "quiet"}
+        ui_profile_prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            app_visual_profile=committed_profile,
+        )
+        ui_profile_context = json.loads(ui_profile_prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(ui_profile_context["app_visual_profile"]["profile"], committed_profile)
+
+        non_ui_profile_prompt = _action_prompt(
+            item={"id": "WU-RUNTIME", "paths": ["src/runtime.ts"], "required_stage_ids": []},
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            app_visual_profile=committed_profile,
+        )
+        non_ui_profile_context = json.loads(
+            non_ui_profile_prompt.split("Execution context:\n", 1)[1]
+        )
+        self.assertNotIn("app_visual_profile", non_ui_profile_context)
+
+        journal["uiux_disabled"] = {"reason": "designer_uiux_failed"}
+        self.assertFalse(_developer_uiux_available(manifest=manifest, journal=journal, item=item))
+        no_skill_prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        self.assertNotIn("uiux.search_guidance", no_skill_prompt)
 
     def test_repair_episode_survives_mutations_until_the_failed_stage_passes(self) -> None:
         failed = {
@@ -935,7 +1282,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(state["typecheck"]["upstream_changed_paths"], ["packages/db/src/index.ts"])
 
     def unit_packet(self) -> dict[str, object]:
-        packet = self.work_packet()
+        packet = self._base_packet()
         packet["execution_units"] = [
             {
                 "unit_id": "WU-001",
@@ -993,6 +1340,651 @@ class DeveloperToolLoopTest(unittest.TestCase):
         ]
         return packet
 
+    def test_validator_repair_selects_all_finding_units_and_dependency_closure(self) -> None:
+        packet = self.unit_packet()
+        packet["proposed_files"].extend(
+            [
+                {"path": "src/Independent.java", "purpose": "Independent scenario"},
+                {"path": "src/Unrelated.java", "purpose": "Unrelated scenario"},
+            ]
+        )
+        packet["output_contract"]["allowed_paths"].extend(
+            ["src/Independent.java", "src/Unrelated.java"]
+        )
+        packet["execution_units"].extend(
+            [
+                {
+                    "unit_id": "WU-003",
+                    "order": 3,
+                    "title": "Independent repair target",
+                    "depends_on": [],
+                    "write_paths": ["src/Independent.java"],
+                    "requirement_refs": ["REQ-2"],
+                    "acceptance_refs": ["AC-2"],
+                    "design_node_ids": [],
+                    "design_edge_ids": [],
+                },
+                {
+                    "unit_id": "WU-004",
+                    "order": 4,
+                    "title": "Unrelated unit",
+                    "depends_on": [],
+                    "write_paths": ["src/Unrelated.java"],
+                    "requirement_refs": ["REQ-3"],
+                    "acceptance_refs": ["AC-3"],
+                    "design_node_ids": [],
+                    "design_edge_ids": [],
+                },
+            ]
+        )
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-1", "unit_ids": ["WU-002"]},
+                    {"finding_id": "F-2", "unit_ids": ["WU-003"]},
+                ]
+            },
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_unit_closure",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(
+            [item["id"] for item in manifest["items"]],
+            ["WU-001", "WU-002", "WU-003"],
+        )
+        self.assertNotIn("src/Unrelated.java", manifest["workspace_allowed_paths"])
+
+    def test_validator_repair_does_not_force_test_mutation_in_dependency_only_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["test_target_paths"] = ["src/Main.java"]
+        packet["execution_units"][0]["test_intents"] = [
+            {"id": "TI-DEPENDENCY", "target_path": "src/Main.java"}
+        ]
+        packet["execution_units"][1]["test_target_paths"] = ["src/MainTest.java"]
+        packet["execution_units"][1]["test_intents"] = [
+            {"id": "TI-DIRECT", "target_path": "src/MainTest.java"}
+        ]
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-1", "unit_ids": ["WU-002"]},
+                ]
+            },
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_dependency_test_gate",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        items = {item["id"]: item for item in manifest["items"]}
+        self.assertFalse(items["WU-001"]["test_intent_mutation_required"])
+        self.assertTrue(items["WU-002"]["test_intent_mutation_required"])
+
+    def shared_entity_repair_manifest(self) -> dict[str, object]:
+        """WU-003 shares a file with the cited unit but is downstream of it, not a dependency."""
+
+        packet = self.unit_packet()
+        packet["proposed_files"].append({"path": "src/Extra.java", "purpose": "Downstream helper"})
+        packet["output_contract"]["allowed_paths"].append("src/Extra.java")
+        packet["execution_units"].append(
+            {
+                "unit_id": "WU-003",
+                "order": 3,
+                "title": "Downstream scenario",
+                "depends_on": ["WU-002"],
+                "write_paths": ["src/MainTest.java", "src/Extra.java"],
+                "requirement_refs": ["REQ-1"],
+                "acceptance_refs": ["AC-2"],
+                "design_node_ids": [],
+                "design_edge_ids": [],
+            }
+        )
+        for path, content in (
+            ("src/Main.java", "class Main {}\n"),
+            ("src/MainTest.java", "class MainTest {}\n"),
+            ("src/Extra.java", "class Extra {}\n"),
+        ):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(content, encoding="utf-8")
+        return _build_manifest(
+            run_id="run_validator_shared_entity",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback={
+                "feedback_source": "validator_code_trace",
+                "repair_objective": {
+                    "contract_findings": [{"finding_id": "F-1", "unit_ids": ["WU-002"]}]
+                },
+            },
+            repair_iteration=1,
+        )
+
+    def test_validator_repair_excludes_units_that_only_share_a_write_path(self) -> None:
+        manifest = self.shared_entity_repair_manifest()
+
+        self.assertEqual([item["id"] for item in manifest["items"]], ["WU-001", "WU-002"])
+        self.assertNotIn("src/Extra.java", manifest["workspace_allowed_paths"])
+        self.assertEqual(
+            manifest["expected_dirty_files"],
+            [
+                {
+                    "path": "src/Extra.java",
+                    "initial_sha256": hashlib.sha256(
+                        (self.repo / "src" / "Extra.java").read_bytes()
+                    ).hexdigest(),
+                }
+            ],
+        )
+
+    def test_unit_scoped_repair_freezes_out_of_scope_plan_outputs(self) -> None:
+        manifest = self.shared_entity_repair_manifest()
+        executor = self.executor(ScriptedLlm([]))
+        journal = {"items": [{"id": item["id"], "status": "pending"} for item in manifest["items"]]}
+
+        def validate() -> None:
+            executor._validate_workspace(
+                run_id="run_validator_shared_entity",
+                target_path=self.repo,
+                manifest=manifest,
+                journal=journal,
+                manifest_path="manifest.json",
+                journal_path="journal.json",
+            )
+
+        validate()
+
+        (self.repo / "src" / "Extra.java").write_text("class Extra { int changed; }\n", encoding="utf-8")
+        with self.assertRaises(DeveloperExecutionError) as tampered:
+            validate()
+        self.assertEqual(tampered.exception.error_code, "developer_workspace_drift")
+
+        (self.repo / "src" / "Extra.java").write_text("class Extra {}\n", encoding="utf-8")
+        (self.repo / "src" / "Rogue.java").write_text("class Rogue {}\n", encoding="utf-8")
+        with self.assertRaises(DeveloperExecutionError) as outside:
+            validate()
+        self.assertEqual(outside.exception.error_code, "developer_workspace_drift")
+        self.assertIn("src/Rogue.java", outside.exception.message)
+
+    def test_validator_repair_prompt_projects_findings_and_hints_to_active_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["proposed_files"].append(
+            {"path": "src/Independent.java", "purpose": "Independent repair target"}
+        )
+        packet["output_contract"]["allowed_paths"].append("src/Independent.java")
+        packet["execution_units"].append(
+            {
+                "unit_id": "WU-003",
+                "order": 3,
+                "title": "Independent repair",
+                "depends_on": [],
+                "write_paths": ["src/Independent.java"],
+                "requirement_refs": ["REQ-2"],
+                "acceptance_refs": ["AC-2"],
+                "design_node_ids": [],
+                "design_edge_ids": [],
+            }
+        )
+        findings = [
+            {
+                "finding_id": "F-TEST",
+                "canonical_key": "repair:test",
+                "unit_ids": ["WU-002"],
+                "code_refs": ["src/MainTest.java#testBehavior"],
+                "message": "Repair the behavior test.",
+                "blocking": True,
+                "owner": "developer",
+                "recommended_action": "developer_repair",
+            },
+            {
+                "finding_id": "F-INDEPENDENT",
+                "canonical_key": "repair:independent",
+                "unit_ids": ["WU-003"],
+                "code_refs": ["src/Independent.java#run"],
+                "message": "Repair the independent unit.",
+                "blocking": True,
+                "owner": "developer",
+                "recommended_action": "developer_repair",
+            },
+        ]
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "required_action": "Repair every blocking finding in this feedback.",
+            "developer_constraints": {
+                "allowed_paths": [
+                    "src/Main.java",
+                    "src/MainTest.java",
+                    "src/Independent.java",
+                ]
+            },
+            "repair_objective": {
+                "objective_id": "repair:scoped",
+                "canonical_keys": ["repair:test", "repair:independent"],
+                "contract_findings": findings,
+            },
+            "missing_links": findings,
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        dependency_prompt = _action_prompt(
+            item=items["WU-001"],
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        dependency_context = json.loads(dependency_prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            dependency_context["repair_feedback"]["repair_objective"]["contract_findings"],
+            [],
+        )
+        self.assertEqual(dependency_context["repair_feedback"]["missing_links"], [])
+        self.assertEqual(
+            dependency_context["repair_feedback"]["developer_constraints"]["allowed_paths"],
+            ["src/Main.java"],
+        )
+        # A dependency-only unit must not be told to produce a repair mutation it has no finding for.
+        dependency_strategy = dependency_context["next_action"]["unit_strategy"]
+        self.assertIn("Validator assigned no finding to this unit", dependency_strategy)
+        self.assertIn("verified_unchanged", dependency_strategy)
+        self.assertNotIn("Implement one coherent bounded slice", dependency_strategy)
+        self.assertNotIn("reported failure is already resolved", dependency_strategy)
+        self.assertNotIn("Start editing", dependency_context["next_action"]["instruction"])
+        self.assertTrue(
+            dependency_context["repair_progress"]["completion_rule"].startswith(
+                "No Validator finding is assigned to this unit."
+            )
+        )
+
+        direct_prompt = _action_prompt(
+            item=items["WU-002"],
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        direct_context = json.loads(direct_prompt.split("Execution context:\n", 1)[1])
+        direct_feedback = direct_context["repair_feedback"]
+        self.assertEqual(
+            [finding["finding_id"] for finding in direct_feedback["repair_objective"]["contract_findings"]],
+            ["F-TEST"],
+        )
+        self.assertEqual(direct_feedback["repair_objective"]["canonical_keys"], ["repair:test"])
+        self.assertIn(
+            "Implement one coherent bounded slice",
+            direct_context["next_action"]["unit_strategy"],
+        )
+        self.assertTrue(
+            direct_context["repair_progress"]["completion_rule"].startswith(
+                "Apply one coherent real mutation"
+            )
+        )
+        self.assertEqual(
+            direct_feedback["developer_constraints"]["allowed_paths"],
+            ["src/MainTest.java"],
+        )
+        repair_hints = direct_context["repair_progress"]["repair_hints"]
+        self.assertNotIn("src/Independent.java", repair_hints.get("path_reasons", {}))
+        self.assertNotIn(
+            "src/Independent.java",
+            [excerpt.get("path") for excerpt in repair_hints.get("excerpts", [])],
+        )
+
+    def test_browser_stage_repair_prompt_keeps_dependency_units_to_context(self) -> None:
+        # r9 UI Polish repair (2026-11-16): a dependency-closure unit received the cited unit's finding and
+        # proposed that unit's fix. Browser-stage findings carry exact unit_ids, like Code Validator findings.
+        packet = self.unit_packet()
+        finding = {
+            "severity": "blocker",
+            "category": "behavior",
+            "unit_ids": ["WU-002"],
+            "issue": "The focused control shows no ring.",
+            "expected_change": "Show the approved ring when the control is focused.",
+        }
+        feedback = {
+            "feedback_source": "ui_polish_result_review",
+            "summary": "UI Polish result review found 1 blocker(s).",
+            "required_action": "Repair only the cited UI Polish units inside the approved contract.",
+            "developer_constraints": {"allowed_paths": ["src/Main.java", "src/MainTest.java"]},
+            "repair_objective": {"objective_id": "repair:polish", "canonical_keys": [], "contract_findings": [finding]},
+            "plan_extensions": [],
+            "missing_links": [],
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="ui_polish_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        def context_for(unit_id: str) -> dict[str, object]:
+            prompt = _action_prompt(
+                item=items[unit_id],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+            )
+            return json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        dependency = context_for("WU-001")
+        self.assertEqual(dependency["repair_feedback"]["repair_objective"]["contract_findings"], [])
+        self.assertIn("assigns no finding to unit WU-001", dependency["repair_feedback"]["summary"])
+        self.assertIn("plan_extensions", dependency["repair_feedback"])  # browser feedback keeps its own keys
+        self.assertIn("Validator assigned no finding to this unit", dependency["next_action"]["unit_strategy"])
+        self.assertTrue(
+            dependency["repair_progress"]["completion_rule"].startswith("No Validator finding is assigned to this unit.")
+        )
+
+        direct = context_for("WU-002")
+        self.assertEqual(direct["repair_feedback"]["repair_objective"]["contract_findings"], [finding])
+        self.assertIn("assigns 1 blocking finding(s) to unit WU-002", direct["repair_feedback"]["summary"])
+        self.assertNotIn("Validator assigned no finding to this unit", direct["next_action"]["unit_strategy"])
+
+    def test_browser_stage_repair_without_unit_scoped_findings_keeps_the_whole_feedback(self) -> None:
+        feedback = {
+            "feedback_source": "browser_journey_verification",
+            "summary": "Verification failed.",
+            "repair_objective": {"contract_findings": [{"issue": "Suite failed.", "expected_change": "Pass it."}]},
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unscoped",
+            work_packet=self.unit_packet(),
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        item = next(item for item in manifest["items"] if item["id"] == "WU-001")
+        prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(context["repair_feedback"]["summary"], "Verification failed.")
+        self.assertEqual(len(context["repair_feedback"]["repair_objective"]["contract_findings"]), 1)
+        self.assertNotIn("Validator assigned no finding to this unit", context["next_action"]["unit_strategy"])
+
+    def test_shared_finding_prompt_reports_what_an_earlier_unit_changed(self) -> None:
+        packet = self.unit_packet()
+        finding = {
+            "finding_id": "F-SHARED",
+            "canonical_key": "repair:shared",
+            "unit_ids": ["WU-001", "WU-002"],
+            "message": "Producer and consumer disagree.",
+            "blocking": True,
+            "owner": "developer",
+            "recommended_action": "developer_repair",
+        }
+        manifest = _build_manifest(
+            run_id="run_shared_finding_progress",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback={
+                "feedback_source": "validator_code_trace",
+                "repair_objective": {"contract_findings": [finding]},
+                "missing_links": [finding],
+            },
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+        journal = {
+            "items": [
+                {
+                    "id": "WU-001",
+                    "status": "completed",
+                    "mutated_paths": ["src/Main.java"],
+                    "path_dispositions": {"src/Main.java": {"status": "mutated", "reason": "Adapted provider."}},
+                    "summary": "Provider now accepts the consumer transport.",
+                },
+                {"id": "WU-002", "status": "pending"},
+            ]
+        }
+
+        def context(journal_value: dict[str, object] | None) -> dict[str, object]:
+            prompt = _action_prompt(
+                item=items["WU-002"],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+                journal=journal_value,
+            )
+            return json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        with_journal = context(journal)
+        receipt = with_journal["dependency_receipts"][0]
+        self.assertEqual(receipt["unit_id"], "WU-001")
+        self.assertEqual(receipt["mutated_paths"], ["src/Main.java"])
+        self.assertEqual(receipt["path_statuses"], {"src/Main.java": "mutated"})
+        self.assertEqual(receipt["completion_summary"], "Provider now accepts the consumer transport.")
+        progress = with_journal["shared_finding_progress"]
+        self.assertEqual([row["finding_id"] for row in progress], ["F-SHARED"])
+        self.assertEqual(progress[0]["completed_unit_ids"], ["WU-001"])
+        self.assertEqual(progress[0]["outcomes"]["WU-001"]["mutated_paths"], ["src/Main.java"])
+
+        without_journal = context(None)
+        self.assertNotIn("shared_finding_progress", without_journal)
+        self.assertNotIn("mutated_paths", without_journal["dependency_receipts"][0])
+
+    def test_non_validator_repair_prompt_limits_allowed_paths_to_active_unit(self) -> None:
+        packet = self.unit_packet()
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "required_action": "Repair the browser journey blocker.",
+            "developer_constraints": {
+                "allowed_paths": ["src/Main.java", "src/MainTest.java"]
+            },
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-BROWSER",
+                        "unit_ids": ["WU-001", "WU-002"],
+                    }
+                ]
+            },
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        def allowed_paths(unit_id: str) -> list[str]:
+            prompt = _action_prompt(
+                item=items[unit_id],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+            )
+            context = json.loads(prompt.split("Execution context:\n", 1)[1])
+            return context["repair_feedback"]["developer_constraints"]["allowed_paths"]
+
+        self.assertEqual(allowed_paths("WU-001"), ["src/Main.java"])
+        self.assertEqual(allowed_paths("WU-002"), ["src/MainTest.java"])
+
+    def test_inspected_no_change_repair_forces_required_verification_before_completion(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["required_stage_ids"] = ["unit", "typecheck"]
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "developer_constraints": {"allowed_paths": ["src/Main.java"]},
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-BROWSER", "unit_ids": ["WU-001"]}
+                ]
+            },
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_no_change_verification",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        prompt = _action_prompt(
+            item=manifest["items"][0],
+            manifest=manifest,
+            history=[
+                {
+                    "action": "repo.read",
+                    "arguments": {"path": "src/Main.java"},
+                    "result": {
+                        "ok": True,
+                        "path": "src/Main.java",
+                        "content": "1: class Main {}",
+                    },
+                }
+            ],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=2,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        self.assertEqual(
+            context["action_budget"]["no_change_verification_stage_ids"],
+            ["typecheck", "unit"],
+        )
+        self.assertIn("next and only allowed action MUST be verification.run_stage", prompt)
+        available = prompt.split("Available actions:\n", 1)[1].split("\nA mutation", 1)[0]
+        self.assertIn("verification.run_stage", available)
+        self.assertNotIn("execution.complete_unit", available)
+        self.assertIn("every unit path marked verified_unchanged", context["repair_progress"]["completion_rule"])
+
+    def test_repair_manifest_hash_ignores_worktree_derived_prompt_context(self) -> None:
+        packet = self.unit_packet()
+        packet["output_contract"]["allowed_paths"].append("src/Helper.java")
+        packet["proposed_files"].append(
+            {"path": "src/Helper.java", "purpose": "Related repair context"}
+        )
+        packet["execution_units"][0]["context_paths"] = ["src/Main.java", "src/Helper.java"]
+        source = self.repo / "src/Main.java"
+        companion = self.repo / "src/Helper.java"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("class Main { void save() {} }\n", encoding="utf-8")
+        companion.write_text("class Helper {}\n", encoding="utf-8")
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-MAIN",
+                        "canonical_key": "repair:main",
+                        "unit_ids": ["WU-001"],
+                        "code_ref": "src/Main.java#save",
+                        "code_refs": ["src/Main.java#save"],
+                    }
+                ]
+            },
+        }
+
+        before = _build_manifest(
+            run_id="run_repair_prompt_context_hash",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        source.write_text(
+            "// inserted repair lines\n// move the discovered excerpt\nclass Main { void save() {} }\n",
+            encoding="utf-8",
+        )
+        companion.write_text(
+            "class Helper { void verify() { new Main().save(); } }\n",
+            encoding="utf-8",
+        )
+        after = _build_manifest(
+            run_id="run_repair_prompt_context_hash",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(before["input_hash"], after["input_hash"])
+        self.assertNotEqual(
+            before["items"][0]["diagnostic_paths"],
+            after["items"][0]["diagnostic_paths"],
+        )
+        self.assertNotEqual(
+            before["items"][0]["files"][0]["initial_sha256"],
+            after["items"][0]["files"][0]["initial_sha256"],
+        )
+
+
     def test_unit_aware_execution_uses_plan_units_and_durable_session(self) -> None:
         packet = self.unit_packet()
         packet["execution_units"][0]["component_id"] = "api"
@@ -1045,6 +2037,8 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("repo.write_file", llm.prompts[0])
         self.assertIn("execution.complete_unit", llm.prompts[0])
         self.assertIn("The action is not executed until the Harness returns its tool result", llm.systems[0])
+        self.assertIn("do not plan, draft, or evaluate later actions or files", llm.systems[0])
+        self.assertIn("instead of speculating about toolchain behavior", llm.systems[0])
         self.assertIn("end the response immediately", llm.prompts[0])
         self.assertIn("Treat authoritative_sources as the single verified current", llm.prompts[0])
         self.assertEqual(llm.calls[0]["model"], "deepseek-flash")
@@ -1076,6 +2070,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
                     "surfaces": ["api"],
                     "write_paths": ["src/Main.java"],
                     "planned_code_targets": source_unit["planned_code_targets"],
+                    "mutated_paths": ["src/Main.java"],
+                    "path_statuses": {"src/Main.java": "mutated"},
+                    "completion_summary": "implementation complete",
                 }
             ],
         )
@@ -1172,8 +2169,130 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
         self.assertIn(
-            "When test_intents are present, every listed test_target_path must be mutated",
+            "Every listed required_test_mutation_path must be mutated",
             llm.prompts[0],
+        )
+
+    def test_repair_requires_only_directly_cited_test_target_mutation(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        unit["write_paths"] = [
+            "src/Main.java",
+            "src/MainTest.java",
+            "src/RegressionTest.java",
+        ]
+        unit["test_target_paths"] = ["src/MainTest.java", "src/RegressionTest.java"]
+        unit["test_intents"] = [
+            {
+                "stage_id": "unit",
+                "intent": "Cover the directly repaired behavior.",
+                "target_paths": ["src/MainTest.java"],
+            },
+            {
+                "stage_id": "unit",
+                "intent": "Preserve an unrelated regression.",
+                "target_paths": ["src/RegressionTest.java"],
+            },
+        ]
+        packet["execution_units"] = [unit]
+        packet["proposed_files"].append(
+            {"path": "src/RegressionTest.java", "purpose": "Existing regression coverage"}
+        )
+        packet["output_contract"]["allowed_paths"].append("src/RegressionTest.java")
+
+        main_test = self.repo / "src/MainTest.java"
+        regression_test = self.repo / "src/RegressionTest.java"
+        main_test.parent.mkdir(parents=True, exist_ok=True)
+        main_test.write_text("class MainTest {}\n", encoding="utf-8")
+        regression_test.write_text("class RegressionTest {}\n", encoding="utf-8")
+        main_test_sha256 = hashlib.sha256(main_test.read_bytes()).hexdigest()
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-DIRECT-TEST",
+                        "unit_ids": ["WU-001"],
+                        "code_refs": ["src/Main.java#save"],
+                        "test_refs": ["src/MainTest.java"],
+                    }
+                ]
+            },
+            "missing_links": [
+                {
+                    "finding_id": "F-DIRECT-TEST",
+                    "unit_ids": ["WU-001"],
+                    "code_ref": "src/Main.java#save",
+                    "test_ref": "src/MainTest.java",
+                    "blocking": True,
+                    "owner": "developer",
+                    "recommended_action": "developer_repair",
+                }
+            ],
+        }
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": "",
+                        "content": "class Main { int repaired = 1; }\n",
+                    },
+                ),
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/MainTest.java",
+                        "expected_sha256": main_test_sha256,
+                        "content": "class MainTest { int coversRepair = 1; }\n",
+                    },
+                ),
+                action("repo.read", {"path": "src/RegressionTest.java"}),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "Direct repair and its cited test are complete.",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Repaired."},
+                            {
+                                "path": "src/MainTest.java",
+                                "status": "mutated",
+                                "reason": "Covered the direct finding.",
+                            },
+                            {
+                                "path": "src/RegressionTest.java",
+                                "status": "verified_unchanged",
+                                "reason": "Unrelated regression remains valid.",
+                            },
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_repair_direct_test_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        item = manifest["items"][0]
+        self.assertEqual(
+            _required_test_mutation_paths(item, repair_mode=True),
+            ["src/MainTest.java"],
+        )
+        context = json.loads(llm.prompts[0].split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            context["execution_unit_contract"]["required_test_mutation_paths"],
+            ["src/MainTest.java"],
+        )
+        self.assertEqual(
+            regression_test.read_text(encoding="utf-8"),
+            "class RegressionTest {}\n",
         )
 
     def test_unit_aware_replace_text_requires_one_exact_match_and_redacts_payloads(self) -> None:
@@ -1371,9 +2490,86 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertNotIn("internally consistent and buildable", prompt)
         self.assertFalse(context["test_authoring_policy"]["repository_evidence_satisfied"])
         self.assertIn("single canonical behavior checklist", prompt)
-        self.assertIn("Do not design, serialize, or validate the whole unit", prompt)
+        self.assertIn("Do not design, serialize, or validate a later file or action", prompt)
         self.assertIn("CSS class names alone do not prove responsive behavior", prompt)
         self.assertIn("Never add production props", prompt)
+
+    def test_non_ui_surface_contract_is_promoted_without_invented_fields(self) -> None:
+        data_contract = {
+            "schema_version": "design_surface_contract_v1",
+            "surface": "data",
+            "entity": "CulturalHeritage",
+            "fields": [{"name": "culturalHeritageId", "type": "string"}],
+            "relations": [],
+            "constraints": ["culturalHeritageId identifies exactly one record"],
+            "operation": "delete the record selected by culturalHeritageId",
+            "migration_intent": "add the CulturalHeritage model",
+        }
+        item = {
+            "id": "WU-DATA",
+            "title": "Add persistence",
+            "objective": "Add the approved persistence model.",
+            "paths": ["packages/db/prisma/schema.prisma"],
+            "context_paths": ["packages/db/prisma/schema.prisma"],
+            "files": [{"path": "packages/db/prisma/schema.prisma"}],
+            "surfaces": ["data"],
+            "required_stage_ids": [],
+            "surface_contracts": [
+                {
+                    "design_node_id": "VDN-DATA",
+                    "surface": "data",
+                    "surface_contract": data_contract,
+                }
+            ],
+        }
+        prompt = _action_prompt(
+            item=item,
+            manifest={
+                "version": "developer_execution_manifest_v8",
+                "mode": "act",
+                "base_sha": "base",
+                "run_id": "run-data-contract",
+                "items": [item],
+            },
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        approved = context["active_focus"]["mandatory_obligations"]["approved_non_ui_contracts"]
+        self.assertEqual(
+            approved,
+            [
+                {
+                    "design_node_id": "VDN-DATA",
+                    "surface": "data",
+                    "surface_contract": data_contract,
+                }
+            ],
+        )
+        self.assertEqual(prompt.count("culturalHeritageId identifies exactly one record"), 1)
+        self.assertIn("never invent convenience fields", prompt)
+        self.assertIn("immutable API-shape constraints, not behavior authorization", prompt)
+        self.assertIn("signature-only parameter or result reserves compatibility", prompt)
+        hard_constraints = context["execution_unit_contract"]["hard_constraints"]
+        self.assertTrue(
+            any(
+                "must not by itself create a branch" in constraint
+                for constraint in hard_constraints
+            )
+        )
+        self.assertTrue(
+            any(
+                "only when the current unit's mandatory obligations explicitly require" in constraint
+                for constraint in hard_constraints
+            )
+        )
 
     def test_action_prompt_promotes_requirements_and_test_intents_once(self) -> None:
         requirement = {"id": "AC-1", "content": "The operator can cancel the pending operation."}
@@ -1476,6 +2672,56 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         self.assertEqual(result.progress["completed_unit_ids"], ["WU-002"])
 
+    def test_provider_anchor_outside_write_scope_is_readable_but_never_writable(self) -> None:
+        packet = self.unit_packet()
+        unit = dict(packet["execution_units"][1])
+        unit["depends_on"] = []
+        unit["context_paths"] = ["src/MainTest.java", "src/Provider.java"]
+        unit["contract_anchor_paths"] = ["src/Provider.java"]
+        packet["execution_units"] = [unit]
+        provider = self.repo / "src/Provider.java"
+        provider.parent.mkdir(parents=True)
+        provider.write_text("class Provider {}\n", encoding="utf-8")
+        # A provider is existing repository code, never a change of this run.
+        subprocess.run(["git", "add", "src/Provider.java"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "base"],
+            cwd=self.repo,
+            check=True,
+        )
+        llm = ScriptedLlm(
+            [
+                action("repo.read", {"path": "src/Provider.java"}),
+                action(
+                    "repo.write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "test complete",
+                        "path_dispositions": [
+                            {"path": "src/MainTest.java", "status": "mutated", "reason": "Added test."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_provider_anchor",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        prompt_context = json.loads(llm.prompts[0].split("Execution context:\n", 1)[1])
+        contract = prompt_context["execution_unit_contract"]
+        self.assertEqual(contract["read_context_paths"], ["src/MainTest.java", "src/Provider.java"])
+        self.assertEqual(contract["contract_anchor_paths"], ["src/Provider.java"])
+        self.assertEqual(contract["write_paths"], ["src/MainTest.java"])
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-002"])
+        self.assertEqual(provider.read_text(encoding="utf-8"), "class Provider {}\n")
+
     def test_unit_aware_execution_allows_fully_verified_unchanged_unit(self) -> None:
         packet = self.unit_packet()
         packet["execution_units"] = [packet["execution_units"][0]]
@@ -1558,8 +2804,13 @@ class DeveloperToolLoopTest(unittest.TestCase):
                     "source_path": "src/Main.java",
                     "qualified_name": "Main.queryLater",
                 },
-            ]
+            ],
+            "version": IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
+            "profile": packet["planning_profile"],
         }
+        packet["implementation_signature_contract"]["digest"] = implementation_signature_contract_digest(
+            packet["implementation_signature_contract"]
+        )
 
         manifest = _build_manifest(
             run_id="run-shared-signature",
@@ -1653,6 +2904,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
                     "action": "repo.write_file",
                     "path": "src/Main.java",
                     "summary": "The approved file is absent; create the minimal Main implementation.",
+                    "summary_epistemic_status": "unverified_agent_hypothesis",
                     "outcome": "ok",
                 }
             ],
@@ -1848,14 +3100,68 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertTrue(resumed.exception.progress["pending_step_review"]["call_id"].endswith("-0002-a01"))
         self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
 
-    def test_step_review_prompt_drift_preserves_approved_worktree_for_rejection(self) -> None:
+    def _one_unit_failure(self, run_id: str, failure: BaseException | LlmCompletion) -> DeveloperExecutionError:
+        # One successful write, then the next LLM call fails (raises) or returns the given completion.
         packet = self.unit_packet()
         packet["execution_units"] = [packet["execution_units"][0]]
+
+        class FailsAfterWrite(ScriptedLlm):
+            def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+                if self.responses:
+                    return super().complete_with_metadata(**kwargs)
+                if isinstance(failure, BaseException):
+                    raise failure
+                return failure
+
+        llm = FailsAfterWrite(
+            [action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"})]
+        )
+        with self.assertRaises(DeveloperExecutionError) as raised:
+            self.executor(llm).execute(run_id=run_id, work_packet=packet, target_path=self.repo)
+        return raised.exception
+
+    def _journal_status(self, error: DeveloperExecutionError) -> tuple[str, str, bool]:
+        journal = json.loads((self.root / error.journal_path).read_text(encoding="utf-8"))
+        entry = journal["items"][0]
+        return journal["status"], entry["status"], "rolled_back_at" in entry
+
+    def test_invalid_action_output_rolls_back_the_unit_once_the_retry_budget_is_spent(self) -> None:
+        error = self._one_unit_failure("run_invalid", LlmCompletion(content="not json", finish_reason="stop", usage={}))
+
+        self.assertEqual((error.error_code, error.retriable), ("developer_action_invalid", True))
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("paused", "pending", True))
+
+    def test_non_transport_llm_error_rolls_back_and_blocks_the_unit(self) -> None:
+        error = self._one_unit_failure("run_provider", HarnessError("llm_response_invalid", "provider refused"))
+
+        self.assertEqual((error.error_code, error.retriable), ("llm_response_invalid", False))
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("blocked", "pending", True))
+
+    def test_workspace_os_error_rolls_back_and_pauses_the_unit(self) -> None:
+        error = self._one_unit_failure("run_os_error", OSError("disk full"))
+
+        self.assertEqual((error.error_code, error.retriable), ("developer_tool_failed", True))
+        self.assertIn("disk full", error.message)
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("paused", "pending", True))
+
+    def test_legacy_tool_name_is_rejected_and_embedded_action_is_normalized(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        write = {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}
         llm = ScriptedLlm(
             [
-                action(
-                    "repo.write_file",
-                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                LlmCompletion(
+                    content=json.dumps({"action": "write_file", "arguments": write}),
+                    finish_reason="stop",
+                    usage={},
+                ),
+                LlmCompletion(
+                    content="Writing the file now: " + json.dumps({"action": "repo.write_file", "arguments": write}),
+                    finish_reason="stop",
+                    usage={},
                 ),
                 action(
                     "execution.complete_unit",
@@ -1866,6 +3172,135 @@ class DeveloperToolLoopTest(unittest.TestCase):
                         ],
                     },
                 ),
+            ]
+        )
+        progress_calls: list[dict[str, object]] = []
+
+        result = self.executor(llm).execute(
+            run_id="run_legacy_tool",
+            work_packet=packet,
+            target_path=self.repo,
+            on_progress=lambda progress, _manifest, _journal: progress_calls.append(progress),
+        )
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertIn("developer_unit_legacy_tool_not_allowed", llm.prompts[1])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        actions = journal["items"][0]["actions"]
+        self.assertNotIn("tool_action", actions[0])
+        self.assertEqual(actions[1]["parse_normalization"], "extracted_single_embedded_json_action")
+        self.assertEqual([call["completed_unit_ids"] for call in progress_calls], [["WU-001"]])
+
+    def test_invalid_completion_dispositions_are_skipped_without_blocking_a_mutated_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        llm = ScriptedLlm(
+            [
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "unchanged_paths": [{"path": "src/Main.java", "reason": ""}],
+                        "path_dispositions": [
+                            {"path": "src/Other.java", "status": "not_required", "reason": "Outside the unit."},
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."},
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(run_id="run_invalid_dispositions", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            journal["items"][0]["path_dispositions"],
+            {"src/Main.java": {"status": "mutated", "reason": "Implemented."}},
+        )
+        self.assertEqual(journal["items"][0]["unchanged_paths"], [])
+
+    def test_completion_gate_rejects_diagnostic_markers_then_a_runtime_config_mismatch(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        packet["execution_units"] = [unit]
+        unit["runtime_config_changes"] = [
+            {
+                "kind": "env_var",
+                "unit_id": "WU-001",
+                "name": "MAIN_URL",
+                "default": "http://127.0.0.1:8090",
+                "read_by": "src/Main.java",
+                "purpose": "Configure the main endpoint.",
+            }
+        ]
+        diagnostic = "// SDLC_DIAGNOSTIC_INSTRUMENTATION\nclass Main {}"
+        plain = "class Main {}"
+        configured = 'class Main { String url = process.env.MAIN_URL ?? "http://127.0.0.1:8090"; }'
+
+        source = self.repo / "src/Main.java"
+
+        def write(content: str):
+            # Built when the LLM is called, so the overwrite cites the current file hash.
+            def response() -> LlmCompletion:
+                expected = hashlib.sha256(source.read_bytes()).hexdigest() if source.is_file() else ""
+                return action("repo.write_file", {"path": "src/Main.java", "expected_sha256": expected, "content": content})
+
+            return response
+
+        class LazyLlm(ScriptedLlm):
+            def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+                completion = super().complete_with_metadata(**kwargs)
+                return completion() if callable(completion) else completion
+
+        complete = action(
+            "execution.complete_unit",
+            {
+                "summary": "implementation complete",
+                "path_dispositions": [{"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}],
+            },
+        )
+        llm = LazyLlm([write(diagnostic), complete, write(plain), complete, write(configured), complete])
+
+        result = self.executor(llm).execute(run_id="run_completion_gates", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertIn("timeout_diagnostic_cleanup_required", llm.prompts[2])
+        self.assertIn("developer_runtime_config_contract_mismatch", llm.prompts[4])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        gates = [row["completion_gate"] for row in journal["items"][0]["actions"] if "completion_gate" in row]
+        self.assertEqual(
+            [(gate["status"], gate.get("reason", gate.get("error"))) for gate in gates],
+            [
+                ("rejected", "timeout_diagnostic_cleanup_required"),
+                ("rejected", "runtime_config_contract_mismatch"),
+                ("passed", None),
+            ],
+        )
+
+    def test_step_review_prompt_change_supersedes_the_pending_call_and_keeps_the_approved_write(self) -> None:
+        # G1.5: approving an exchange whose prompt changed no longer fails with developer_step_review_drift; the
+        # call is asked again with the current prompt and paused for its own review.
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        complete_unit = action(
+            "execution.complete_unit",
+            {
+                "summary": "implementation complete",
+                "path_dispositions": [
+                    {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                ],
+            },
+        )
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                ),
+                complete_unit,
+                complete_unit,
             ]
         )
 
@@ -1907,7 +3342,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         working_state_path.write_text(json.dumps(working_state), encoding="utf-8")
 
-        with self.assertRaises(DeveloperExecutionError) as drift:
+        with self.assertRaises(DeveloperExecutionError) as changed:
             self.executor(
                 llm,
                 step_review={
@@ -1921,11 +3356,14 @@ class DeveloperToolLoopTest(unittest.TestCase):
                 target_path=self.repo,
             )
 
-        self.assertEqual(drift.exception.error_code, "developer_step_review_drift")
-        self.assertTrue(drift.exception.retriable)
+        self.assertEqual(changed.exception.error_code, "developer_step_review_required")
+        replacement = changed.exception.progress["pending_step_review"]
+        self.assertEqual(replacement["call_id"], second_pending["call_id"].replace("-a01", "-a02"))
+        self.assertIn("Regenerate safely.", llm.prompts[-1])
+        self.assertEqual(len(llm.prompts), 3)
         self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
-        journal = json.loads((self.root / drift.exception.journal_path).read_text(encoding="utf-8"))
-        self.assertEqual(journal["items"][0]["status"], "review_required")
+        superseded = json.loads((self.root / second_pending["exchange_path"]).read_text(encoding="utf-8"))
+        self.assertEqual((superseded["status"], superseded["superseded_reason"]), ("superseded", "input_changed"))
 
     def test_operator_recovery_restores_only_hash_bound_approved_mutations(self) -> None:
         packet = self.unit_packet()
@@ -2453,6 +3891,47 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(resumed_journal["items"][0]["attempts"], 1)
         self.assertEqual(resumed_journal["items"][0].get("attempt_history", []), [])
 
+    def test_budget_resume_past_the_action_ceiling_pauses_again_without_calling_the_llm(self) -> None:
+        # A unit paused at its hard ceiling (both reserves spent) resumes with no action left; here a lowered
+        # budget puts the next action past the ceiling the same way. It used to crash on an unset max_actions.
+        def settings(max_actions: str, repair_reserve: str):
+            return load_settings(
+                root=self.root,
+                runtime_root=self.runtime,
+                overrides={
+                    "SDLC_LLM_MODE": "deepseek",
+                    "SDLC_LLM_API_KEY": "test-only",
+                    "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": max_actions,
+                    "SDLC_DEVELOPER_VERIFICATION_REPAIR_ACTION_RESERVE": repair_reserve,
+                },
+            )
+
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        legacy = LlmCompletion(
+            content=json.dumps({"action": "read_file", "arguments": {"path": "src/Main.java"}}),
+            finish_reason="stop",
+            usage={},
+        )
+        self.settings = settings("5", "6")
+        with self.assertRaises(DeveloperExecutionError) as paused:
+            self.executor(ScriptedLlm([legacy] * 5)).execute(
+                run_id="run_budget_ceiling", work_packet=packet, target_path=self.repo
+            )
+        self.assertEqual(paused.exception.error_code, "developer_action_limit_exceeded")
+
+        # Ceiling now 1 action + 4 timeout reserve + 0 repair reserve = 5 < next action 6.
+        self.settings = settings("1", "0")
+        resumed_llm = ScriptedLlm([])
+        with self.assertRaises(DeveloperExecutionError) as resumed:
+            self.executor(resumed_llm).execute(run_id="run_budget_ceiling", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(resumed.exception.error_code, "developer_action_limit_exceeded")
+        self.assertEqual(resumed_llm.prompts, [])
+        journal = json.loads((self.root / resumed.exception.journal_path).read_text(encoding="utf-8"))
+        entry = journal["items"][0]
+        self.assertEqual((entry["status"], entry["budget_resume"]["next_action_index"]), ("review_required", 6))
+
     def test_truncated_execution_unit_rolls_back_and_can_resume(self) -> None:
         first_llm = ScriptedLlm(
             [
@@ -2464,31 +3943,28 @@ class DeveloperToolLoopTest(unittest.TestCase):
         with self.assertRaises(DeveloperExecutionError) as caught:
             self.executor(first_llm).execute(
                 run_id="run_resume",
-                work_packet=self.work_packet(),
+                work_packet=self.one_file_packet(),
                 target_path=self.repo,
             )
 
         self.assertTrue(caught.exception.retriable)
         self.assertEqual(caught.exception.error_code, "developer_action_truncated")
         self.assertFalse((self.repo / "src" / "Main.java").exists())
-        self.assertFalse((self.repo / "src" / "MainTest.java").exists())
 
         resumed_llm = ScriptedLlm(
             [
                 action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
-                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
                 action("complete", {"summary": "coherent slice implemented"}),
             ]
         )
         result = self.executor(resumed_llm).execute(
             run_id="run_resume",
-            work_packet=self.work_packet(),
+            work_packet=self.one_file_packet(),
             target_path=self.repo,
         )
 
         self.assertEqual(result.progress["completed_items"], 1)
         self.assertTrue((self.repo / "src" / "Main.java").exists())
-        self.assertTrue((self.repo / "src" / "MainTest.java").exists())
 
     def test_expected_dirty_baseline_is_read_only_and_hash_bound(self) -> None:
         qa_path = self.repo / "qa" / "Generated.test.ts"
@@ -2565,10 +4041,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
             [
                 action("write_file", {"path": "src/Extra.java", "expected_sha256": "", "content": "bad"}),
                 action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
-                action(
-                    "write_file",
-                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
-                ),
                 action("complete", {"summary": "reworked within approved paths"}),
             ]
         )
@@ -2579,7 +4051,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
             llm_client=llm,
         ).execute(
             run_id="run_scope_recovery",
-            work_packet=self.work_packet(),
+            work_packet=self.one_file_packet(),
             target_path=self.repo,
         )
 
@@ -2964,7 +4436,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(memory["verification_state"][0]["result"]["status"], "passed")
         self.assertNotIn("private model reasoning", json.dumps(memory))
 
-    def test_action_memory_invalidates_stale_evidence_conclusion_after_mutation(self) -> None:
+    def test_action_memory_invalidates_stale_agent_hypothesis_after_mutation(self) -> None:
         history = [
             {
                 "action": "repo.read",
@@ -2987,9 +4459,11 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         memory = _action_memory(history, target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
 
-        conclusions = memory["evidence_conclusions"]
-        self.assertEqual(len(conclusions), 1)
-        self.assertEqual(conclusions[0]["summary"], "Current implementation contains the guard.")
+        hypotheses = memory["agent_hypotheses"]
+        self.assertEqual(len(hypotheses), 1)
+        self.assertEqual(hypotheses[0]["summary"], "Current implementation contains the guard.")
+        self.assertEqual(hypotheses[0]["epistemic_status"], "unverified_agent_hypothesis")
+        self.assertNotIn("evidence_conclusions", memory)
         self.assertNotIn("Old implementation", json.dumps(memory))
 
     def test_action_memory_marks_graph_evidence_stale_after_mutation(self) -> None:
@@ -3024,7 +4498,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         memory = _action_memory(history, target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
 
-        self.assertEqual(memory["projection"]["version"], "developer_working_memory_projection_v3")
+        self.assertEqual(memory["projection"]["version"], "developer_working_memory_projection_v4")
         self.assertFalse(memory["graph_evidence"][0]["fresh"])
         self.assertEqual(memory["graph_evidence"][0]["stale_after_action"], 2)
         self.assertTrue(memory["graph_evidence"][1]["fresh"])
@@ -3362,87 +4836,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("contained 2 JSON actions", llm.prompts[1])
         self.assertIn("Return exactly one JSON action object", llm.prompts[1])
 
-    def test_repair_execution_unit_can_update_any_approved_path(self) -> None:
-        main_path = self.repo / "src" / "Main.java"
-        main_path.parent.mkdir(parents=True)
-        main_path.write_text("class Main {}\n", encoding="utf-8")
-        feedback = {
-            "feedback_source": "verification",
-            "verification": {"stderr": "src/MainTest.java:1: error: missing coverage"},
-        }
-        llm = ScriptedLlm(
-            [
-                action("read_file", {"path": "src/Main.java"}),
-                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
-                action("complete", {"summary": "test repaired"}),
-            ]
-        )
-
-        result = self.executor(llm).execute(
-            run_id="run_cross_item_recovery",
-            work_packet=self.work_packet(),
-            target_path=self.repo,
-            repair_feedback=feedback,
-            repair_iteration=1,
-        )
-
-        self.assertEqual(result.progress["completed_items"], 1)
-        self.assertEqual(main_path.read_text(encoding="utf-8"), "class Main {}\n")
-        self.assertTrue((self.repo / "src" / "MainTest.java").exists())
-        self.assertEqual(llm.calls[0]["model"], "deepseek-flash")
-        self.assertEqual(llm.calls[0]["reasoning_effort"], "max")
-        self.assertEqual(llm.calls[0]["max_tokens"], 32768)
-        self.assertEqual(llm.calls[0]["timeout_seconds"], 600)
-
-    def test_repair_resume_accepts_persisted_scope_when_only_selection_policy_changed(self) -> None:
-        run_id = "run_selection_policy_migration"
-        packet = self.work_packet()
-        feedback = {
-            "feedback_source": "verification",
-            "verification": {"stderr": "src/MainTest.java:12: error: cannot call main.run()"},
-        }
-        session_dir = self.runtime / "runs" / run_id / "developer_execution" / "implementation_repair_v1"
-        session_dir.mkdir(parents=True)
-        current = _build_manifest(
-            run_id=run_id,
-            work_packet=packet,
-            target_path=self.repo,
-            mode="implementation_repair",
-            repair_feedback=feedback,
-            repair_iteration=1,
-        )
-        persisted = json.loads(json.dumps(current))
-        persisted["version"] = "developer_execution_manifest_v4"
-        persisted["input_hash"] = "sha256:legacy-v4-selection-policy"
-        persisted["items"][0]["context_paths"] = ["src/MainTest.java"]
-        persisted["items"][0]["repair_closure"]["context_paths"] = ["src/MainTest.java"]
-        self.assertNotEqual(persisted["input_hash"], current["input_hash"])
-        (session_dir / "manifest.json").write_text(json.dumps(persisted), encoding="utf-8")
-        (session_dir / "journal.json").write_text(
-            json.dumps(_new_journal(run_id=run_id, manifest=persisted, mode="implementation_repair", repair_iteration=1)),
-            encoding="utf-8",
-        )
-        llm = ScriptedLlm(
-            [
-                action("read_file", {"path": "src/Main.java"}),
-                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
-                action("complete", {"summary": "test repaired"}),
-            ]
-        )
-
-        result = self.executor(llm).execute(
-            run_id=run_id,
-            work_packet=packet,
-            target_path=self.repo,
-            repair_feedback=feedback,
-            repair_iteration=1,
-        )
-
-        self.assertEqual(result.progress["completed_items"], 1)
-        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
-        self.assertEqual(journal["migrations"][0]["code"], "repair_selection_policy_migrated")
-        self.assertEqual(journal["migrations"][0]["current_item_paths"], ["src/Main.java", "src/MainTest.java"])
-
     def test_repair_resume_still_blocks_real_approved_input_drift(self) -> None:
         run_id = "run_real_input_drift"
         packet = self.work_packet()
@@ -3516,6 +4909,81 @@ class DeveloperToolLoopTest(unittest.TestCase):
         changed = json.loads(json.dumps(candidate))
         changed["items"][1]["paths"] = ["src/Other.java"]
         self.assertIsNone(_merge_context_only_manifest(existing, changed))
+
+    def test_runtime_authority_manifest_upgrade_is_prompt_only(self) -> None:
+        packet = self.unit_packet()
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "repair_objective": {"contract_findings": [{"finding_id": "F-1", "unit_ids": ["WU-001"]}]},
+        }
+        existing = _build_manifest(
+            run_id="run_runtime_authority_upgrade",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        candidate_packet = json.loads(json.dumps(packet))
+        candidate_packet["execution_units"][0]["runtime_closure_authority"] = {
+            "schema_version": "browser_repair_runtime_authority_v1",
+            "runtime_probes": [{"probe_id": "RP-1", "expect_status": 204}],
+            "probe_observations": [{"probe_id": "RP-1", "actual_status": 204}],
+        }
+        candidate_packet["execution_units"][0]["input_digest"] = "sha256:runtime-authority"
+        candidate = _build_manifest(
+            run_id="run_runtime_authority_upgrade",
+            work_packet=candidate_packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        existing["created_at"] = "2026-01-01T00:00:00Z"
+        existing["uiux_capability"] = {
+            "status": "available",
+            "fingerprint": "sha256:persisted-session-capability",
+        }
+        candidate["created_at"] = "2026-01-02T00:00:00Z"
+
+        merged = _merge_runtime_authority_manifest(existing, candidate)
+
+        self.assertIsNotNone(merged)
+        assert merged is not None
+        self.assertEqual(merged["input_hash"], candidate["input_hash"])
+        self.assertEqual(merged["created_at"], existing["created_at"])
+        self.assertEqual(merged["uiux_capability"], existing["uiux_capability"])
+        self.assertEqual(merged["items"][0]["paths"], existing["items"][0]["paths"])
+        self.assertEqual(
+            merged["items"][0]["runtime_closure_authority"]["probe_observations"][0]["actual_status"],
+            204,
+        )
+        prompt = _action_prompt(
+            item=merged["items"][0],
+            manifest=merged,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            context["active_focus"]["mandatory_obligations"]["runtime_closure"]["probe_observations"][0][
+                "actual_status"
+            ],
+            204,
+        )
+        self.assertIn("agent_hypotheses", prompt)
+        changed = json.loads(json.dumps(candidate))
+        changed["items"][0]["paths"] = ["src/MainTest.java"]
+        self.assertIsNone(_merge_runtime_authority_manifest(existing, changed))
+        changed_capability = json.loads(json.dumps(candidate))
+        changed_capability["uiux_capability"] = {"status": "unavailable"}
+        self.assertIsNone(_merge_runtime_authority_manifest(existing, changed_capability))
 
     def test_database_entrypoint_scope_upgrade_reopens_only_completed_provider(self) -> None:
         barrel = "packages/db/src/index.ts"
@@ -3636,12 +5104,13 @@ class DeveloperToolLoopTest(unittest.TestCase):
         completion.parent.mkdir(parents=True, exist_ok=True)
         completion.write_text(json.dumps({"unit_id": "WU-DB-QUERY"}), encoding="utf-8")
 
-        _reopen_database_entrypoint_items(
+        _reopen_scope_expanded_items(
             target_path=self.repo,
             session_dir=session_dir,
             manifest=merged,
             journal=journal,
             item_ids=reopened,
+            reason="database_entrypoint_scope",
         )
 
         reopened_entry = journal["items"][1]
@@ -3872,50 +5341,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("successful mutation", llm.prompts[2])
         self.assertIn("int value", target.read_text(encoding="utf-8"))
 
-    def test_repair_scopes_use_separate_durable_sessions(self) -> None:
-        packet = self.work_packet()
-        implementation = self.executor(
-            ScriptedLlm(
-                [
-                    action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
-                    action("complete", {"summary": "implementation repair"}),
-                ]
-            )
-        ).execute(
-            run_id="run_repair_scopes",
-            work_packet=packet,
-            target_path=self.repo,
-            repair_feedback={"path": "src/Main.java", "message": "fix implementation"},
-            repair_iteration=1,
-            repair_scope="implementation",
-        )
-        qa = self.executor(
-            ScriptedLlm(
-                [
-                    action(
-                        "write_file",
-                        {
-                            "path": "src/MainTest.java",
-                            "expected_sha256": "",
-                            "content": "class MainTest {}",
-                        },
-                    ),
-                    action("complete", {"summary": "qa repair"}),
-                ]
-            )
-        ).execute(
-            run_id="run_repair_scopes",
-            work_packet=packet,
-            target_path=self.repo,
-            repair_feedback={"path": "src/MainTest.java", "message": "fix qa"},
-            repair_iteration=1,
-            repair_scope="qa",
-        )
-
-        self.assertIn("implementation_repair_v1", implementation.manifest_path)
-        self.assertIn("qa_repair_v1", qa.manifest_path)
-        self.assertNotEqual(implementation.manifest_path, qa.manifest_path)
-
     def test_repair_session_uses_cumulative_ordinal_without_changing_logical_iteration(self) -> None:
         result = self.executor(
             ScriptedLlm(
@@ -3929,7 +5354,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
             )
         ).execute(
             run_id="run_repair_cycle_two",
-            work_packet=self.work_packet(),
+            work_packet=self.one_file_packet(),
             target_path=self.repo,
             repair_feedback={"path": "src/Main.java", "message": "fix implementation"},
             repair_iteration=1,
@@ -3940,32 +5365,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
         self.assertEqual(manifest["repair_iteration"], 1)
 
-    def test_verification_feedback_does_not_treat_incidental_type_mentions_as_repair_targets(self) -> None:
-        packet = self.work_packet()
-        selected = _selected_repair_paths(
-            packet,
-            {
-                "feedback_source": "verification",
-                "verification": {
-                    "stderr": ".\\SRC\\MAINTEST.java:12: error: cannot call main.run()",
-                },
-            },
-        )
 
-        self.assertEqual(selected, {"src/MainTest.java"})
-
-    def test_verification_feedback_includes_high_signal_compiler_owner_symbols(self) -> None:
-        selected = _selected_repair_paths(
-            self.work_packet(),
-            {
-                "feedback_source": "verification",
-                "verification": {
-                    "stderr": ".\\src\\MainTest.java:12: error: cannot inherit from final Main",
-                },
-            },
-        )
-
-        self.assertEqual(selected, {"src/Main.java", "src/MainTest.java"})
 
     def test_blocked_repair_scope_mismatch_has_safe_resume_migration(self) -> None:
         state = {
@@ -4000,8 +5400,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
         }
 
         self.assertTrue(developer_execution_retry_allowed(state))
-        state["last_error"] = {"error_code": "developer_step_review_drift"}
-        self.assertTrue(developer_execution_retry_allowed(state))
         state["last_error"] = {"error_code": "developer_action_limit_exceeded"}
         self.assertTrue(developer_execution_retry_allowed(state))
         state["last_error"] = {"error_code": "developer_repair_budget_exhausted"}
@@ -4009,6 +5407,46 @@ class DeveloperToolLoopTest(unittest.TestCase):
         state["last_error"] = {"error_code": "developer_repair_stalled"}
         self.assertTrue(developer_execution_retry_allowed(state))
         state["latest_artifacts"].pop("developer_execution_journal")
+        self.assertFalse(developer_execution_retry_allowed(state))
+
+    def test_ui_polish_sessions_can_resume_only_with_their_durable_artifacts(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "ui_polish",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "ui_polish"},
+            "latest_artifacts": {
+                "ui_polish_work_packet": "packet.json",
+                "ui_polish_execution_manifest": "manifest.json",
+                "ui_polish_execution_journal": "journal.json",
+            },
+        }
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["developer_execution"] = {"mode": "ui_polish_repair"}
+        state["latest_artifacts"] = {
+            "ui_polish_repair_feedback": "feedback.json",
+            "ui_polish_repair_execution_manifest": "manifest.json",
+            "ui_polish_repair_execution_journal": "journal.json",
+        }
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["latest_artifacts"].pop("ui_polish_repair_execution_journal")
+        self.assertFalse(developer_execution_retry_allowed(state))
+
+    def test_browser_qa_repair_can_resume_only_with_its_durable_artifacts(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "browser_qa",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "browser_qa_repair"},
+            "latest_artifacts": {
+                "browser_qa_repair_feedback": "feedback.json",
+                "browser_qa_repair_execution_manifest": "manifest.json",
+                "browser_qa_repair_execution_journal": "journal.json",
+            },
+        }
+
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["latest_artifacts"].pop("browser_qa_repair_execution_journal")
         self.assertFalse(developer_execution_retry_allowed(state))
 
     def test_repair_prompt_contains_structured_verification_feedback(self) -> None:
@@ -4062,129 +5500,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
 
         self.assertEqual(manifest["items"][0]["files"][0]["purpose"], "Repair the compile failure.")
-
-    def test_verification_repair_uses_dependencies_as_context_without_forcing_mutation(self) -> None:
-        paths = ["src/EditFormView.java", "src/Controller.java", "src/FlowTest.java", "src/Unrelated.java"]
-        packet = self.work_packet()
-        packet["output_contract"] = {"allowed_paths": paths}
-        packet["proposed_files"] = [{"path": path, "operation": "update", "purpose": "repair"} for path in paths]
-        packet["implementation_steps"] = [{"order": 1, "files": paths, "description": "repair contract"}]
-        packet["requirement_coverage_by_file"] = {path: [{"requirement_id": "REQ-1"}] for path in paths}
-        packet["design_mappings_by_file"] = {path: [] for path in paths}
-        contents = {
-            "src/EditFormView.java": "interface EditFormView { void showConfirmation(); }\n",
-            "src/Controller.java": "class Controller { void run(EditFormView view) { view.showConfirmation(); } }\n",
-            "src/FlowTest.java": "class FlowTest { class FakeView implements EditFormView { public void showConfirmation(Object value) {} } }\n",
-            "src/Unrelated.java": "class Unrelated {}\n",
-        }
-        for path, content in contents.items():
-            target = self.repo / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        interface_before = (self.repo / "src/EditFormView.java").read_text(encoding="utf-8")
-        controller_before = (self.repo / "src/Controller.java").read_text(encoding="utf-8")
-        test_hash = hashlib.sha256((self.repo / "src/FlowTest.java").read_bytes()).hexdigest()
-        feedback = {
-            "feedback_source": "verification",
-            "repair_objective": {
-                "objective_id": "repair:contract",
-                "source": "validator_code_trace",
-                "status": "open",
-                "canonical_keys": ["contract:showConfirmation"],
-                "contract_findings": [
-                    {
-                        "canonical_key": "contract:showConfirmation",
-                        "code_ref": "src/EditFormView.java#showConfirmation",
-                        "expected_signature": {"name": "showConfirmation", "parameters": [], "return_type": "void"},
-                    }
-                ],
-            },
-            "verification": {
-                "stderr": "src/FlowTest.java:1: error: FakeView does not override showConfirmation() in EditFormView"
-            },
-        }
-        llm = ScriptedLlm(
-            [
-                action(
-                    "write_file",
-                    {
-                        "path": "src/FlowTest.java",
-                        "expected_sha256": test_hash,
-                        "content": "class FlowTest { class FakeView implements EditFormView { public void showConfirmation() {} } }",
-                    },
-                ),
-                action("complete", {"summary": "updated only the failing test double"}),
-            ]
-        )
-
-        result = self.executor(llm).execute(
-            run_id="run_contract_context",
-            work_packet=packet,
-            target_path=self.repo,
-            repair_feedback=feedback,
-            repair_iteration=1,
-        )
-
-        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
-        item = manifest["items"][0]
-        self.assertEqual(set(item["context_paths"]), set(contents))
-        self.assertEqual(item["direct_repair_paths"], ["src/FlowTest.java"])
-        self.assertEqual(
-            set(item["diagnostic_paths"]),
-            {"src/EditFormView.java", "src/Controller.java", "src/FlowTest.java"},
-        )
-        self.assertEqual(item["contract_anchor_paths"], ["src/EditFormView.java"])
-        self.assertIn("src/Unrelated.java", item["context_paths"])
-        self.assertNotIn("src/Unrelated.java", item["repair_closure"]["repair_hints"]["path_reasons"])
-        self.assertEqual((self.repo / "src/EditFormView.java").read_text(encoding="utf-8"), interface_before)
-        self.assertEqual((self.repo / "src/Controller.java").read_text(encoding="utf-8"), controller_before)
-        self.assertEqual([row["path"] for row in result.files], ["src/FlowTest.java"])
-        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
-        self.assertEqual(len(journal["items"][0]["actions"]), 2)
-        self.assertEqual(journal["items"][0]["unresolved_paths"], [])
-
-    def test_verification_repair_can_modify_related_approved_file_outside_diagnostic_paths(self) -> None:
-        packet = self.one_file_packet()
-        packet["proposed_files"].append({"path": "src/Caller.java", "purpose": "Call Main"})
-        packet["output_contract"]["allowed_paths"].append("src/Caller.java")
-        main = self.repo / "src/Main.java"
-        caller = self.repo / "src/Caller.java"
-        main.parent.mkdir(parents=True)
-        main.write_text("class Main { void run() {} }\n", encoding="utf-8")
-        caller.write_text("class Caller { void call() { new Main().oldRun(); } }\n", encoding="utf-8")
-        caller_hash = hashlib.sha256(caller.read_bytes()).hexdigest()
-        feedback = {
-            "feedback_source": "verification",
-            "verification": {"stderr": "src/Main.java:1: error: cannot find symbol oldRun"},
-        }
-        llm = ScriptedLlm(
-            [
-                action("read_file", {"path": "src/Caller.java"}),
-                action(
-                    "write_file",
-                    {
-                        "path": "src/Caller.java",
-                        "expected_sha256": caller_hash,
-                        "content": "class Caller { void call() { new Main().run(); } }",
-                    },
-                ),
-                action("complete", {"summary": "aligned the related caller"}),
-            ]
-        )
-
-        result = self.executor(llm).execute(
-            run_id="run_related_approved_path",
-            work_packet=packet,
-            target_path=self.repo,
-            repair_feedback=feedback,
-            repair_iteration=1,
-        )
-
-        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "developer_execution_manifest_v7")
-        self.assertIn("src/Caller.java", manifest["items"][0]["context_paths"])
-        self.assertIn("new Main().run()", caller.read_text(encoding="utf-8"))
-        self.assertIn("workspace_allowed_paths", llm.prompts[0])
 
     def test_profiled_repair_context_discovers_related_typescript_source_by_symbol(self) -> None:
         paths = ["src/Handler.ts", "src/Adapter.ts", "config/schema.json"]

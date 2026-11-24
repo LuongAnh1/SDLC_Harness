@@ -17,6 +17,7 @@ from sdlc_harness.agents.designer import (
     DesignerToolLoopExecutor,
 )
 from sdlc_harness.agents.designer.projections import render_design_projections
+from sdlc_harness.agents.designer.tools import DesignerToolRegistry
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.repo_context.codegraph import (
@@ -56,6 +57,54 @@ def test_uiux_search_rejects_unbounded_or_unsupported_input(arguments: dict[str,
         provider.search(arguments)
 
     assert error.value.error_code == "designer_tool_input_invalid"
+
+
+def _uiux_registry() -> DesignerToolRegistry:
+    anchors = [
+        {"anchor_id": "RLA-1", "component_id": "web", "path": "apps/web/src/types/article.ts", "symbol": "Article"},
+        {"anchor_id": "RLA-2", "component_id": "web", "path": "apps/web/src/state/store.ts", "symbol": "State"},
+        {
+            "anchor_id": "RLA-3",
+            "component_id": "web",
+            "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.tsx",
+            "symbol": "OwnerArticleMeta",
+        },
+        {"anchor_id": "RLA-4", "component_id": "web", "path": "apps/web/src/article-feed.ts", "symbol": "getFeed"},
+    ]
+    return DesignerToolRegistry(
+        run_id="run-1",
+        target_path=Path("."),
+        landscape={"components": [], "anchors": anchors},
+        graph={"nodes": []},
+        fake_mode=True,
+        uiux_provider=UiUxGuidanceProvider(skill_root=None, fake_mode=True),
+    )
+
+
+def test_uiux_search_allows_plain_words_that_name_repository_files() -> None:
+    output, refs = _uiux_registry().execute(
+        "uiux.search_guidance",
+        {"query": "article owner edit delete state", "mode": "domain", "domain": "ux"},
+    )
+
+    assert output["no_match"] is False
+    assert refs and refs[0].startswith("uiux:sha256:")
+
+
+@pytest.mark.parametrize(
+    ("query", "names"),
+    [
+        ("articlepage edit actions", "ArticlePage"),
+        ("OwnerArticleMeta getfeed layout", "OwnerArticleMeta, getFeed"),
+        ("article-feed loading feedback", "article-feed"),
+    ],
+)
+def test_uiux_search_rejects_compound_repository_names_and_names_them(query: str, names: str) -> None:
+    with pytest.raises(HarnessError) as error:
+        _uiux_registry().execute("uiux.search_guidance", {"query": query, "mode": "domain", "domain": "ux"})
+
+    assert error.value.error_code == "designer_tool_input_invalid"
+    assert f"must not contain repository names: {names}." in error.value.message
 
 
 def test_fake_codegraph_prepare_writes_fresh_snapshot() -> None:
@@ -157,6 +206,32 @@ def test_codegraph_affected_tests_uses_bounded_structured_query() -> None:
     ]
 
 
+def test_codegraph_list_output_is_wrapped_in_results() -> None:
+    from sdlc_harness.repo_context import codegraph as codegraph_module
+
+    entries = [{"node": {"name": "articleGetPrisma", "kind": "function"}, "score": 1.0}]
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / ".codegraph").mkdir()
+        provider = CodeGraphContextProvider()
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_command",
+            return_value=json.dumps(entries),
+        ) as run:
+            symbols = provider.query_capability(target, operation="symbols", query="Prisma", limit=60)
+            files = provider.query_capability(target, operation="files")
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_command",
+            return_value="[1, 2]",
+        ), pytest.raises(HarnessError, match="invalid JSON object"):
+            # Commands documented as objects (status, impact...) still reject an array.
+            codegraph_module._run_codegraph_status(target_path=target, timeout_seconds=5)
+
+    assert symbols == {"results": entries}
+    assert files == {"results": entries}
+    assert run.call_args_list[0].kwargs["arguments"] == ["query", "Prisma", "--limit", "20", "--json"]
+
+
 def test_codegraph_symbols_file_uses_bounded_node_capability() -> None:
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
@@ -189,92 +264,3 @@ def test_codegraph_symbols_file_uses_bounded_node_capability() -> None:
     ]
 
 
-def test_fake_designer_enforces_ui_experience_and_human_projection() -> None:
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        target = root / "target"
-        source = target / "apps" / "web" / "src" / "App.tsx"
-        source.parent.mkdir(parents=True)
-        source.write_text("export function App() { return null; }\n", encoding="utf-8")
-        settings = load_settings(
-            root=root,
-            runtime_root=root / ".runtime",
-            overrides={
-                "SDLC_LLM_MODE": "fake",
-                "SDLC_UIUX_SKILL_MODE": "enforce",
-            },
-        )
-        requirement = {
-            "use_case_id": "UC-UI",
-            "scenario_contract": {
-                "scenarios": [
-                    {
-                        "id": "SC-1",
-                        "requirement_refs": ["MAIN-1"],
-                        "surfaces": {
-                            "ui": {"status": "required", "requirement_refs": ["MAIN-1"]}
-                        },
-                    }
-                ]
-            },
-        }
-        landscape = {
-            "artifact_digest": "sha256:repo",
-            "components": [
-                {
-                    "component_id": "web",
-                    "roots": ["apps/web"],
-                    "file_refs": ["apps/web/src/App.tsx"],
-                }
-            ],
-            "anchors": [
-                {
-                    "anchor_id": "RLA-app",
-                    "kind": "ui_component",
-                    "component_id": "web",
-                    "path": "apps/web/src/App.tsx",
-                    "symbol": "App",
-                }
-            ],
-            "scenario_matches": [
-                {
-                    "scenario_id": "SC-1",
-                    "surface": "ui",
-                    "candidate_anchor_refs": ["RLA-app"],
-                }
-            ],
-        }
-        binding = {
-            "requirement_digest": "sha256:req",
-            "repo_landscape_digest": "sha256:repo",
-            "workspace_ref": "run_workspace_v1",
-            "base_sha": "abc123",
-            "designer_uiux_mode": "enforce",
-            "designer_uiux_contract_version": UIUX_CONTRACT_VERSION,
-        }
-
-        result = DesignerToolLoopExecutor(
-            settings=settings,
-            store=RuntimeStore(repo_root=root, runtime_root=root / ".runtime"),
-            llm_client=None,
-        ).execute(
-            run_id="run-uiux",
-            requirement_model=requirement,
-            landscape=landscape,
-            target_path=target,
-            snapshot_binding=binding,
-            contract_version=GRAPH_VERSION,
-            uiux_mode="enforce",
-            uiux_contract_version=UIUX_CONTRACT_VERSION,
-        )
-
-        ui_node = next(node for node in result.graph["nodes"] if node["surface"] == "ui")
-        experience = ui_node["surface_contract"]["experience_contract"]
-        assert experience["schema_version"] == "ui_experience_contract_v1"
-        assert len(experience["guidance_refs"]) == 2
-        markdown = render_design_projections(result.graph)["design_markdown"]
-        assert "## UI Experience" in markdown
-        assert "Accessibility:" in markdown
-        session = json.loads((root / result.session_path).read_text(encoding="utf-8"))
-        guidance = session["guidance_observations"]["SC-1|web"]
-        assert all("results" not in item and str(item["results_digest"]).startswith("sha256:") for item in guidance)

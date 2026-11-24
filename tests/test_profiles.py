@@ -8,6 +8,7 @@ import unittest
 
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    CURRENT_CONTRACT_PINS,
     ComponentProfile,
     LanguageProfile,
     PROFILE_SNAPSHOT_VERSION,
@@ -23,6 +24,7 @@ from sdlc_harness.profiles import (
     public_allowed_actions,
     public_run_summary,
     read_profile_snapshot,
+    retired_contract_pins,
 )
 
 
@@ -82,7 +84,17 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertEqual(project.verification_stage_ids[-1], "cleanup")
         self.assertEqual(
             build_verification_stage_policy(project=project).stage_ids,
-            ("typecheck", "unit"),
+            (
+                "database_ready",
+                "migrate_and_seed",
+                "typecheck",
+                "unit",
+                "api_database_integration",
+                "frontend_build",
+                "service_health",
+                "browser_e2e",
+                "cleanup",
+            ),
         )
         self.assertIn(".sdlc/target-profile.json", project.required_paths)
         self.assertEqual(
@@ -242,7 +254,7 @@ class ProfileRegistryTests(unittest.TestCase):
         cases: tuple[object, ...] = (
             [],
             {},
-            {**snapshot, "version": "profile_snapshot_v2"},
+            {**snapshot, "version": "profile_snapshot_v1"},
             {**snapshot, "target_remote": ""},
             {**snapshot, "target_base_branch": " main "},
         )
@@ -282,7 +294,7 @@ class ProfileRegistryTests(unittest.TestCase):
             profile_status_metadata({"run_id": "run_profile", "profile_snapshot": snapshot.to_dict()}),
             {
                 "classification": "profiled",
-                "snapshot_version": "profile_snapshot_v1",
+                "snapshot_version": "profile_snapshot_v2",
                 "project_profile_id": "typescript_fullstack_v1",
                 "language_profile_id": "typescript_v1",
             },
@@ -321,13 +333,26 @@ class ProfileRegistryTests(unittest.TestCase):
             public_allowed_actions(state, ["approve_checkpoint", "continue_run", "sync_run"]),
             ["sync_run"],
         )
-        self.assertIn("Vertical Design contract", str(public_run_summary(state, "Continue this run.")))
+        self.assertIn("ghim contract đã retire", str(public_run_summary(state, "Continue this run.")))
+
+    def test_a_lane_pinned_off_retires_the_run_and_an_unpinned_lane_does_not(self) -> None:
+        current = dict(CURRENT_CONTRACT_PINS)
+        self.assertEqual(retired_contract_pins({**current, "runtime_closure": {"mode": "enforce"}}), [])
+        self.assertEqual(
+            retired_contract_pins({**current, "browser_stages": {"mode": "off"}, "documentation_closure": {}}),
+            ["browser_stages.mode"],
+        )
+        self.assertEqual(
+            retired_contract_pins({**current, "profile_snapshot": {"version": "profile_snapshot_v1"}}),
+            ["profile_snapshot.version"],
+        )
+        self.assertEqual(retired_contract_pins({**current, "profile_snapshot": {"version": "profile_snapshot_v2"}}), [])
 
     def test_profiled_paused_design_advertises_restart_for_persisted_runs(self) -> None:
         state = {
             "run_id": "run_paused",
             "status": "design_paused",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
             "profile_snapshot": build_profile_snapshot(
                 project_profile_id="typescript_fullstack_v1",
                 target_remote="https://github.com/example/target.git",

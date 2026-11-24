@@ -55,6 +55,8 @@ function declarationSymbol(ts, node, sourceFile, owner) {
   if (!kind) {
     return null;
   }
+  const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+  const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
   return {
     kind,
     name,
@@ -64,7 +66,42 @@ function declarationSymbol(ts, node, sourceFile, owner) {
     type_parameters: typeParameters(node, sourceFile),
     async: hasModifier(ts, node, ts.SyntaxKind.AsyncKeyword),
     exported: hasModifier(ts, node, ts.SyntaxKind.ExportKeyword),
+    start_line: start.line + 1,
+    end_line: end.line + 1,
   };
+}
+
+// `export const handler = async (req) => ...` is a function; any other value (`jwt({...})`) is a variable.
+function variableSymbols(ts, statement, sourceFile) {
+  if (!ts.isVariableStatement(statement)) {
+    return [];
+  }
+  const exported = hasModifier(ts, statement, ts.SyntaxKind.ExportKeyword);
+  const symbols = [];
+  for (const declaration of statement.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name)) {
+      continue;
+    }
+    const initializer = declaration.initializer;
+    const callable =
+      initializer && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) ? initializer : null;
+    const name = declaration.name.getText(sourceFile);
+    const start = sourceFile.getLineAndCharacterOfPosition(declaration.getStart(sourceFile));
+    const end = sourceFile.getLineAndCharacterOfPosition(declaration.getEnd());
+    symbols.push({
+      kind: callable ? "function" : "variable",
+      name,
+      qualified_name: name,
+      parameters: callable ? parameters(callable, sourceFile) : [],
+      return_type: typeText(callable || declaration, sourceFile),
+      type_parameters: callable ? typeParameters(callable, sourceFile) : [],
+      async: callable ? hasModifier(ts, callable, ts.SyntaxKind.AsyncKeyword) : false,
+      exported,
+      start_line: start.line + 1,
+      end_line: end.line + 1,
+    });
+  }
+  return symbols;
 }
 
 function collectSymbols(ts, sourceFile) {
@@ -72,6 +109,7 @@ function collectSymbols(ts, sourceFile) {
   for (const statement of sourceFile.statements) {
     const top = declarationSymbol(ts, statement, sourceFile, "");
     if (top) symbols.push(top);
+    symbols.push(...variableSymbols(ts, statement, sourceFile));
     if (ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement)) {
       const owner = statement.name ? statement.name.getText(sourceFile) : "";
       for (const member of statement.members || []) {
@@ -81,6 +119,55 @@ function collectSymbols(ts, sourceFile) {
     }
   }
   return symbols;
+}
+
+// Opt-in (request.include_module_facts): value string literals and module references, so the
+// Harness can find demo values in a build and static imports of a demo module (L5.4 readiness).
+function collectModuleFacts(ts, sourceFile) {
+  const literals = [];
+  const seenLiterals = new Set();
+  const references = [];
+  const specifiers = new Set();
+
+  function reference(node, kind) {
+    if (node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))) {
+      specifiers.add(node);
+      references.push({ specifier: node.text, kind });
+    }
+  }
+
+  function visit(node) {
+    if (ts.isImportDeclaration(node)) {
+      reference(node.moduleSpecifier, node.importClause && node.importClause.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      reference(node.moduleSpecifier, node.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      reference(node.moduleReference.expression, node.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        reference(node.arguments[0], "dynamic");
+      } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+        reference(node.arguments[0], "static");
+      }
+    } else if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
+      specifiers.add(node.name);
+    }
+    const parent = node.parent;
+    if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      !specifiers.has(node) &&
+      // Type positions are erased by the build; property names and directives are not values.
+      !(parent && (ts.isLiteralTypeNode(parent) || parent.name === node || ts.isExpressionStatement(parent))) &&
+      !seenLiterals.has(node.text)
+    ) {
+      seenLiterals.add(node.text);
+      literals.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return { string_literals: literals, module_references: references };
 }
 
 let request;
@@ -98,9 +185,20 @@ try {
   const targetRequire = createRequire(path.join(process.cwd(), "package.json"));
   ts = targetRequire("typescript");
 } catch (error) {
-  fail(`Target TypeScript package is unavailable: ${error.code || error.message}`);
+  // Design runs before dependency installation in a worktree. Only the Harness-bound canonical repo
+  // may supply its compiler; source paths and cwd remain the run's worktree.
+  if (request.include_ui_facts === true && request.typescript_package_root) {
+    try {
+      ts = createRequire(path.join(request.typescript_package_root, "package.json"))("typescript");
+    } catch (fallbackError) {
+      fail(`Target TypeScript package is unavailable: ${fallbackError.code || fallbackError.message}`);
+    }
+  } else fail(`Target TypeScript package is unavailable: ${error.code || error.message}`);
 }
 
+const uiFacts = request.include_ui_facts === true
+  ? require("./typescript_ui_facts.cjs")(ts, (request.files || []).map(canonicalRelativePath))
+  : {};
 const files = [];
 for (const rawPath of request.files || []) {
   const relativePath = canonicalRelativePath(rawPath);
@@ -127,11 +225,13 @@ for (const rawPath of request.files || []) {
       length: diagnostic.length ?? null,
     })),
     symbols: collectSymbols(ts, sourceFile),
+    ...(request.include_ui_facts === true ? { ui_facts: uiFacts[relativePath] } : {}),
+    ...(request.include_module_facts === true ? collectModuleFacts(ts, sourceFile) : {}),
   });
 }
 
 process.stdout.write(JSON.stringify({
-  version: "typescript_ast_evidence_v1",
+  version: "typescript_ast_evidence_v2",
   extractor_id: request.extractor_id,
   profile: request.profile,
   files,

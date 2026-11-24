@@ -11,15 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -27,6 +21,9 @@ from ...profiles import (
     profiled_plan_contract_issues,
 )
 from ...storage.runtime import utc_now_iso
+from ...repo_context.providers import provider_files
+from ...profiles.runtime_config import canonical_runtime_config_impact
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 MAX_FILE_CONTENT_CHARS = 40000
 PROFILED_EDITABLE_PATH_POLICY_VERSION = "editable_path_policy_v1"
@@ -44,6 +41,7 @@ def build_developer_work_packet(
     canonical_requirements: list[dict[str, object]] | None = None,
     requirement_contract: dict[str, object] | None = None,
     requirement_coverage: list[dict[str, object]] | None = None,
+    approved_runtime_decisions: list[dict[str, object]] | None = None,
     effective_design_contract: dict[str, object] | None = None,
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
@@ -54,7 +52,6 @@ def build_developer_work_packet(
         structured_plan,
         planning_policy=planning_policy,
         verification_policy=verification_policy,
-        allow_legacy=True,
     )
     if contract_issues:
         raise HarnessError(
@@ -105,30 +102,17 @@ def build_developer_work_packet(
     canonical_requirements = canonical_requirements or []
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
+    approved_runtime_decisions = approved_runtime_decisions or []
     required_fields = ["path", "content"]
-    component_aware_contract = (
-        structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    )
-    current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
-    legacy_profiled_contract = (
-        structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    runtime_config_impact = canonical_runtime_config_impact(
+        structured_plan.get("runtime_config_impact")
     )
     return {
         "version": (
             "developer_work_packet_v3"
-            if component_aware_contract
-            else "developer_work_packet_v2"
-            if current_profiled_contract
-            else "developer_work_packet_v1"
         ),
         "schema_version": (
             UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if component_aware_contract
-            else PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if current_profiled_contract
-            else LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if legacy_profiled_contract
-            else "developer_work_packet_legacy_v1"
         ),
         "mode": "approved_implementation_plan_to_developer_act_v1",
         "run_id": run_id,
@@ -152,11 +136,16 @@ def build_developer_work_packet(
         "requirement_contract": requirement_contract,
         "canonical_requirements": canonical_requirements,
         "requirement_coverage": requirement_coverage,
+        "approved_runtime_decisions": _referenced_runtime_decisions(
+            units=_dict_items(structured_plan.get("work_units")),
+            decisions=approved_runtime_decisions,
+        ),
         "requirement_coverage_by_file": _group_requirement_coverage_by_file(
             requirement_coverage,
             planning_policy=planning_policy,
         ),
         "implementation_steps": implementation_steps,
+        "runtime_config_impact": runtime_config_impact,
         **(
             {
                 "execution_units": _build_execution_units(
@@ -166,10 +155,9 @@ def build_developer_work_packet(
                     verification_policy=verification_policy,
                     run_id=run_id,
                     package_dependencies=package_dependencies,
+                    target_repo_path=target_repo_path,
                 )
             }
-            if component_aware_contract
-            else {}
         ),
         "proposed_files": enriched_files,
         "package_dependency_requirements": package_dependencies,
@@ -183,11 +171,10 @@ def build_developer_work_packet(
                     structured_plan.get("implementation_signature_contract")
                 )
             }
-            if component_aware_contract or current_profiled_contract
-            else {}
         ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
+        "qa_test_intents": _dict_items(structured_plan.get("qa_test_intents")),
         "repo_evidence": _string_items(structured_plan.get("repo_evidence")),
         "current_files": [
             {
@@ -225,8 +212,9 @@ def _build_execution_units(
     verification_policy: VerificationStagePolicy,
     run_id: str,
     package_dependencies: list[dict[str, object]] | None = None,
+    target_repo_path: Path | None = None,
 ) -> list[dict[str, object]]:
-    """Project approved Plan V4 work units without inventing new execution scope."""
+    """Project approved component-aware work units without inventing new execution scope."""
 
     work_units = _dict_items(structured_plan.get("work_units"))
     if not work_units:
@@ -252,6 +240,11 @@ def _build_execution_units(
     paths_by_unit: dict[str, set[str]] = {}
     dependencies: dict[str, set[str]] = {}
     dependency_rows = package_dependencies or []
+    runtime_changes_by_unit: dict[str, list[dict[str, object]]] = {}
+    for change in canonical_runtime_config_impact(
+        structured_plan.get("runtime_config_impact")
+    )["changes"]:
+        runtime_changes_by_unit.setdefault(str(change.get("unit_id") or ""), []).append(change)
     for item in sorted(work_units, key=lambda row: (int(row.get("order") or 0), str(row.get("unit_id") or ""))):
         unit_id = str(item.get("unit_id") or "").strip()
         depends_on = _string_items(item.get("depends_on"))
@@ -266,8 +259,11 @@ def _build_execution_units(
         migration = _dict_value(item.get("migration_impact"))
         raw_paths.extend(_string_items(migration.get("targets")))
         test_intents = _dict_items(item.get("test_intents"))
+        qa_test_intents = _dict_items(item.get("qa_test_intents"))
         for intent in test_intents:
             raw_paths.extend(_string_items(intent.get("target_paths")))
+        # Harness-listed existing tests of the unit's files: a change that breaks one may update it.
+        raw_paths.extend(_string_items(item.get("existing_test_paths")))
         unit_package_dependencies = [
             dependency
             for dependency in dependency_rows
@@ -296,11 +292,46 @@ def _build_execution_units(
                 f"Execution unit has no approved write path: {unit_id}",
                 run_id=run_id,
             )
+        runtime_config_changes = runtime_changes_by_unit.get(unit_id, [])
+        invalid_runtime_paths = [
+            str(change.get("read_by") or "")
+            for change in runtime_config_changes
+            if change.get("kind") == "env_var"
+            and str(change.get("read_by") or "") not in write_paths
+        ]
+        if invalid_runtime_paths:
+            raise HarnessError(
+                "developer_runtime_config_scope_invalid",
+                (
+                    f"Execution unit {unit_id} has runtime configuration outside its write scope: "
+                    f"{sorted(invalid_runtime_paths)}"
+                ),
+                run_id=run_id,
+            )
         stage_ids = list(dict.fromkeys(str(row.get("stage_id") or "").strip() for row in test_intents))
-        if any(not stage_id or stage_id not in allowed_stages for stage_id in stage_ids):
+        if any(
+            not stage_id
+            or stage_id not in allowed_stages
+            or verification_policy.owner_for_stage(stage_id) != "developer_intent"
+            for stage_id in stage_ids
+        ):
             raise HarnessError(
                 "developer_execution_unit_stage_invalid",
-                f"Execution unit references an unsupported verification stage: {unit_id}",
+                f"Execution unit references a stage not owned by Developer intents: {unit_id}",
+                run_id=run_id,
+            )
+        qa_stage_ids = list(
+            dict.fromkeys(str(row.get("stage_id") or "").strip() for row in qa_test_intents)
+        )
+        if any(
+            not stage_id
+            or stage_id not in allowed_stages
+            or verification_policy.owner_for_stage(stage_id) != "qa_intent"
+            for stage_id in qa_stage_ids
+        ):
+            raise HarnessError(
+                "developer_execution_unit_stage_invalid",
+                f"Execution unit references a stage not owned by QA intents: {unit_id}",
                 run_id=run_id,
             )
         signature_ids = _signature_ids_for_targets(signatures=signatures, targets=targets)
@@ -322,6 +353,7 @@ def _build_execution_units(
             "runtime_bindings": _dict_items(item.get("runtime_bindings")),
             "boundary_contracts": _dict_items(item.get("boundary_contracts")),
             "surface_contracts": _dict_items(item.get("surface_contracts")),
+            "ui_obligations": _dict_items(item.get("ui_obligations")),
             "write_paths": write_paths,
             "test_target_paths": list(
                 dict.fromkeys(
@@ -335,14 +367,16 @@ def _build_execution_units(
             "required_stage_ids": stage_ids,
             "signature_entry_ids": signature_ids,
             "test_intents": test_intents,
+            "qa_test_intents": qa_test_intents,
             "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
             "package_dependencies": unit_package_dependencies,
+            "runtime_config_changes": runtime_config_changes,
         }
         projected.append(canonical)
         paths_by_unit[unit_id] = set(write_paths)
         dependencies[unit_id] = set(depends_on)
 
-    _attach_execution_unit_context(projected, allowed=allowed)
+    _attach_execution_unit_context(projected, allowed=allowed, target_path=target_repo_path)
 
     def reaches(source: str, target: str) -> bool:
         pending = list(dependencies.get(source, set()))
@@ -367,6 +401,32 @@ def _build_execution_units(
                     run_id=run_id,
                 )
     return projected
+
+
+def _referenced_runtime_decisions(
+    *,
+    units: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep only accepted D-* decisions cited by typed demo-fixture runtime inputs."""
+
+    cited = {
+        ref
+        for unit in units
+        for surface in _dict_items(unit.get("surface_contracts"))
+        for runtime in [_dict_value(_dict_value(surface.get("surface_contract")).get("runtime_surface"))]
+        for item in _dict_items(runtime.get("required_inputs"))
+        if str(item.get("source") or "") == "demo_fixture"
+        for ref in [str(item.get("binding") or ""), *_string_items(item.get("requirement_refs"))]
+        if ref.startswith("D-")
+    }
+    return [
+        dict(item)
+        for item in decisions
+        if str(item.get("id") or "") in cited
+        and str(item.get("id") or "").startswith("D-")
+        and str(item.get("status") or "").strip().lower() == "accepted"
+    ]
 
 
 def refresh_developer_execution_context(
@@ -410,7 +470,7 @@ def upgrade_developer_dependency_scope(
         for item in existing
         if str(item.get("consumer_manifest_path") or item.get("manifest_path") or "")
     }
-    if existing == derived and all(
+    if _same_dependency_contracts(existing, derived) and all(
         str(item.get("dependency_id") or "") for item in existing
     ):
         return packet, False
@@ -468,23 +528,37 @@ def upgrade_developer_dependency_scope(
     }, True
 
 
+MAX_PROVIDER_ANCHORS_PER_UNIT = 10
+
+
 def _attach_execution_unit_context(
     units: list[dict[str, object]],
     *,
     allowed: set[str],
+    target_path: Path | None = None,
 ) -> None:
+    """Give each unit read-only anchors: its dependencies' files and the files defining what its files import."""
+
     projected_by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
     for unit in units:
         write_paths = _string_items(unit.get("write_paths"))
-        design_edge_ids = set(_string_items(unit.get("design_edge_ids")))
         contract_anchor_paths: list[str] = []
         for dependency_id in _string_items(unit.get("depends_on")):
             dependency = projected_by_id[dependency_id]
-            if not design_edge_ids.intersection(_string_items(dependency.get("design_edge_ids"))):
-                continue
-            for path in _execution_context_target_paths(dependency):
+            # Implementation targets first, then the dependency's tests (a pattern to copy).
+            for path in [*_execution_context_target_paths(dependency), *_string_items(dependency.get("write_paths"))]:
                 if path in allowed and path not in write_paths and path not in contract_anchor_paths:
                     contract_anchor_paths.append(path)
+        if target_path is not None:
+            contract_anchor_paths.extend(
+                str(row["path"])
+                for row in provider_files(
+                    target_path=target_path,
+                    source_paths=write_paths,
+                    exclude=contract_anchor_paths,
+                    limit=MAX_PROVIDER_ANCHORS_PER_UNIT,
+                )
+            )
         unit["context_paths"] = [*write_paths, *contract_anchor_paths]
         unit["contract_anchor_paths"] = contract_anchor_paths
         digest_payload = json.dumps(unit, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -640,10 +714,6 @@ def _derive_cross_package_dependencies(
                             "provider_workspace_path": Path(provider_manifest_path).parent.as_posix(),
                             "provider_package_name": dependency_name,
                             "provider_symbols": [],
-                            "already_declared": _manifest_declares_dependency(
-                                consumer_manifest,
-                                dependency_name,
-                            ),
                         }
                         requirements_by_identity[identity] = dependency
                     required_by = dependency["required_by_unit_ids"]
@@ -696,11 +766,19 @@ def _read_package_manifest(
     return value
 
 
-def _manifest_declares_dependency(manifest: dict[str, object], dependency_name: str) -> bool:
-    return any(
-        dependency_name in _dict_value(manifest.get(field))
-        for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
-    )
+def _same_dependency_contracts(
+    existing: list[dict[str, object]],
+    derived: list[dict[str, object]],
+) -> bool:
+    """Ignore legacy repository-observation fields when comparing frozen contracts."""
+
+    def contract_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [
+            {key: value for key, value in row.items() if key != "already_declared"}
+            for row in rows
+        ]
+
+    return contract_rows(existing) == contract_rows(derived)
 
 
 def refresh_developer_work_packet(
@@ -1073,18 +1151,3 @@ def _profiled_path_policy_contract(policy: PlanningPathPolicy) -> dict[str, obje
         "protected_paths": list(policy.protected_paths),
     }
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

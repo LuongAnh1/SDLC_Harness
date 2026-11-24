@@ -11,6 +11,9 @@ Return exactly one JSON object with this shape:
   ],
   "surface_updates": [
     {"scenario_id": "SC-1", "surface": "ui", "status": "required", "reason": "..."}
+  ],
+  "related_updates": [
+    {"requirement_id": "AC-2", "fields": {"text": "..."}, "reason": "..."}
   ]
 }
 ```
@@ -18,8 +21,9 @@ Return exactly one JSON object with this shape:
 Rules:
 
 - Judge whether the human answer is sufficient to resolve the current question.
-- If insufficient, return a concise follow-up question and empty `updates` and `surface_updates` lists.
+- If insufficient, return a concise follow-up question and empty `updates`, `surface_updates`, and `related_updates` lists.
 - If accepted, return null follow_up_text and exactly one update entry for every ID in `affects`.
+- For an accepted answer, also check every other requirement in the canonical model against the answer. When the answer makes another requirement false or contradictory (for example a criterion that restates a source clause the answer now narrows), return it once in `related_updates` with the corrected fields and a `reason` that names the conflict. Never put an ID from `affects` there, and never use it for wording-only improvements; return an empty list when nothing else conflicts.
 - For an accepted answer, return exactly one `surface_updates` entry for every surface whose current status is `clarification_required` and whose `open_question_refs` contains the current question.
 - You may also update a `required` surface linked to the current question when the answer makes its reason more precise. Never update a surface that is not linked to the current question.
 - Return an empty list when no linked surface needs an update.

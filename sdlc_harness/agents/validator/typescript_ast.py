@@ -8,17 +8,21 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Callable
+from typing import Callable
 
 from ...core.errors import HarnessError
 from ...profiles import CodeTracePolicy
+from ...core.coerce import dict_items as _dict_items
 
 
-TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v1"
+TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v2"
 TYPESCRIPT_AST_REQUEST_VERSION = "typescript_ast_request_v1"
 DEFAULT_TYPESCRIPT_AST_TIMEOUT_SECONDS = 30
+# The helper only accepts this extractor id; module facts reuse it with an empty profile.
+MODULE_FACTS_EXTRACTOR_ID = "typescript_compiler_ast_v1"
+MODULE_REFERENCE_KINDS = {"static", "type_only", "dynamic"}
 MAX_EXTRACTOR_ERROR_CHARS = 4000
-_ALLOWED_SYMBOL_KINDS = {"interface", "class", "function", "method"}
+_ALLOWED_SYMBOL_KINDS = {"interface", "class", "function", "method", "variable"}
 _ENV_ALLOWLIST = {
     "path",
     "pathext",
@@ -83,6 +87,26 @@ class TypeScriptAstEvidence:
                     matches.append(dict(symbol))
         return tuple(matches)
 
+    def ranges_for(self, path: str, *, symbols: set[str]) -> tuple[tuple[int, int], ...]:
+        """Return validated declaration line ranges for the requested symbols."""
+
+        ranges: list[tuple[int, int]] = []
+        for item in self.files:
+            if item.get("path") != path:
+                continue
+            for symbol in _dict_items(item.get("symbols")):
+                names = {
+                    str(symbol.get("name") or "").strip(),
+                    str(symbol.get("qualified_name") or "").strip(),
+                }
+                if symbols and not names.intersection(symbols):
+                    continue
+                start = int(symbol.get("start_line") or 0)
+                end = int(symbol.get("end_line") or 0)
+                if start > 0 and end >= start:
+                    ranges.append((start, end))
+        return tuple(ranges)
+
 
 class TypeScriptAstExtractor:
     """Chạy helper code-reviewed bằng Node và package TypeScript của target."""
@@ -139,6 +163,156 @@ class TypeScriptAstExtractor:
                 files=(),
             )
 
+        request = {
+            "version": TYPESCRIPT_AST_REQUEST_VERSION,
+            "extractor_id": policy.symbol_extractor_id,
+            "profile": policy.metadata(),
+            "files": normalized,
+        }
+        return _validate_evidence(
+            self._run_helper(target_root=target_root, request=request, run_id=run_id),
+            expected_paths=normalized,
+            policy=policy,
+            run_id=run_id,
+        )
+
+    def extract_module_facts(
+        self,
+        *,
+        target_path: Path,
+        source_paths: list[str],
+        run_id: str | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Value string literals and module references per file (browser readiness, L5.4).
+
+        Callers pass repository-relative paths they already scoped; the helper still refuses paths
+        that escape the target.
+        """
+
+        target_root = target_path.resolve()
+        paths = list(dict.fromkeys(path for path in source_paths if (target_root / path).is_file()))
+        if not paths:
+            return {}
+        payload = self._run_helper(
+            target_root=target_root,
+            request={
+                "version": TYPESCRIPT_AST_REQUEST_VERSION,
+                "extractor_id": MODULE_FACTS_EXTRACTOR_ID,
+                "profile": {},
+                "files": paths,
+                "include_module_facts": True,
+            },
+            run_id=run_id,
+        )
+        raw_files = payload.get("files") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != TYPESCRIPT_AST_EVIDENCE_VERSION
+            or not isinstance(raw_files, list)
+            or [item.get("path") if isinstance(item, dict) else None for item in raw_files] != paths
+        ):
+            raise _invalid_evidence("Module facts do not match the request.", run_id=run_id)
+        facts: dict[str, dict[str, object]] = {}
+        for item in raw_files:
+            path = str(item["path"])
+            if item.get("diagnostics"):
+                raise HarnessError(
+                    "typescript_ast_parse_failed",
+                    f"TypeScript AST parser reported syntax diagnostics for {path}.",
+                    run_id=run_id,
+                )
+            literals = item.get("string_literals")
+            references = item.get("module_references")
+            if (
+                not isinstance(literals, list)
+                or not all(isinstance(value, str) for value in literals)
+                or not isinstance(references, list)
+                or not all(
+                    isinstance(ref, dict)
+                    and isinstance(ref.get("specifier"), str)
+                    and ref.get("kind") in MODULE_REFERENCE_KINDS
+                    for ref in references
+                )
+            ):
+                raise _invalid_evidence(f"Module facts schema is invalid for {path}.", run_id=run_id)
+            facts[path] = {
+                "string_literals": list(literals),
+                "module_references": [{"specifier": ref["specifier"], "kind": ref["kind"]} for ref in references],
+            }
+        return facts
+
+    def extract_ui_facts(
+        self, *, target_path: Path, source_paths: list[str], run_id: str | None = None,
+        typescript_package_root: Path | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """React syntax facts; unresolved props stay unknown rather than becoming an empty contract."""
+
+        paths = list(dict.fromkeys(source_paths))
+        if not paths:
+            return {}
+        root = target_path.resolve()
+        for path in paths:
+            if not isinstance(path, str) or "\\" in path or Path(path).is_absolute() or ".." in Path(path).parts:
+                raise _invalid_evidence("UI source path is not repository-relative.", run_id=run_id)
+            try:
+                (root / path).resolve().relative_to(root)
+            except ValueError as exc:
+                raise _invalid_evidence("UI source path escapes the target.", run_id=run_id) from exc
+        payload = self._run_helper(
+            target_root=root,
+            request={"version": TYPESCRIPT_AST_REQUEST_VERSION, "extractor_id": MODULE_FACTS_EXTRACTOR_ID,
+                     "profile": {}, "files": paths, "include_ui_facts": True,
+                     **({"typescript_package_root": str(typescript_package_root.resolve())} if typescript_package_root else {})},
+            run_id=run_id,
+        )
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if (not isinstance(payload, dict) or payload.get("version") != TYPESCRIPT_AST_EVIDENCE_VERSION
+                or payload.get("extractor_id") != MODULE_FACTS_EXTRACTOR_ID or not isinstance(files, list)
+                or [item.get("path") if isinstance(item, dict) else None for item in files] != paths):
+            raise _invalid_evidence("UI facts do not match the request.", run_id=run_id)
+        result = {}
+        for item in files:
+            facts = item.get("ui_facts")
+            if not isinstance(facts, dict) or not isinstance(facts.get("components"), list):
+                raise _invalid_evidence("UI component facts are invalid.", run_id=run_id)
+            if (not isinstance(facts.get("content_sha256"), str)
+                    or not isinstance(facts.get("diagnostics"), list)
+                    or not all(isinstance(x, str) for x in facts["diagnostics"])
+                    or not isinstance(facts.get("entrypoint_candidates"), list)
+                    or not all(isinstance(x, str) for x in facts["entrypoint_candidates"])):
+                raise _invalid_evidence("UI source facts are invalid.", run_id=run_id)
+            for component in facts["components"]:
+                if (not isinstance(component, dict) or not isinstance(component.get("symbol"), str)
+                        or not isinstance(component.get("start_line"), int) or component["start_line"] < 1
+                        or component.get("props_status") not in {"known", "unknown"}
+                        or not isinstance(component.get("renders"), list)
+                        or not isinstance(component.get("unresolved_tags"), list)
+                        or not all(isinstance(x, str) for x in component["unresolved_tags"])):
+                    raise _invalid_evidence("UI component schema is invalid.", run_id=run_id)
+                props = component.get("props")
+                if component["props_status"] == "unknown":
+                    valid = props is None
+                else:
+                    valid = isinstance(props, list) and all(
+                        isinstance(prop, dict) and isinstance(prop.get("name"), str)
+                        and isinstance(prop.get("optional"), bool) and isinstance(prop.get("has_default"), bool)
+                        for prop in props)
+                if not valid or not all(
+                    isinstance(edge, dict) and isinstance(edge.get("ref"), str)
+                    and isinstance(edge.get("props"), list) and all(isinstance(x, str) for x in edge["props"])
+                    for edge in component["renders"]
+                ):
+                    raise _invalid_evidence("UI props or render edges are invalid.", run_id=run_id)
+            result[str(item["path"])] = facts
+        return result
+
+    def _run_helper(
+        self,
+        *,
+        target_root: Path,
+        request: dict[str, object],
+        run_id: str | None,
+    ) -> object:
         env = {key: value for key, value in os.environ.items() if key.casefold() in _ENV_ALLOWLIST}
         node = self._which("node", path=_environment_value(env, "PATH") or "")
         if not node:
@@ -148,12 +322,6 @@ class TypeScriptAstExtractor:
                 run_id=run_id,
             )
         helper_path = Path(__file__).with_name("typescript_ast_extractor.cjs")
-        request = {
-            "version": TYPESCRIPT_AST_REQUEST_VERSION,
-            "extractor_id": policy.symbol_extractor_id,
-            "profile": policy.metadata(),
-            "files": normalized,
-        }
         try:
             completed = self._run_process(
                 [node, str(helper_path)],
@@ -185,19 +353,13 @@ class TypeScriptAstExtractor:
                 run_id=run_id,
             )
         try:
-            payload = json.loads(completed.stdout or "")
+            return json.loads(completed.stdout or "")
         except (json.JSONDecodeError, TypeError) as exc:
             raise HarnessError(
                 "typescript_ast_extraction_failed",
                 "TypeScript AST extractor returned invalid JSON.",
                 run_id=run_id,
             ) from exc
-        return _validate_evidence(
-            payload,
-            expected_paths=normalized,
-            policy=policy,
-            run_id=run_id,
-        )
 
 
 def _validate_evidence(
@@ -263,6 +425,8 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
         qualified_name = str(raw_symbol.get("qualified_name") or "").strip()
         parameters = raw_symbol.get("parameters")
         type_parameters = raw_symbol.get("type_parameters")
+        start_line = raw_symbol.get("start_line")
+        end_line = raw_symbol.get("end_line")
         if (
             kind not in _ALLOWED_SYMBOL_KINDS
             or not name
@@ -271,6 +435,10 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
             or not isinstance(type_parameters, list)
             or not all(isinstance(item, dict) for item in parameters)
             or not all(isinstance(item, str) for item in type_parameters)
+            or not isinstance(start_line, int)
+            or not isinstance(end_line, int)
+            or start_line < 1
+            or end_line < start_line
         ):
             raise _invalid_evidence(f"Extractor symbol schema is invalid for {path}.", run_id=run_id)
         normalized_parameters: list[dict[str, object]] = []
@@ -297,6 +465,8 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
                 "type_parameters": list(type_parameters),
                 "async": raw_symbol.get("async") is True,
                 "exported": raw_symbol.get("exported") is True,
+                "start_line": start_line,
+                "end_line": end_line,
             }
         )
     return symbols
@@ -310,6 +480,3 @@ def _environment_value(env: dict[str, str], key: str) -> str:
     expected = key.casefold()
     return next((value for name, value in env.items() if name.casefold() == expected), "")
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

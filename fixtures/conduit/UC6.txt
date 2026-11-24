@@ -1,0 +1,34 @@
+Use case name: BlockUser
+Description: A signed-in user can block another user. After that, the blocker no longer sees the blocked user's articles and comments, and the blocked user can no longer follow the blocker or comment on the blocker's articles. The block can be undone. Other users are not affected.
+Participating Actors:
+- Blocker: a signed-in user who blocks another user.
+- Blocked User: a signed-in user who has been blocked by the Blocker.
+- Other User: a signed-in user who is neither the Blocker nor the Blocked User.
+- Visitor: a person who is not signed in.
+Entry conditions: The Blocker is signed in. The Blocked User exists and is a different user.
+Flow of events User System:
+1. The Blocker opens the profile of the user they want to block.
+2. The system shows the profile together with an action to block the user, next to the follow action.
+3. The Blocker chooses to block the user and confirms the choice.
+4. The system records the block, removes any follow between the two users in both directions, and shows the profile marked as blocked, with an action to unblock instead of the follow action. The blocked user's articles are not listed on that profile for the Blocker.
+5. The Blocker browses the global feed, their personal feed, the articles of a tag and the articles favorited by any user.
+6. The system never shows an article written by the Blocked User in these lists, and the article count and pages of every list match the articles shown.
+7. The Blocker opens an article written by another author.
+8. The system shows the article and its comments without the comments written by the Blocked User.
+9. The Blocker chooses to unblock the user.
+10. The system removes the block; the Blocked User's articles and comments are shown to the Blocker again. Follows removed by the block are not restored.
+Alternative flows:
+A1. The Blocked User opens an article written by the Blocker. The system shows the article but not the comment form, and the follow action is not available on the Blocker's profile.
+A2. The Blocked User sends a comment on one of the Blocker's articles, or a follow request for the Blocker, directly to the API. The system refuses it as forbidden (HTTP 403) with an error message, and nothing is created.
+A3. The Blocker opens the address of an article written by the Blocked User directly. The system does not show the article body; it tells the Blocker that they blocked its author and offers to unblock.
+A4. A user tries to block themselves. The system refuses it with an error message and nothing changes.
+A5. A user tries to block or unblock a user that does not exist. The system answers that the profile was not found (HTTP 404).
+A6. A Visitor sends a block or unblock request without signing in. The system refuses it as unauthenticated (HTTP 401).
+A7. The Blocker blocks a user that is already blocked, or unblocks a user that is not blocked. The system keeps the current state and does not report an error.
+Exit conditions:
+- A block changes only what the Blocker sees and what the Blocked User can do towards the Blocker; Other Users and Visitors see every article and comment as before.
+- Blocking never deletes articles, comments or favorites; unblocking shows them again.
+Quality requirements:
+- The block is enforced by the server for every list and every action listed above; hiding content or actions in the web page is not enough on its own.
+- While a block or unblock request is in progress, its action cannot be triggered again, to avoid duplicate submissions.
+- The demo data contains a user carol with one article, and the demo user alice has blocked carol; loading the demo data several times keeps exactly one such block.

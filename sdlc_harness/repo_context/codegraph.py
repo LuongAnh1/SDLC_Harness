@@ -13,9 +13,9 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from ..core.errors import HarnessError
+from ..core.coerce import dict_items as _dict_items
 
 MAX_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 45
@@ -103,6 +103,86 @@ class CodeGraphContextProvider:
             evidence=_truncate(evidence, limit=MAX_EVIDENCE_CHARS),
         )
 
+    def symbol_kinds(
+        self,
+        target_path: Path,
+        targets: list[tuple[str, str]],
+    ) -> list[dict[str, str]]:
+        """Return the declaration kind the index holds for each existing (path, symbol)."""
+
+        self.require_index(target_path)
+        if self.fake_mode:
+            return []
+        facts: list[dict[str, str]] = []
+        for path, symbol in sorted(set(targets)):
+            raw = _run_codegraph_command(
+                target_path=target_path,
+                arguments=["query", symbol, "--limit", "20", "--json"],
+                timeout_seconds=self.timeout_seconds,
+            )
+            try:
+                payload = json.loads(raw or "[]")
+            except json.JSONDecodeError as exc:
+                raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned invalid JSON.") from exc
+            if not isinstance(payload, list):
+                raise HarnessError("target_repo_codegraph_failed", "CodeGraph symbol query did not return a list.")
+            kind = next(
+                (
+                    str(node.get("kind") or "")
+                    for item in _dict_items(payload)
+                    for node in [item.get("node")]
+                    if isinstance(node, dict)
+                    and node.get("filePath") == path
+                    and node.get("name") == symbol
+                ),
+                "",
+            )
+            if kind:
+                facts.append({"path": path, "symbol": symbol, "kind": kind})
+        return facts
+
+    def target_callers(
+        self,
+        target_path: Path,
+        targets: list[tuple[str, str]],
+    ) -> list[dict[str, object]]:
+        """Return, per (path, symbol), the other files whose code calls or registers that symbol."""
+
+        facts: list[dict[str, object]] = []
+        for path, symbol in sorted(set(targets)):
+            payload = self.query_structured(target_path, operation="callers", symbol=symbol, limit=10)
+            callers = sorted(
+                {
+                    (str(item.get("filePath") or ""), int(item.get("startLine") or 0))
+                    for item in _dict_items(payload.get("callers"))
+                    if str(item.get("filePath") or "") and str(item.get("filePath") or "") != path
+                }
+            )
+            if callers:
+                facts.append(
+                    {
+                        "path": path,
+                        "symbol": symbol,
+                        "callers": [{"path": caller, "line": line} for caller, line in callers],
+                    }
+                )
+        return facts
+
+    def target_tests(
+        self,
+        target_path: Path,
+        paths: list[str],
+    ) -> list[dict[str, object]]:
+        """Return, per source path, the existing test files that import it directly."""
+
+        facts: list[dict[str, object]] = []
+        for path in sorted(set(paths)):
+            payload = self.query_structured(target_path, operation="affected_tests", files=[path], depth=1)
+            tests = sorted({str(item) for item in payload.get("affectedTests") or [] if str(item)} - {path})
+            if tests:
+                facts.append({"path": path, "tests": tests})
+        return facts
+
     def query_readonly(self, target_path: Path, query: str) -> str:
         """Query một index đã tồn tại; không tự tạo generated state cho L2."""
 
@@ -167,6 +247,7 @@ class CodeGraphContextProvider:
             target_path=target_path,
             command=command,
             timeout_seconds=self.timeout_seconds,
+            list_key="results",
         )
 
     def query_capability(
@@ -383,6 +464,7 @@ def _run_codegraph_json(
     target_path: Path,
     command: list[str],
     timeout_seconds: int,
+    list_key: str = "",
 ) -> dict[str, object]:
     raw = _run_codegraph_command(
         target_path=target_path,
@@ -393,6 +475,9 @@ def _run_codegraph_json(
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned invalid JSON.") from exc
+    # `query --json` and `files --json` print a JSON array of entries.
+    if isinstance(payload, list) and list_key:
+        return {list_key: payload}
     if not isinstance(payload, dict):
         raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned an invalid JSON object.")
     return payload
@@ -581,12 +666,6 @@ def _fake_repo_evidence(*, target_path: Path, target_files: list[str]) -> str:
             lines.append(_truncate(path.read_text(encoding="utf-8", errors="replace"), limit=1200))
             lines.append("```")
     return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _truncate(text: str, *, limit: int) -> str:

@@ -6,21 +6,31 @@ sửa source và không thay vai QA/Tester Agent ở tầng acceptance/system te
 """
 
 from .registry import (
+    BROWSER_CAPTURE_SPEC_PATH,
+    RUNTIME_PROBE_SPEC_PATH,
     VerificationPreparationSpec,
     VerificationStageSpec,
-    resolve_verification_preparation_spec,
     resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
-from .runner import VerificationResult, VerificationRunner, VerificationStageResult
+from .runner import (
+    BrowserCaptureRun,
+    RuntimeProbeRun,
+    VerificationResult,
+    VerificationRunner,
+    VerificationStageResult,
+)
 
 __all__ = [
+    "BROWSER_CAPTURE_SPEC_PATH",
+    "BrowserCaptureRun",
+    "RUNTIME_PROBE_SPEC_PATH",
+    "RuntimeProbeRun",
     "VerificationResult",
     "VerificationRunner",
     "VerificationStageResult",
     "VerificationPreparationSpec",
     "VerificationStageSpec",
-    "resolve_verification_preparation_spec",
     "resolve_verification_preparation_specs",
     "resolve_verification_stage_specs",
 ]

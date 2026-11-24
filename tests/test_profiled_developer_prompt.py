@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -11,10 +10,9 @@ from sdlc_harness.agents.developer.profile_context import developer_generation_c
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import (
     fake_code_trace_review,
-    fake_qa_generated_tests,
 )
 from sdlc_harness.profiles import (
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     implementation_signature_contract_digest,
 )
 
@@ -57,7 +55,7 @@ def _packet() -> dict[str, object]:
     signature["digest"] = implementation_signature_contract_digest(signature)
     return {
         "run_id": "run-profiled-developer",
-        "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
         "approved_plan": {"structured_plan_sha256": "sha256:approved"},
         "effective_design_contract": {},
         "requirement_contract": {"version": "v2"},
@@ -135,7 +133,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
         repair_iteration=0,
     )
 
-    assert manifest["version"] == "developer_execution_manifest_v7"
+    assert manifest["version"] == "developer_execution_manifest_v8"
     assert manifest["items"][0]["paths"] == [SOURCE_PATH, TEST_PATH]
     source = manifest["items"][0]["files"][0]
     assert source["approved_signatures"][0]["qualified_name"] == "HealthService.check"
@@ -153,7 +151,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     )
     assert "typescript_prompt_v1" in prompt
     assert "HealthService.check" in prompt
-    assert "immutable hard constraints" in prompt
+    assert "immutable API-shape constraints" in prompt
     unit_prompt = _action_prompt(
         item={
             **manifest["items"][0],
@@ -180,41 +178,22 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     assert unit_contract["approved_signatures"][0]["qualified_name"] == "HealthService.check"
     assert unit_contract["approved_signatures"][0]["return_type"] == "Promise<boolean>"
     assert unit_contract["hard_constraints"] == [
-        "Approved signatures are immutable and override conflicting prose objectives.",
+            "Approved signatures are immutable API-shape constraints, not authorization to implement behavior. They override conflicting prose only for qualified name, parameters, async shape, and return type.",
         "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
         "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+            "Implement behavior only when active_focus.mandatory_obligations for this unit requires it. A parameter or result type present only in an approved signature may reserve compatibility for another unit; it must not by itself create a branch, side effect, result value, or domain error.",
+            "For non-UI work, preserve every exact entity field, operation, relation, constraint, and migration intent in active_focus.mandatory_obligations.approved_non_ui_contracts; never invent convenience fields or sibling API behavior.",
         "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
         "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
         "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
-        "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+        "contract_anchor_paths are read-only: the files of the units this unit depends on and the repository files that define what this unit's files import. Read the ones whose names, signatures or results your change uses instead of guessing them; they never expand write_paths.",
+        "Repository reads, diffs, listings and searches are confined to read_context_paths. CodeGraph topology may name a connected out-of-unit path, but it does not grant source access to that path; leave its inspection and repair to the later unit that declares it as context.",
         "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
-        "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
+            "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
     ]
 
 
-def test_profiled_fake_qa_and_code_trace_have_no_java_paths() -> None:
-    qa_prompt = (
-        "QA Test Policy:\n"
-        + json.dumps(
-            {
-                **PROFILE,
-                "framework": "vitest",
-                "components": [
-                    {
-                        "component_id": "api",
-                        "test_root": "apps/api/src",
-                        "test_suffix": ".test.ts",
-                    }
-                ],
-            }
-        )
-        + "\n\nQA Generation Packet:\n"
-        + json.dumps({"canonical_requirements": [{"id": "REQ-1"}]})
-    )
-    qa = json.loads(fake_qa_generated_tests(qa_prompt))
-    assert qa["test_files"][0]["path"].endswith(".test.ts")
-    assert "vitest" in qa["test_files"][0]["content"]
-
+def test_profiled_fake_code_trace_has_no_java_paths() -> None:
     trace_prompt = (
         "Code Trace LLM Review v1\nReturn only valid JSON. Do not wrap the JSON in markdown.\n\n"
         + json.dumps(

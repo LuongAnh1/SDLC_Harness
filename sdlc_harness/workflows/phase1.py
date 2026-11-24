@@ -7,6 +7,7 @@ render các projection và lưu checkpoint để Niko có thể kiểm soát t�
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
@@ -22,21 +23,21 @@ from ..artifacts import (
 )
 from ..core.config import Settings
 from ..core.errors import HarnessError
-from ..profiles import build_profile_snapshot, profile_status_metadata
+from ..profiles import CURRENT_CONTRACT_PINS, build_profile_snapshot, profile_status_metadata, retired_contract_pins
 from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_entry
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..agents.developer import (
-    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     developer_transport_retry_allowed,
     developer_execution_retry_allowed,
-    resolve_implementation_plan_contract,
 )
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementCoverageReviewer,
+    RequirementInterpretationRepairer,
+    needs_fix_interpretations,
     RequirementModelV2,
     RequirementModelV2Refiner,
     RequirementSourceCatalog,
@@ -78,16 +79,8 @@ from ..agents.requirements.session_v1 import (
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION_V1,
-    GRAPH_VERSION_V2,
-    SUPPORTED_GRAPH_VERSIONS,
-    UI_CONTRACT_STATE_KEY,
-    UI_LAYOUT_CONTRACT_KEY,
     UIUX_CONTRACT_STATE_KEY,
-    UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
-    resolve_ui_contract_pin,
-    ui_layout_pin,
 )
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -112,6 +105,7 @@ ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS = [
     "cancel_run",
 ]
 ALLOWED_REQUIREMENT_DRAFTING_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+INTERPRETATION_REPAIR_LIMIT = 2
 ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS = [
     "clarify_more",
     "revalidate_requirement",
@@ -145,6 +139,83 @@ class PhaseOneWorkflow:
         )
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
         self.coverage_reviewer = RequirementCoverageReviewer(self.llm_client)
+        self.interpretation_repairer = RequirementInterpretationRepairer(self.llm_client)
+
+    def _interpretation_repairer_for(self, *, run_id: str, revision: int) -> RequirementInterpretationRepairer:
+        if not bool(self.requirement_step_review.get("enabled")):
+            return self.interpretation_repairer
+        return RequirementInterpretationRepairer(
+            ReviewableLlmClient(
+                self.llm_client,
+                store=self.store,
+                run_id=run_id,
+                review=self.requirement_step_review,
+                call_prefix=f"requirement-interpretation-r{revision}",
+                execution_dir=f"requirement_execution/interpretation_r{revision}_step_review",
+                error_prefix="requirement_interpretation",
+                label="Requirement Interpretation Repair",
+            )
+        )
+
+    def _repair_interpretations(
+        self,
+        *,
+        run_id: str,
+        state: dict[str, Any],
+        refinement: Any,
+        coverage: Any,
+        source_text_by_id: dict[str, str],
+    ) -> tuple[Any, Any, list[str]]:
+        """Coverage judges the model's silent interpretations; wrong ones go back for a bounded fix, never to the user."""
+
+        audit_paths: list[str] = []
+        for _ in range(INTERPRETATION_REPAIR_LIMIT):
+            findings = needs_fix_interpretations(coverage.analysis)
+            if not findings:
+                return refinement, coverage, audit_paths
+            base_revision = refinement.model.revision
+            repair = self._interpretation_repairer_for(run_id=run_id, revision=base_revision).apply(
+                model=refinement.model,
+                source_text_by_id=source_text_by_id,
+                findings=findings,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            audit_paths.append(
+                self.store.relative(
+                    self.store.write_json_artifact(
+                        run_id,
+                        f"requirement_interpretation_repair_v1_r{base_revision}.json",
+                        {
+                            "artifact_version": "requirement_interpretation_repair_v1",
+                            "base_revision": base_revision,
+                            "result_revision": repair.model.revision,
+                            "findings": findings,
+                            "updates": repair.updates,
+                            "attempts": [attempt.to_dict() for attempt in repair.attempts],
+                        },
+                    )
+                )
+            )
+            coverage = self._coverage_reviewer_for(run_id=run_id, revision=repair.model.revision).review(
+                model=repair.model,
+                source_text_by_id=source_text_by_id,
+                validation_report=repair.report,
+                semantic=True,
+                question_limit=5,
+            )
+            policy_validation = normalize_and_validate_requirement_model_v2(
+                coverage.model,
+                source_text_by_id,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            refinement = replace(refinement, model=policy_validation.model, final_report=policy_validation.report)
+        if needs_fix_interpretations(coverage.analysis):
+            raise HarnessError(
+                "requirement_interpretation_unresolved",
+                f"The coverage reviewer still finds wrong interpretations after {INTERPRETATION_REPAIR_LIMIT} repairs.",
+                run_id=run_id,
+            )
+        return refinement, coverage, audit_paths
 
     def _coverage_reviewer_for(
         self,
@@ -167,6 +238,30 @@ class PhaseOneWorkflow:
             )
         )
 
+    def _clarification_updater_for(
+        self,
+        *,
+        run_id: str,
+        question_id: str,
+        revision: int,
+    ) -> RequirementClarificationUpdater:
+        if not bool(self.requirement_step_review.get("enabled")):
+            return self.clarification_updater
+        # One exchange directory per question and model revision: a re-asked question gets fresh exchanges.
+        label = f"{question_id.lower()}-r{revision}"
+        return RequirementClarificationUpdater(
+            ReviewableLlmClient(
+                self.llm_client,
+                store=self.store,
+                run_id=run_id,
+                review=self.requirement_step_review,
+                call_prefix=f"requirement-clarification-{label}",
+                execution_dir=f"requirement_execution/clarification_{label}_step_review",
+                error_prefix="requirement_clarification",
+                label=f"Requirement Clarification {question_id}",
+            )
+        )
+
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
 
@@ -183,7 +278,7 @@ class PhaseOneWorkflow:
         """Chạy Phase 1 từ source đã được load, bất kể source là fixture hay Jira."""
 
         active_state = self.store.find_active_run(source.source_ref)
-        if active_state and str(active_state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS:
+        if active_state and not retired_contract_pins(active_state):
             return self._status_response(active_state, created_new_run=False)
 
         run_id = self.store.new_run_id()
@@ -213,34 +308,8 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
-        designer_contract_version = str(
-            getattr(self.settings, "designer_contract_version", GRAPH_VERSION_V1)
-        )
-        if designer_contract_version not in SUPPORTED_GRAPH_VERSIONS:
-            raise HarnessError(
-                "vertical_design_graph_invalid",
-                f"Unsupported configured Designer contract: {designer_contract_version}",
-                run_id=run_id,
-            )
-        state[DESIGNER_CONTRACT_STATE_KEY] = designer_contract_version
-        state[UIUX_MODE_STATE_KEY] = self.settings.uiux_skill_mode
-        state[UIUX_CONTRACT_STATE_KEY] = (
-            UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
-        )
-        state[UI_CONTRACT_STATE_KEY] = resolve_ui_contract_pin(
-            ui_contract_version=str(
-                getattr(self.settings, "designer_ui_contract_version", "ui_experience_contract_v1")
-            ),
-            graph_v2=designer_contract_version == GRAPH_VERSION_V2,
-            uiux_mode=self.settings.uiux_skill_mode,
-            run_id=run_id,
-        )
-        state[UI_LAYOUT_CONTRACT_KEY] = ui_layout_pin(str(state[UI_CONTRACT_STATE_KEY]))
+        state.update(CURRENT_CONTRACT_PINS)
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
-        state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
-            COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
-        )
-        state["vertical_trace_mode"] = self.settings.vertical_trace_mode
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,
@@ -371,6 +440,13 @@ class PhaseOneWorkflow:
                 model=policy_validation.model,
                 final_report=policy_validation.report,
             )
+            refinement, coverage, interpretation_repairs = self._repair_interpretations(
+                run_id=run_id,
+                state=state,
+                refinement=refinement,
+                coverage=coverage,
+                source_text_by_id=source_catalog.source_text_by_id,
+            )
             quality_checklist = build_requirement_quality_checklist(
                 model=refinement.model,
                 validation_report=refinement.final_report,
@@ -405,6 +481,11 @@ class PhaseOneWorkflow:
                     else {}
                 ),
                 **({"requirement_loop_session": refinement.session_path} if refinement.session_path else {}),
+                **(
+                    {"requirement_interpretation_repair": interpretation_repairs[-1]}
+                    if interpretation_repairs
+                    else {}
+                ),
                 "requirement_clarification_analysis": self.store.relative(
                     self.store.write_json_artifact(
                         run_id,
@@ -878,7 +959,8 @@ class PhaseOneWorkflow:
             )
         resolved_answer = resolve_clarification_answer(current_question, answer)
         source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
-        result = self.clarification_updater.apply(
+        updater = self._clarification_updater_for(run_id=run_id, question_id=question_id, revision=model.revision)
+        result = updater.apply(
             source_text_by_id=source_text_by_id,
             model=model,
             question_id=question_id,
@@ -1565,13 +1647,14 @@ class PhaseOneWorkflow:
             UIUX_MODE_STATE_KEY: state.get(UIUX_MODE_STATE_KEY, "off"),
             UIUX_CONTRACT_STATE_KEY: state.get(UIUX_CONTRACT_STATE_KEY, ""),
             VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
-            IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: resolve_implementation_plan_contract(state),
+            IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY),
             "vertical_trace_mode": state.get("vertical_trace_mode"),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
             "latest_artifacts": public_artifacts,
             "pending_checkpoint": state.get("pending_checkpoint"),
+            "pending_step_review": state.get("pending_step_review"),
             "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),

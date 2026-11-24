@@ -53,7 +53,9 @@ from .coverage_v1 import (
     RequirementCoverageResult,
     RequirementCoverageReviewer,
     build_requirement_quality_checklist,
+    needs_fix_interpretations,
 )
+from .interpretation_repair_v1 import InterpretationRepairResult, RequirementInterpretationRepairer
 from .clarification_policy_v1 import (
     AGENT_DEFAULT,
     CLARIFICATION_DISPOSITION_FIELD,
@@ -135,6 +137,9 @@ __all__ = [
     "RequirementClarificationUpdater",
     "RequirementCoverageResult",
     "RequirementCoverageReviewer",
+    "InterpretationRepairResult",
+    "RequirementInterpretationRepairer",
+    "needs_fix_interpretations",
     "RequirementDeltaApplication",
     "RequirementModelV2",
     "RequirementModelV2Attempt",

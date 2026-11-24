@@ -11,21 +11,14 @@ from ...core.errors import HarnessError
 from .uiux import (
     RUNTIME_SURFACE_BINDING_VERSION,
     UI_EXPERIENCE_CONTRACT_V2,
-    UIUX_EXPERIENCE_CONTRACT_VERSION,
 )
 
 
-GRAPH_VERSION_V1 = "vertical_design_graph_v1"
-GRAPH_VERSION_V2 = "vertical_design_graph_v2"
-GRAPH_VERSION = GRAPH_VERSION_V2
-SUPPORTED_GRAPH_VERSIONS = frozenset({GRAPH_VERSION_V1, GRAPH_VERSION_V2})
-DELTA_VERSION_V1 = "designer_delta_v1"
-DELTA_VERSION_V2 = "designer_delta_v2"
-DELTA_VERSION = DELTA_VERSION_V2
+# The only Design contracts the Harness executes (2026-11-18); runs pinned to older ones are retired.
+GRAPH_VERSION = "vertical_design_graph_v2"
+DELTA_VERSION = "designer_delta_v2"
 DESIGNER_CONTRACT_STATE_KEY = "designer_contract_version"
-DESIGN_BUNDLE_VERSION_V1 = "system_design_bundle_v1"
-DESIGN_BUNDLE_VERSION_V2 = "system_design_bundle_v2"
-DESIGN_BUNDLE_VERSION = DESIGN_BUNDLE_VERSION_V2
+DESIGN_BUNDLE_VERSION = "system_design_bundle_v2"
 DESIGN_BUNDLE_STATE_KEY = "design_bundle_contract_version"
 SURFACE_CONTRACT_VERSION = "design_surface_contract_v1"
 RUNTIME_BINDING_VERSION = "runtime_binding_v1"
@@ -36,9 +29,14 @@ RUNNABLE_STATUSES = frozenset({"bound", "externally_blocked", "fixture_required"
 EXTERNAL_DEPENDENCY_REF_PREFIXES = ("PRE-", "MF-", "AF-", "EF-")
 UI_RUNTIME_STATES = ("loading", "ready", "empty", "error", "success")
 UI_VISUAL_GROUPS = ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules")
+# Required fields of ui_experience_contract_v2 (schema_version aside).
+UI_EXPERIENCE_FIELDS = (
+    "screen", "component_structure", "feedback", "accessibility", "responsive", "focus_flow", "focus_policies",
+    "guidance_refs", "repo_evidence_refs", "runtime_states", "visual_contract",
+)
 UI_STYLE_TARGET_POLICIES = frozenset({"reuse_existing", "new_stylesheet"})
 UI_SURFACE_ROLES = frozenset({"screen", "composition_wiring"})
-# Run-pinned opt-in: layout items become {region, layer, content}; graphs without the pin keep '<region>: <content>'.
+# Layout items are {region, layer, content}; the run pins this contract under UI_LAYOUT_CONTRACT_KEY.
 UI_LAYOUT_CONTRACT_KEY = "designer_ui_layout_contract"
 UI_LAYERED_LAYOUT_V1 = "layered_layout_v1"
 UI_LAYOUT_LAYERS = ("page", "overlay")
@@ -67,9 +65,10 @@ def canonicalize_composition_wiring(graph: dict[str, object]) -> dict[str, objec
 def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
     """Derive every forwarded input by screen and child; never infer business inputs."""
 
-    if not ui_contract_v2(graph):
-        return False
     run_id = str(graph.get("run_id") or "")
+    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
+    if not any(is_composition_wiring(node) for node in nodes):
+        return False  # nothing forwards inputs, so there is nothing to derive
     context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
     chain = {
         str(item.get("ref") or ""): item
@@ -81,7 +80,6 @@ def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
     }
     expected: dict[str, dict[tuple[str, str], set[str]]] = {}
     requirement_refs: dict[str, set[str]] = {}
-    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
     for node in nodes:
         if str(node.get("surface") or "") != "ui" or is_composition_wiring(node):
             continue
@@ -136,6 +134,9 @@ def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
             }
             if node.get("contract") != desired_contract:
                 node["contract"] = desired_contract
+                changed = True
+            if contract.get("states") != ["mounted", "forwarding"]:
+                contract["states"] = ["mounted", "forwarding"]
                 changed = True
             if contract.get("transitions") != [desired_transition]:
                 contract["transitions"] = [desired_transition]
@@ -213,7 +214,34 @@ NODE_KINDS = frozenset(
 SURFACES = frozenset({"ui", "api", "business_rule", "data", "interaction"})
 DISPOSITIONS = frozenset({"reuse", "modify", "add", "no_change"})
 EDGE_KINDS = frozenset({"contains", "calls", "reads", "writes", "returns", "realized_by", "depends_on"})
-OPERATIONS = frozenset({"add_node", "update_node", "remove_node", "add_edge", "remove_edge", "set_partition_coverage"})
+OPERATIONS = frozenset(
+    {
+        "add_node",
+        "update_node",
+        "remove_node",
+        "add_edge",
+        "remove_edge",
+        "order_edges",
+        "set_partition_coverage",
+        "place_surface",
+        "not_exercised",
+    }
+)
+# Edge kinds that state structure; every other kind is an ordered behavior message of its scenario.
+STRUCTURAL_EDGE_KINDS = frozenset({"contains", "depends_on", "realized_by"})
+# A business rule may run in the UI or in the server; ui/api/data belong to fixed components.
+PLACEABLE_SURFACES = frozenset({"business_rule"})
+# A required backend surface a scenario never reaches (e.g. data behind a 401 refused before any access).
+# shortcut: ui is excluded (Phase 1 marks an unused ui not_applicable); allow it when a real UI case needs it.
+NOT_EXERCISABLE_SURFACES = frozenset({"api", "business_rule", "data"})
+# Fields a delta may set on a node (the partition ids are overwritten from the delta partition).
+DELTA_NODE_FIELDS = frozenset(
+    {
+        "temp_ref", "semantic_key", "name", "kind", "surface", "disposition", "requirement_refs", "evidence_refs",
+        "evidence_reason", "contract", "surface_contract", "runtime_binding",
+        "use_case_id", "scenario_id", "component_id",
+    }
+)
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
 _TYPESCRIPT_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
@@ -233,38 +261,14 @@ def graph_digest(graph: dict[str, object]) -> str:
     return canonical_hash({key: value for key, value in graph.items() if key != "artifact_digest"})
 
 
-def ui_contract_v2(graph: dict[str, object]) -> bool:
-    binding = graph.get("snapshot_binding")
-    return (
-        str(graph.get("schema_version") or "") == GRAPH_VERSION_V2
-        and isinstance(binding, dict)
-        and binding.get("designer_ui_contract_version") == UI_EXPERIENCE_CONTRACT_V2
-    )
-
-
-def ui_layered_layout(graph: dict[str, object]) -> bool:
-    return ui_contract_v2(graph) and _dict_value(graph.get("snapshot_binding")).get(UI_LAYOUT_CONTRACT_KEY) == UI_LAYERED_LAYOUT_V1
-
-
-def ui_layout_pin(ui_contract_version: str) -> str:
-    """Layout contract pinned for new runs; only ui_experience_contract_v2 runs get layered layout."""
-
-    return UI_LAYERED_LAYOUT_V1 if ui_contract_version == UI_EXPERIENCE_CONTRACT_V2 else ""
-
-
 def layout_regions(visual: dict[str, object]) -> list[tuple[str, str, str]]:
-    """(region, layer, content) for each layout item; layer is '' for legacy '<region>: <content>' strings."""
+    """(region, layer, content) for each layout item."""
 
-    regions: list[tuple[str, str, str]] = []
-    for item in visual.get("layout") if isinstance(visual.get("layout"), list) else []:
-        if isinstance(item, dict):
-            regions.append(
-                (str(item.get("region") or "").strip(), str(item.get("layer") or ""), str(item.get("content") or "").strip())
-            )
-        elif isinstance(item, str):
-            region, _, content = item.partition(":")
-            regions.append((region.strip(), "", content.strip()))
-    return regions
+    return [
+        (str(item.get("region") or "").strip(), str(item.get("layer") or ""), str(item.get("content") or "").strip())
+        for item in (visual.get("layout") if isinstance(visual.get("layout"), list) else [])
+        if isinstance(item, dict)
+    ]
 
 
 def new_vertical_design_graph(
@@ -273,7 +277,7 @@ def new_vertical_design_graph(
     snapshot_binding: dict[str, object],
     contract_version: str = GRAPH_VERSION,
 ) -> dict[str, object]:
-    if contract_version not in SUPPORTED_GRAPH_VERSIONS:
+    if contract_version != GRAPH_VERSION:
         raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=run_id)
     graph: dict[str, object] = {
         "schema_version": contract_version,
@@ -295,9 +299,8 @@ def validate_vertical_design_graph(
     expected_run_id: str | None = None,
     expected_binding: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema_version") not in SUPPORTED_GRAPH_VERSIONS:
+    if not isinstance(value, dict) or value.get("schema_version") != GRAPH_VERSION:
         raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=expected_run_id)
-    graph_version = str(value.get("schema_version") or "")
     run_id = str(value.get("run_id") or "")
     if not run_id or (expected_run_id and run_id != expected_run_id):
         raise HarnessError("vertical_design_graph_invalid", "Design graph run identity is invalid.", run_id=expected_run_id)
@@ -308,8 +311,6 @@ def validate_vertical_design_graph(
         raise HarnessError("vertical_design_graph_invalid", "Design graph snapshot binding is missing.", run_id=run_id)
     if expected_binding is not None and any(binding.get(key) != item for key, item in expected_binding.items()):
         raise HarnessError("designer_input_drift", "Design graph no longer matches its frozen inputs.", run_id=run_id)
-    ui_v2 = ui_contract_v2(value)
-    layered = ui_layered_layout(value)
 
     partitions = _dict_items(value.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)
     partition_keys: set[str] = set()
@@ -321,20 +322,45 @@ def validate_vertical_design_graph(
         if not isinstance(coverage, dict):
             raise HarnessError("vertical_design_graph_invalid", "Design partition coverage is invalid.", run_id=run_id)
         for surface, status in coverage.items():
-            if str(surface) not in SURFACES or str(status) not in {"covered", "no_change", "not_applicable", "missing"}:
+            if str(surface) not in SURFACES or str(status) not in {
+                "covered",
+                "no_change",
+                "not_applicable",
+                "missing",
+                "not_exercised",
+            }:
                 raise HarnessError("vertical_design_graph_invalid", "Design partition coverage contains an invalid value.", run_id=run_id)
-        if graph_version == GRAPH_VERSION_V2:
-            source_refs = partition.get("source_observation_refs", [])
-            if not isinstance(source_refs, list) or any(not isinstance(item, str) or not item for item in source_refs):
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    "Design partition source observations are invalid.",
-                    run_id=run_id,
-                )
+        source_refs = partition.get("source_observation_refs", [])
+        if not isinstance(source_refs, list) or any(not isinstance(item, str) or not item for item in source_refs):
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                "Design partition source observations are invalid.",
+                run_id=run_id,
+            )
         partition_keys.add(key)
+    for placement in _dict_items(value.get("surface_placements", []), code="vertical_design_graph_invalid", run_id=run_id):
+        if (
+            str(placement.get("surface") or "") not in PLACEABLE_SURFACES
+            or not str(placement.get("scenario_id") or "")
+            or not str(placement.get("component_id") or "")
+            or not str(placement.get("reason") or "").strip()
+            or not _strings(placement.get("evidence_refs"))
+        ):
+            raise HarnessError("vertical_design_graph_invalid", "Design surface placement is invalid.", run_id=run_id)
+    for declaration in _dict_items(value.get("surface_not_exercised", []), code="vertical_design_graph_invalid", run_id=run_id):
+        if (
+            str(declaration.get("surface") or "") not in NOT_EXERCISABLE_SURFACES
+            or not str(declaration.get("scenario_id") or "")
+            or not str(declaration.get("reason") or "").strip()
+            or not _strings(declaration.get("evidence_refs"))
+        ):
+            raise HarnessError("vertical_design_graph_invalid", "Design not_exercised declaration is invalid.", run_id=run_id)
 
     nodes = _dict_items(value.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
     node_ids: set[str] = set()
+    # One rejection names every node's surface contract problem: a large UI delta repeated the same misnesting on
+    # each node and was rejected one node at a time (design_v12 designer-0008).
+    contract_errors: list[str] = []
     for node in nodes:
         node_id = str(node.get("id") or "")
         if not node_id.startswith("VDN-") or node_id in node_ids:
@@ -357,18 +383,30 @@ def validate_vertical_design_graph(
         if not str(node.get("contract") or "").strip():
             raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} has no Design contract.", run_id=run_id)
         surface_contract = node.get("surface_contract")
-        if surface_contract is not None:
-            _validate_surface_contract(
-                surface_contract,
-                surface=str(node.get("surface") or ""),
-                node_id=node_id,
-                run_id=run_id,
-                ui_v2=ui_v2,
-                layered=layered,
-            )
-        if graph_version == GRAPH_VERSION_V2 and node.get("runtime_binding") is not None:
-            _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
         node_ids.add(node_id)
+        if surface_contract is not None:
+            try:
+                _validate_surface_contract(
+                    surface_contract,
+                    surface=str(node.get("surface") or ""),
+                    node_id=node_id,
+                    run_id=run_id,
+                )
+            except HarnessError as exc:
+                if exc.error_code != "vertical_design_graph_invalid":
+                    raise
+                contract_errors.append(exc.message)
+                continue
+        if node.get("runtime_binding") is not None:
+            _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
+    if contract_errors:
+        raise HarnessError(
+            "vertical_design_graph_invalid",
+            contract_errors[0]
+            if len(contract_errors) == 1
+            else f"{len(contract_errors)} nodes have invalid surface contracts: " + " | ".join(contract_errors),
+            run_id=run_id,
+        )
 
     edges = _dict_items(value.get("edges"), code="vertical_design_graph_invalid", run_id=run_id)
     edge_ids: set[str] = set()
@@ -389,15 +427,14 @@ def validate_vertical_design_graph(
             raise HarnessError("vertical_design_graph_invalid", "Design graph branch metadata is invalid.", run_id=run_id)
         if "terminal" in edge and not isinstance(edge.get("terminal"), bool):
             raise HarnessError("vertical_design_graph_invalid", "Design graph edge terminal marker is invalid.", run_id=run_id)
-        if graph_version == GRAPH_VERSION_V2:
-            if edge.get(BOUNDARY_CONTRACT_VERSION) is not None:
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Edge {edge_id} uses {BOUNDARY_CONTRACT_VERSION} as a field name; use boundary_contract instead.",
-                    run_id=run_id,
-                )
-            if edge.get("boundary_contract") is not None:
-                _validate_boundary_contract(edge.get("boundary_contract"), edge_id=edge_id, run_id=run_id)
+        if edge.get(BOUNDARY_CONTRACT_VERSION) is not None:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Edge {edge_id} uses {BOUNDARY_CONTRACT_VERSION} as a field name; use boundary_contract instead.",
+                run_id=run_id,
+            )
+        if edge.get("boundary_contract") is not None:
+            _validate_boundary_contract(edge.get("boundary_contract"), edge_id=edge_id, run_id=run_id)
         scenario_id = str(edge.get("scenario_id") or "")
         order = edge.get("order")
         if not scenario_id or not isinstance(order, int) or order < 1 or (scenario_id, order) in edge_orders:
@@ -446,14 +483,13 @@ def design_bundle_findings(
                     "origin": "deterministic",
                 }
             )
-    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
-        findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
-        findings.extend(
-            _sequence_behavior_findings(
-                nodes=_dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id),
-                edges=_dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id),
-            )
+    findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
+    findings.extend(
+        _sequence_behavior_findings(
+            nodes=_dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id),
+            edges=_dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id),
         )
+    )
     return findings
 
 
@@ -476,7 +512,7 @@ def _sequence_behavior_findings(
                 edge
                 for edge in edges
                 if str(edge.get("scenario_id") or "") == scenario_id
-                and str(edge.get("kind") or "") not in {"contains", "depends_on", "realized_by"}
+                and str(edge.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
             ),
             key=lambda item: int(item.get("order") or 0),
         )
@@ -531,13 +567,11 @@ def _validate_surface_contract(
     surface: str,
     node_id: str,
     run_id: str,
-    ui_v2: bool = False,
-    layered: bool = False,
 ) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != SURFACE_CONTRACT_VERSION:
         raise HarnessError(
             "vertical_design_graph_invalid",
-            f"Node {node_id} has an unsupported surface contract.",
+            f"Node {node_id} has an unsupported surface contract{_version_mismatch(value, SURFACE_CONTRACT_VERSION)}.",
             run_id=run_id,
         )
     if str(value.get("surface") or "") != surface:
@@ -560,7 +594,8 @@ def _validate_surface_contract(
         if not isinstance(raw, list) or any(not isinstance(item, str) or not item.strip() for item in raw):
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} surface contract has invalid {key}.",
+                f"Node {node_id} surface contract has invalid {key}: it must be an array of non-empty strings, "
+                "never objects.",
                 run_id=run_id,
             )
         if not allow_empty and not raw:
@@ -579,7 +614,8 @@ def _validate_surface_contract(
         ):
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} surface contract has invalid {key}.",
+                f"Node {node_id} surface contract has invalid {key}: it must be an array of objects, each with "
+                f"non-empty {', '.join(sorted(required_keys))}.",
                 run_id=run_id,
             )
         if not allow_empty and not raw:
@@ -593,26 +629,52 @@ def _validate_surface_contract(
         require_text("entrypoint")
         require_strings("states")
         require_objects("transitions", {"from", "action", "to", "outcome"})
+        declared_states = set(value["states"])
+        undeclared_states = list(
+            dict.fromkeys(
+                str(transition[endpoint])
+                for transition in value["transitions"]
+                for endpoint in ("from", "to")
+                if str(transition[endpoint]) not in declared_states
+            )
+        )
+        # Keep pre-gate Harness wiring resumable; new templates declare both states.
+        legacy_harness_wiring = (
+            str(_dict_value(value.get("runtime_surface")).get("role") or "") == "composition_wiring"
+            and declared_states == {"forwarding"}
+            and undeclared_states == ["mounted"]
+        )
+        if undeclared_states and not legacy_harness_wiring:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Node {node_id} UI transitions reference undeclared states: "
+                f"{', '.join(undeclared_states)}. Declare them in states or change the transition endpoints "
+                "to declared states.",
+                run_id=run_id,
+            )
         require_strings("validations", allow_empty=True)
         require_strings("outcomes")
         experience = value.get("experience_contract")
-        if experience is not None:
-            _validate_ui_experience_contract(
-                experience,
-                node_id=node_id,
+        # Every experience field is required, so this only names a misnesting the validator would reject anyway.
+        misplaced = [key for key in UI_EXPERIENCE_FIELDS if key in value] if isinstance(experience, dict) else []
+        misplaced = [key for key in misplaced if key not in experience]
+        if misplaced:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Node {node_id} surface_contract holds {', '.join(misplaced)}, which belong inside "
+                "surface_contract.experience_contract; move them into experience_contract (it was closed too early).",
                 run_id=run_id,
-                expected_version=UI_EXPERIENCE_CONTRACT_V2 if ui_v2 else UIUX_EXPERIENCE_CONTRACT_VERSION,
-                layered=layered,
             )
-        if ui_v2:
-            _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
-            screen_id = str(_dict_value(_dict_value(experience).get("screen")).get("screen_id") or "")
-            if experience is not None and screen_id != str(_dict_value(value.get("runtime_surface")).get("screen_id") or ""):
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Node {node_id} experience_contract.screen.screen_id must equal runtime_surface.screen_id.",
-                    run_id=run_id,
-                )
+        if experience is not None:
+            _validate_ui_experience_contract(experience, node_id=node_id, run_id=run_id)
+        _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
+        screen_id = str(_dict_value(_dict_value(experience).get("screen")).get("screen_id") or "")
+        if experience is not None and screen_id != str(_dict_value(value.get("runtime_surface")).get("screen_id") or ""):
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Node {node_id} experience_contract.screen.screen_id must equal runtime_surface.screen_id.",
+                run_id=run_id,
+            )
     elif surface == "api":
         require_text("operation_id")
         require_text("method")
@@ -666,12 +728,9 @@ def _validate_surface_contract(
                     f"Node {node_id} requires authentication but declares no authentication source.",
                     run_id=run_id,
                 )
-            if value.get("authentication_required") is False and source != "none":
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Node {node_id} does not require authentication but declares an authentication source.",
-                    run_id=run_id,
-                )
+            # authentication_required=False with a source is optional authentication: callers without a credential are
+            # served and a present credential identifies the caller (Conduit UC4: a public read that only the author may
+            # see as a draft). Rejecting it forced "none" and dropped the identity the endpoint needs.
             if source == "existing_runtime" and not value.get("authentication_evidence_refs"):
                 raise HarnessError(
                     "vertical_design_graph_invalid",
@@ -758,26 +817,29 @@ def _is_symbol_ref(value: str) -> bool:
     return _is_repo_path(path) and bool(_TYPESCRIPT_IDENTIFIER.fullmatch(symbol))
 
 
-def _validate_ui_experience_contract(
-    value: object,
-    *,
-    node_id: str,
-    run_id: str,
-    expected_version: str = UIUX_EXPERIENCE_CONTRACT_VERSION,
-    layered: bool = False,
-) -> None:
-    if not isinstance(value, dict) or value.get("schema_version") != expected_version:
+def _validate_ui_experience_contract(value: object, *, node_id: str, run_id: str) -> None:
+    if not isinstance(value, dict) or value.get("schema_version") != UI_EXPERIENCE_CONTRACT_V2:
         raise HarnessError(
             "vertical_design_graph_invalid",
-            f"Node {node_id} has an unsupported UI experience contract; expected {expected_version}.",
+            f"Node {node_id} has an unsupported UI experience contract; expected {UI_EXPERIENCE_CONTRACT_V2}.",
             run_id=run_id,
         )
     for key in ("component_structure", "accessibility", "responsive", "focus_flow", "guidance_refs"):
         items = value.get(key)
         if not isinstance(items, list) or not items or any(not isinstance(item, str) or not item.strip() for item in items):
+            # design_v20 designer-0038/0039: "has invalid guidance_refs" alone made the Designer empty valid refs it
+            # had nested under visual_contract; say what is required and where the field was found.
+            misplaced = [
+                name for name, nested in value.items() if isinstance(nested, dict) and key in nested
+            ]
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} UI experience contract has invalid {key}.",
+                f"Node {node_id} UI experience contract has invalid {key}: experience_contract.{key} must be a "
+                "non-empty array of non-empty strings."
+                + "".join(
+                    f" It was found under experience_contract.{name}; move it up to experience_contract."
+                    for name in misplaced
+                ),
                 run_id=run_id,
             )
     feedback = value.get("feedback")
@@ -792,23 +854,19 @@ def _validate_ui_experience_contract(
             f"Node {node_id} UI experience contract has invalid feedback.",
             run_id=run_id,
         )
-    if expected_version == UI_EXPERIENCE_CONTRACT_V2:
-        _validate_holistic_experience(value, node_id=node_id, run_id=run_id, layered=layered)
+    _validate_holistic_experience(value, node_id=node_id, run_id=run_id)
 
 
-def _layout_item_valid(item: object, layered: bool) -> bool:
-    if isinstance(item, dict):
-        return (
-            bool(str(item.get("region") or "").strip())
-            and item.get("layer") in UI_LAYOUT_LAYERS
-            and bool(str(item.get("content") or "").strip())
-        )
-    return not layered and isinstance(item, str) and bool(item.strip())
+def _layout_item_valid(item: object) -> bool:
+    return (
+        isinstance(item, dict)
+        and bool(str(item.get("region") or "").strip())
+        and item.get("layer") in UI_LAYOUT_LAYERS
+        and bool(str(item.get("content") or "").strip())
+    )
 
 
-def _validate_holistic_experience(
-    value: dict[str, object], *, node_id: str, run_id: str, layered: bool = False
-) -> None:
+def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run_id: str) -> None:
     """Structural checks only; whether the UX decisions are good stays with semantic review."""
 
     def invalid(detail: str) -> HarnessError:
@@ -855,12 +913,8 @@ def _validate_holistic_experience(
         if key != "layout" and not texts(visual.get(key)):
             raise invalid(f"visual_contract.{key} needs at least one decision")
     layout = visual.get("layout")
-    if not isinstance(layout, list) or not layout or not all(_layout_item_valid(item, layered) for item in layout):
-        raise invalid(
-            "visual_contract.layout needs {region,layer,content} items with layer " + "|".join(UI_LAYOUT_LAYERS)
-            if layered
-            else "visual_contract.layout needs at least one decision"
-        )
+    if not isinstance(layout, list) or not layout or not all(_layout_item_valid(item) for item in layout):
+        raise invalid("visual_contract.layout needs {region,layer,content} items with layer " + "|".join(UI_LAYOUT_LAYERS))
     if str(visual.get("style_target_policy") or "") not in UI_STYLE_TARGET_POLICIES:
         raise invalid("visual_contract.style_target_policy must be " + "|".join(sorted(UI_STYLE_TARGET_POLICIES)))
     if not str(visual.get("style_target_reason") or "").strip():
@@ -915,7 +969,11 @@ def _validate_delta_guidance_refs(
 def _validate_runtime_binding(value: object, *, node: dict[str, object], run_id: str) -> None:
     node_id = str(node.get("id") or "")
     if not isinstance(value, dict) or value.get("schema_version") != RUNTIME_BINDING_VERSION:
-        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} has an unsupported runtime binding.", run_id=run_id)
+        raise HarnessError(
+            "vertical_design_graph_invalid",
+            f"Node {node_id} has an unsupported runtime binding{_version_mismatch(value, RUNTIME_BINDING_VERSION)}.",
+            run_id=run_id,
+        )
     runtime_kind = str(value.get("runtime_kind") or "")
     if runtime_kind not in RUNTIME_KINDS:
         raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime kind is invalid.", run_id=run_id)
@@ -935,7 +993,13 @@ def _validate_runtime_binding(value: object, *, node: dict[str, object], run_id:
     owner_ref = str(attachment.get("owner_ref") or "")
     owner_path = str(attachment.get("owner_path") or "")
     owner_symbol = str(attachment.get("owner_symbol") or "")
-    if not owner_ref or (owner_path and not _is_repo_path(owner_path)) or (owner_path and not owner_symbol):
+    # A file anchor (RLA-* source_file, e.g. the router module that registers routes) is a whole-file owner with no
+    # symbol; the composition check compares owner_path/owner_symbol with that anchor.
+    if (
+        not owner_ref
+        or (owner_path and not _is_repo_path(owner_path))
+        or (owner_path and not owner_symbol and not owner_ref.startswith("RLA-"))
+    ):
         raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime attachment owner is invalid.", run_id=run_id)
     evidence_refs = value.get("evidence_refs")
     if not isinstance(evidence_refs, list) or any(not isinstance(item, str) or not item for item in evidence_refs):
@@ -944,7 +1008,18 @@ def _validate_runtime_binding(value: object, *, node: dict[str, object], run_id:
 
 def _validate_boundary_contract(value: object, *, edge_id: str, run_id: str) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != BOUNDARY_CONTRACT_VERSION:
-        raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} has an unsupported boundary contract.", run_id=run_id)
+        raise HarnessError(
+            "vertical_design_graph_invalid",
+            f"Edge {edge_id} has an unsupported boundary contract{_version_mismatch(value, BOUNDARY_CONTRACT_VERSION)}.",
+            run_id=run_id,
+        )
+
+
+def _version_mismatch(value: object, expected: str) -> str:
+    # Saying what was written and what is expected lets the Designer fix a version it copied from a nested contract.
+    if not isinstance(value, dict):
+        return f": it must be an object with schema_version '{expected}'"
+    return f": schema_version is {value.get('schema_version')!r}, expected '{expected}'"
     for key in ("consumer_operation", "provider_operation"):
         if not str(value.get(key) or "").strip():
             raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} boundary contract is missing {key}.", run_id=run_id)
@@ -960,14 +1035,6 @@ def _validate_boundary_contract(value: object, *, edge_id: str, run_id: str) -> 
             raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} boundary contract has invalid {key}.", run_id=run_id)
 
 
-def delta_version_for(graph_version: str) -> str:
-    return DELTA_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DELTA_VERSION_V1
-
-
-def design_bundle_version_for(graph_version: str) -> str:
-    return DESIGN_BUNDLE_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DESIGN_BUNDLE_VERSION_V1
-
-
 def apply_designer_delta(
     graph: dict[str, object],
     delta: object,
@@ -975,9 +1042,38 @@ def apply_designer_delta(
     valid_evidence_refs: set[str],
     valid_guidance_refs: set[str] | None = None,
 ) -> tuple[dict[str, object], dict[str, str]]:
+    written: dict[str, Any] = {}
+    try:
+        return _apply_designer_delta(
+            graph,
+            delta,
+            valid_evidence_refs=valid_evidence_refs,
+            valid_guidance_refs=valid_guidance_refs,
+            written=written,
+        )
+    except HarnessError as exc:
+        # The Designer never saw the ids allocated for this delta: name its nodes and edges as it wrote them.
+        message = exc.message
+        for allocated, name in _delta_written_names(
+            graph, written.get("candidate") or {}, written.get("temp_refs") or {}, written.get("edge_refs") or {}
+        ).items():
+            message = message.replace(allocated, name)
+        exc.message = message
+        exc.args = (message,)
+        raise
+
+
+def _apply_designer_delta(
+    graph: dict[str, object],
+    delta: object,
+    *,
+    valid_evidence_refs: set[str],
+    valid_guidance_refs: set[str] | None,
+    written: dict[str, Any],
+) -> tuple[dict[str, object], dict[str, str]]:
     run_id = str(graph.get("run_id") or "")
     validate_vertical_design_graph(graph, expected_run_id=run_id)
-    expected_delta_version = delta_version_for(str(graph.get("schema_version") or ""))
+    expected_delta_version = DELTA_VERSION
     if not isinstance(delta, dict) or delta.get("schema_version") != expected_delta_version:
         raise HarnessError(
             "designer_delta_invalid",
@@ -993,9 +1089,14 @@ def apply_designer_delta(
     candidate = json.loads(json.dumps(graph, ensure_ascii=False))
     candidate.pop("artifact_digest", None)
     temp_refs: dict[str, str] = {}
+    edge_refs: dict[str, str] = {}
+    written.update(candidate=candidate, temp_refs=temp_refs, edge_refs=edge_refs)
     operations = _dict_items(delta.get("operations"), code="designer_delta_invalid", run_id=run_id)
     if not operations:
         raise HarnessError("designer_delta_invalid", "Designer delta must contain at least one operation.", run_id=run_id)
+    order_ops = [item for item in operations if str(item.get("op") or "") == "order_edges"]
+    if len(order_ops) > 1:
+        raise HarnessError("designer_delta_invalid", "A delta may contain at most one order_edges operation.", run_id=run_id)
     remove_ops = [item for item in operations if str(item.get("op") or "") == "remove_edge"]
     add_ops = [item for item in operations if str(item.get("op") or "") == "add_edge"]
     replacement_order: int | None = None
@@ -1035,6 +1136,8 @@ def apply_designer_delta(
             edge = _dict_value(operation.get("edge"))
             if "order" not in edge:
                 operation = {**operation, "edge": {**edge, "order": replacement_order}}
+        if op == "order_edges":
+            continue  # applied below, once every add_edge and remove_edge of the delta exists
         _apply_operation(
             candidate,
             operation,
@@ -1044,13 +1147,20 @@ def apply_designer_delta(
             valid_evidence_refs=valid_evidence_refs,
             valid_guidance_refs=valid_guidance_refs or set(),
             run_id=run_id,
+            edge_refs=edge_refs,
         )
+    if order_ops:
+        _apply_edge_order(candidate, order_ops[0], partition=partition, edge_refs=edge_refs, run_id=run_id)
+    _resolve_attachment_temp_refs(candidate, temp_refs, before=graph, run_id=run_id)
+    _validate_new_placements(candidate, before=graph, partition=partition, run_id=run_id)
+    _validate_not_exercised(candidate, run_id=run_id)
     candidate["unresolved_items"] = _dict_items(
         delta.get("unresolved_items", []),
         code="designer_delta_invalid",
         run_id=run_id,
     )
     _materialize_composition_forwarding(candidate)
+    _copy_paired_input_mappings(candidate, before=graph)
     candidate["revision"] = int(graph.get("revision") or 0) + 1
     candidate["nodes"] = sorted(_dict_items(candidate.get("nodes"), code="designer_delta_invalid", run_id=run_id), key=lambda item: str(item.get("id") or ""))
     candidate["edges"] = sorted(
@@ -1062,8 +1172,7 @@ def apply_designer_delta(
         ),
     )
     candidate["partitions"] = sorted(_dict_items(candidate.get("partitions"), code="designer_delta_invalid", run_id=run_id), key=lambda item: _partition_key(item, run_id=run_id))
-    if str(candidate.get("schema_version") or "") == GRAPH_VERSION_V2:
-        _validate_unique_cross_scenario_parent(candidate, run_id=run_id)
+    _validate_unique_cross_scenario_parent(candidate, run_id=run_id)
     semantic_candidate = dict(candidate)
     semantic_candidate.pop("artifact_digest", None)
     semantic_candidate.pop("revision", None)
@@ -1078,7 +1187,182 @@ def apply_designer_delta(
         )
     candidate["artifact_digest"] = graph_digest(candidate)
     validate_vertical_design_graph(candidate, expected_run_id=run_id)
+    new_findings = _new_boundary_contract_findings(graph, candidate)
+    contract_findings = [item for item in new_findings if item.get("category") == "boundary_contract_mismatch"]
+    if contract_findings:
+        details = "; ".join(
+            f"{item.get('subject_ref')}: {item.get('message')}"
+            for item in contract_findings
+        )
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Designer delta failed boundary contract validation: {details}",
+            run_id=run_id,
+        )
+    # Required props come from the frozen AS-IS source facts, so a missing declaration is known when the delta
+    # arrives; reporting it only at completion cost a later repair round (design_v10 designer-0006).
+    input_findings = [item for item in new_findings if item.get("category") == "ui_required_input_undeclared"]
+    if input_findings:
+        details = "; ".join(f"{item.get('subject_ref')}: {item.get('message')}" for item in input_findings)
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Designer delta leaves required props undeclared: {details} Declare each required prop in "
+            "runtime_surface.required_inputs with its source, binding and the provided_by hop that passes it.",
+            run_id=run_id,
+        )
     return candidate, temp_refs
+
+
+def _delta_written_names(
+    before: dict[str, object],
+    candidate: dict[str, object],
+    temp_refs: dict[str, str],
+    edge_refs: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Ids the Harness allocated for this delta, named as the Designer wrote them: edges by their temp_ref or as
+    from -> to (kind), then nodes by temp_ref (edges first, so an edge name keeps the temp_refs it is written with)."""
+
+    written = {node_id: temp_ref for temp_ref, node_id in temp_refs.items()}
+    written_edges = {edge_id: edge_ref for edge_ref, edge_id in (edge_refs or {}).items()}
+    existing = {str(edge.get("id") or "") for edge in before.get("edges") or [] if isinstance(edge, dict)}
+    return {
+        **{
+            str(edge["id"]): written_edges.get(str(edge["id"])) or (
+                f"{written.get(str(edge.get('from')), edge.get('from'))} -> "
+                f"{written.get(str(edge.get('to')), edge.get('to'))} ({edge.get('kind')})"
+            )
+            for edge in candidate.get("edges") or []
+            if isinstance(edge, dict) and edge.get("id") and str(edge["id"]) not in existing
+        },
+        **written,
+    }
+
+
+def _apply_edge_order(
+    graph: dict[str, object],
+    operation: dict[str, object],
+    *,
+    partition: dict[str, object],
+    edge_refs: dict[str, str],
+    run_id: str,
+) -> None:
+    """Renumber the scenario's behavior edges in the listed order (design_v19 designer-0009: with append-only order
+    the only way to interleave a later partition's edges was to remove and re-add every edge with its contract)."""
+
+    unknown_keys = sorted(set(operation) - {"op", "scenario_id", "edges", "terminal"})
+    if unknown_keys:
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"order_edges accepts only scenario_id, edges and terminal; remove {unknown_keys}.",
+            run_id=run_id,
+        )
+    scenario_id = str(operation.get("scenario_id") or partition.get("scenario_id") or "")
+    if scenario_id != str(partition.get("scenario_id") or ""):
+        raise HarnessError(
+            "designer_delta_invalid", "order_edges can only order the scenario of the delta partition.", run_id=run_id
+        )
+    refs = operation.get("edges")
+    if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+        raise HarnessError(
+            "designer_delta_invalid",
+            "order_edges.edges must be a non-empty array of VDE-* edge ids and temp_refs of edges this delta adds.",
+            run_id=run_id,
+        )
+    ordered = [edge_refs.get(ref.strip(), ref.strip()) for ref in refs]
+    edges = _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id)
+    behavior = [
+        item
+        for item in edges
+        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
+    ]
+    behavior_ids = {str(item.get("id") or "") for item in behavior}
+    problems: list[str] = []
+    repeated = sorted({ref for ref, resolved in zip(refs, ordered) if ordered.count(resolved) > 1})
+    if repeated:
+        problems.append(f"listed more than once: {repeated}")
+    unknown = [ref for ref, resolved in zip(refs, ordered) if resolved not in behavior_ids]
+    if unknown:
+        problems.append(f"not a calls/returns/reads/writes edge of {scenario_id}: {unknown}")
+    missing = [item for item in behavior if str(item.get("id") or "") not in ordered]
+    if missing:
+        problems.append(
+            "missing: "
+            + ", ".join(f"{item.get('id')} ({item.get('from')} -> {item.get('to')} {item.get('kind')})" for item in missing)
+        )
+    if problems:
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"order_edges must list every behavior edge of {scenario_id} exactly once; " + "; ".join(problems) + ".",
+            run_id=run_id,
+        )
+    terminal = operation.get("terminal")
+    if terminal is not None and (
+        not isinstance(terminal, str) or edge_refs.get(terminal.strip(), terminal.strip()) != ordered[-1]
+    ):
+        raise HarnessError(
+            "designer_delta_invalid", "order_edges.terminal must name the last edge of order_edges.edges.", run_id=run_id
+        )
+    position = {edge_id: index for index, edge_id in enumerate(ordered, start=1)}
+    structural = sorted(
+        (
+            item
+            for item in edges
+            if str(item.get("scenario_id") or "") == scenario_id and str(item.get("id") or "") not in position
+        ),
+        key=lambda item: int(item.get("order") or 0),
+    )
+    for index, item in enumerate(structural, start=len(ordered) + 1):
+        position[str(item.get("id") or "")] = index
+    graph["edges"] = [
+        {
+            **item,
+            "order": position[str(item.get("id") or "")],
+            **({"terminal": str(item.get("id") or "") == ordered[-1]} if terminal is not None else {}),
+        }
+        if str(item.get("scenario_id") or "") == scenario_id
+        else item
+        for item in edges
+    ]
+
+
+DELTA_TIME_COMPOSITION_CATEGORIES = frozenset({"boundary_contract_mismatch", "ui_required_input_undeclared"})
+
+
+def _new_boundary_contract_findings(
+    current: dict[str, object],
+    candidate: dict[str, object],
+) -> list[dict[str, object]]:
+    """Delta-time composition findings the candidate adds (DELTA_TIME_COMPOSITION_CATEGORIES)."""
+
+    def boundary_findings(graph: dict[str, object]) -> list[dict[str, object]]:
+        return [
+            item
+            for item in _runtime_composition_findings(
+                graph,
+                required_surfaces=None,
+                landscape=None,
+            )
+            if str(item.get("category") or "") in DELTA_TIME_COMPOSITION_CATEGORIES
+        ]
+
+    existing = {
+        (
+            str(item.get("id") or ""),
+            str(item.get("message") or ""),
+            str(item.get("expected_change") or ""),
+        )
+        for item in boundary_findings(current)
+    }
+    return [
+        item
+        for item in boundary_findings(candidate)
+        if (
+            str(item.get("id") or ""),
+            str(item.get("message") or ""),
+            str(item.get("expected_change") or ""),
+        )
+        not in existing
+    ]
 
 
 def _validate_unique_cross_scenario_parent(graph: dict[str, object], *, run_id: str) -> None:
@@ -1124,12 +1408,28 @@ def completion_findings(
     findings: list[dict[str, object]] = []
     partitions = {_partition_key(item, run_id=run_id): item for item in _dict_items(graph.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)}
     nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
+    declarations = _dict_items(graph.get("surface_not_exercised", []), code="vertical_design_graph_invalid", run_id=run_id)
+    declared = {(str(item.get("scenario_id") or ""), str(item.get("surface") or "")) for item in declarations}
+    carried = {ref for node in nodes for ref in _strings(node.get("requirement_refs"))}
+    for item in declarations:
+        # Nothing runs on the declared surface, so its Requirement ids must be carried by other Design nodes.
+        unowned = [ref for ref in _strings(item.get("requirement_refs")) if ref not in carried]
+        if unowned:
+            findings.append(
+                _finding(
+                    "not_exercised_ref_unowned",
+                    f"{item.get('scenario_id')}:{item.get('surface')}",
+                    f"Requirement ids of a surface declared not exercised are carried by no Design node: {', '.join(unowned)}.",
+                )
+            )
     for scenario_id, surfaces in sorted(required_surfaces.items()):
         matching = [item for key, item in partitions.items() if key.split("|", 1)[0] == scenario_id]
         if not matching:
             findings.append(_finding("missing_partition", scenario_id, "Scenario has no Design partition."))
             continue
         for surface in sorted(surfaces):
+            if (scenario_id, surface) in declared:
+                continue
             covered = any(str(_dict_value(item.get("coverage")).get(surface) or "") in {"covered", "no_change"} for item in matching)
             has_node = any(str(item.get("scenario_id") or "") == scenario_id and str(item.get("surface") or "") == surface for item in nodes)
             if not covered or not has_node:
@@ -1137,38 +1437,33 @@ def completion_findings(
     for item in _dict_items(graph.get("unresolved_items"), code="vertical_design_graph_invalid", run_id=run_id):
         if str(item.get("owner") or "") in {"requirement", "human"}:
             findings.append(_finding("human_decision_required", str(item.get("id") or "unresolved"), str(item.get("message") or "Design requires a human decision.")))
-    if str(_dict_value(graph.get("snapshot_binding")).get("designer_uiux_mode") or "off") == "enforce":
-        for node in nodes:
-            if str(node.get("surface") or "") != "ui":
-                continue
-            surface_contract = _dict_value(node.get("surface_contract"))
-            expected_experience = (
-                UI_EXPERIENCE_CONTRACT_V2 if ui_contract_v2(graph) else UIUX_EXPERIENCE_CONTRACT_VERSION
-            )
-            if not _dict_value(surface_contract.get("experience_contract")) and not is_composition_wiring(node):
-                findings.append(
-                    _finding(
-                        "ui_experience_contract_missing",
-                        str(node.get("id") or "ui"),
-                        f"UI node has no {expected_experience} backed by observed UI/UX guidance.",
-                    )
+    for node in nodes:
+        if str(node.get("surface") or "") != "ui":
+            continue
+        surface_contract = _dict_value(node.get("surface_contract"))
+        if not _dict_value(surface_contract.get("experience_contract")) and not is_composition_wiring(node):
+            findings.append(
+                _finding(
+                    "ui_experience_contract_missing",
+                    str(node.get("id") or "ui"),
+                    f"UI node has no {UI_EXPERIENCE_CONTRACT_V2} backed by observed UI/UX guidance.",
                 )
-            if ui_contract_v2(graph) and not _dict_value(surface_contract.get("runtime_surface")):
-                findings.append(
-                    _finding(
-                        "ui_runtime_surface_missing",
-                        str(node.get("id") or "ui"),
-                        f"UI node has no {RUNTIME_SURFACE_BINDING_VERSION} proving entrypoint composition and required inputs.",
-                    )
-                )
-    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
-        findings.extend(
-            _runtime_composition_findings(
-                graph,
-                required_surfaces=required_surfaces,
-                landscape=landscape,
             )
+        if not _dict_value(surface_contract.get("runtime_surface")):
+            findings.append(
+                _finding(
+                    "ui_runtime_surface_missing",
+                    str(node.get("id") or "ui"),
+                    f"UI node has no {RUNTIME_SURFACE_BINDING_VERSION} proving entrypoint composition and required inputs.",
+                )
+            )
+    findings.extend(
+        _runtime_composition_findings(
+            graph,
+            required_surfaces=required_surfaces,
+            landscape=landscape,
         )
+    )
     return findings
 
 
@@ -1193,7 +1488,6 @@ def _runtime_composition_findings(
         for item in _dict_items((landscape or {}).get("components", []), code="vertical_design_graph_invalid", run_id=run_id)
     }
     findings: list[dict[str, object]] = []
-    ui_v2_graph = ui_contract_v2(graph)
     ui_components = _dict_value(
         _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context")).get("components")
     )
@@ -1294,8 +1588,9 @@ def _runtime_composition_findings(
             owner_valid = owner_valid and (not owner_symbol or owner_symbol == str(owner.get("symbol") or ""))
         elif owner_ref.startswith("RLA-") and not anchors:
             owner_valid = True
-        elif ui_v2_graph and component_id == "web":
-            # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context.
+        elif ui_components:
+            # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context;
+            # the Designer prompt offers their chain ref as owner_ref, whatever the UI component is called.
             owner_key = f"{attachment.get('owner_path') or ''}#{attachment.get('owner_symbol') or ''}"
             ui_component = _dict_value(ui_components.get(owner_key))
             owner_valid = bool(ui_component) and owner_ref in {owner_key, str(ui_component.get("evidence_ref") or "")}
@@ -1309,6 +1604,20 @@ def _runtime_composition_findings(
                     node=node,
                 )
             )
+        elif relation == "called_by":
+            off_caller = _called_by_owner_off_caller(node, attachment, nodes_by_id=nodes_by_id, edges=edges, anchors=anchors)
+            if off_caller:
+                findings.append(
+                    _composition_finding(
+                        "runtime_attachment_off_caller",
+                        node_id,
+                        f"runtime_binding.attachment of {node_id} says it is called_by {off_caller['owner']}, but the "
+                        f"calls edge(s) {', '.join(off_caller['edges'])} into it come from {', '.join(off_caller['callers'])}.",
+                        "A called_by owner is the caller: set attachment owner_ref/owner_path/owner_symbol to the runtime "
+                        "target of the node that calls it, or correct the calls edge.",
+                        node=node,
+                    )
+                )
         if str(node.get("disposition") or "") == "add":
             target_symbol = str(target.get("symbol") or "")
             matches_existing_target = any(
@@ -1493,14 +1802,17 @@ def _runtime_composition_findings(
                     finding["contract_diagnostics"] = operation_diagnostics
                     findings.append(finding)
 
-    ui_v2 = ui_contract_v2(graph)
-    ui_reachable_from_entry: set[str] = set()
-    if ui_v2:
-        ui_findings, ui_reachable_from_entry = _ui_runtime_surface_findings(graph, nodes)
-        findings.extend(ui_findings)
+    ui_findings, ui_reachable_from_entry = _ui_runtime_surface_findings(graph, nodes)
+    findings.extend(ui_findings)
 
     inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
-    for scenario_id, surfaces in sorted(inferred.items()):
+    # A surface declared not exercised has no node to reach (the scenario ends before it).
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
+        for item in _dict_items(graph.get("surface_not_exercised", []), code="vertical_design_graph_invalid", run_id=run_id)
+    }
+    for scenario_id, all_surfaces in sorted(inferred.items()):
+        surfaces = {surface for surface in all_surfaces if (scenario_id, surface) not in not_exercised}
         scenario_nodes = [item for item in nodes if str(item.get("scenario_id") or "") == scenario_id]
         if not scenario_nodes:
             continue
@@ -1515,10 +1827,9 @@ def _runtime_composition_findings(
                 if "api" in surfaces
                 else {"entrypoint", "service", "persistence_adapter", "data_model"}
             )
-            # Under UI contract v2 a UI component only starts a path once its composition proves app reachability.
+            # A UI component only starts a path once its composition proves app reachability.
             and not (
-                ui_v2
-                and str(item.get("surface") or "") == "ui"
+                str(item.get("surface") or "") == "ui"
                 and str(item.get("id") or "") not in ui_reachable_from_entry
             )
         ]
@@ -1563,6 +1874,7 @@ def _ui_runtime_surface_findings(
     binding = _dict_value(graph.get("snapshot_binding"))
     context = _dict_value(binding.get("ui_repo_context"))
     requirement_ids = set(_strings(binding.get("requirement_reference_ids")))
+    approved_decision_ids = set(_strings(binding.get("approved_decision_ids")))
     entry = str(_dict_value(context.get("entrypoint")).get("ref") or "")
     chain = {
         str(hop.get("ref") or ""): hop
@@ -1624,6 +1936,8 @@ def _ui_runtime_surface_findings(
         for parent, child in zip(path, path[1:]):
             parent_node = planned_targets.get(parent)
             parent_modified = parent_node is not None and str(parent_node.get("disposition") or "") in {"modify", "add"}
+            if parent in chain and chain[parent].get("renders_status") == "unknown" and not parent_modified:
+                invalid_hops.append(f"{parent}:render evidence unavailable")
             # Two AS-IS hops must already be a real render edge unless the Design modifies the parent to mount it.
             if parent in chain and child in chain and child not in _strings(chain[parent].get("renders")) and not parent_modified:
                 invalid_hops.append(f"{parent}->{child}")
@@ -1655,9 +1969,19 @@ def _ui_runtime_surface_findings(
         declared = {str(item.get("name") or "") for item in inputs}
         if str(node.get("disposition") or "") in {"modify", "reuse", "no_change"}:
             component = _dict_value(components.get(target_ref))
+            unknown = component.get("props_status") == "unknown" or (
+                context.get("extraction") and not component
+            )
+            if unknown:
+                findings.append(_composition_finding(
+                    "ui_source_facts_unresolved", node_id,
+                    f"Required props for {target_ref} could not be extracted from the frozen source.",
+                    "Investigate the target source or CodeGraph; report an evidence blocker if its contract remains unresolved.",
+                    node=node,
+                ))
             missing = [
                 str(prop.get("name") or "")
-                for prop in component.get("props", [])
+                for prop in (component.get("props") or [])
                 if isinstance(prop, dict)
                 and not prop.get("optional")
                 and not prop.get("has_default")
@@ -1694,9 +2018,9 @@ def _ui_runtime_surface_findings(
                     "(MF-*/AF-*/EF-*) that states the dependency on the other use case"
                 )
             elif source == "demo_fixture" and not any(
-                ref.startswith("DEC-") and ref in requirement_ids for ref in refs
+                ref.startswith("D-") and ref in requirement_ids and ref in approved_decision_ids for ref in refs
             ):
-                problem = "demo_fixture must cite an approved Requirement decision (DEC-*)"
+                problem = "demo_fixture must cite an accepted Requirement decision (D-*)"
             elif path and provided_by == path[-1]:
                 problem = (
                     "it is state owned by the target component itself, not a runtime input; remove it from "
@@ -1710,7 +2034,7 @@ def _ui_runtime_surface_findings(
                         "ui_required_input_unbound",
                         f"{node_id}:{name}",
                         f"Required input {name}: {problem}.",
-                        "Bind the input to an existing provider, a Design node, an approved Requirement PRE-*/DEC-* reference, and a provided_by hop on composition_path.",
+                        "Bind the input to an existing provider, a Design node, an approved Requirement PRE-*/D-* reference, and a provided_by hop on composition_path.",
                         node=node,
                     )
                 )
@@ -1800,8 +2124,7 @@ def _ui_runtime_surface_findings(
                         node=node,
                     )
                 )
-        if ui_layered_layout(graph):
-            findings.extend(_screen_visual_findings(screen_id, [node for node, _ in members]))
+        findings.extend(_screen_visual_findings(screen_id, [node for node, _ in members]))
     return findings, reachable
 
 
@@ -1855,6 +2178,176 @@ def _mapping_pairs(value: object) -> set[tuple[str, str]]:
     }
 
 
+def _called_by_owner_off_caller(
+    node: dict[str, object],
+    attachment: dict[str, object],
+    *,
+    nodes_by_id: dict[str, dict[str, object]],
+    edges: list[dict[str, object]],
+    anchors: dict[str, dict[str, object]],
+) -> dict[str, list[str] | str]:
+    """A called_by owner that is none of the nodes calling this node (r7 SC-1 and every eTour rule: owner createApp)."""
+
+    node_id = str(node.get("id") or "")
+    callers = [
+        (str(edge.get("id") or ""), nodes_by_id.get(str(edge.get("from") or ""), {}))
+        for edge in edges
+        if str(edge.get("kind") or "") == "calls" and str(edge.get("to") or "") == node_id
+    ]
+    if not callers:
+        return {}
+    owner_ref = str(attachment.get("owner_ref") or "")
+    if owner_ref in nodes_by_id:
+        target = _dict_value(_dict_value(nodes_by_id[owner_ref].get("runtime_binding")).get("target"))
+        owner = (str(target.get("path") or ""), str(target.get("symbol") or ""))
+    elif owner_ref in anchors:
+        owner = (str(anchors[owner_ref].get("path") or ""), str(anchors[owner_ref].get("symbol") or ""))
+    else:
+        owner = (str(attachment.get("owner_path") or ""), str(attachment.get("owner_symbol") or ""))
+
+    def target_of(caller: dict[str, object]) -> tuple[str, str]:
+        target = _dict_value(_dict_value(caller.get("runtime_binding")).get("target"))
+        return (str(target.get("path") or ""), str(target.get("symbol") or ""))
+
+    # One matching caller is enough: a shared rule may be called by several nodes but names one owner.
+    if any(str(caller.get("id") or "") == owner_ref or target_of(caller) == owner for _, caller in callers):
+        return {}
+    return {
+        "owner": f"{owner[0]}#{owner[1]}",
+        "edges": [edge_id for edge_id, _ in callers],
+        "callers": [f"{caller.get('id')} ({'#'.join(target_of(caller))})" for _, caller in callers],
+    }
+
+
+ESTABLISHED_NOT_PROVEN = (
+    "whether each mapped value exists on this path at the moment it is used",
+    "whether node prose and edge prose state the same contract (for example the same Authorization scheme)",
+    "whether each node's runtime_binding (target, attachment owner and relation) fits the edges that reach it",
+    "whether a decision's logic and outcomes satisfy the claims",
+    "whether a promised mechanism (rollback, duplicate guard, atomicity, unchanged state) has a runtime mechanism",
+)
+
+
+def established_facts(
+    graph: dict[str, object],
+    *,
+    scenario_ids: list[str],
+    edge_ids: list[str],
+) -> dict[str, object]:
+    """What the deterministic checks prove for one semantic review packet (r7: reviewers re-derived them at length).
+
+    Each fact is computed here with the same checks the Harness gates use and is stated only when that check passes
+    for that exact edge or scenario; nothing is asserted from the pipeline order alone.
+    """
+
+    run_id = str(graph.get("run_id") or "")
+    nodes = [item for item in graph.get("nodes") or [] if isinstance(item, dict)]
+    edges = [item for item in graph.get("edges") or [] if isinstance(item, dict)]
+    nodes_by_id = {str(item.get("id") or ""): item for item in nodes}
+    design: list[str] = []
+    try:
+        validate_vertical_design_graph(graph, expected_run_id=run_id)
+        design.append(
+            "graph schema, stable ids, node kinds and surfaces, dispositions with their evidence and partition "
+            "coverage are valid"
+        )
+    except HarnessError:
+        pass
+
+    boundaries: dict[str, list[str]] = {}
+    wanted = set(edge_ids)
+    for edge in edges:
+        edge_id = str(edge.get("id") or "")
+        contract = _dict_value(edge.get("boundary_contract"))
+        if edge_id not in wanted or not contract:
+            continue
+        source = nodes_by_id.get(str(edge.get("from") or ""), {})
+        target = nodes_by_id.get(str(edge.get("to") or ""), {})
+        if not source or not target:
+            continue
+        returns = str(edge.get("kind") or "") == "returns"
+        provider = source if returns else target
+        diagnostics = _boundary_contract_diagnostics(contract, provider)
+        if diagnostics["mismatches"] or _runtime_operation_binding_diagnostics(contract, provider):
+            continue
+        facts: list[str] = []
+        if str(provider.get("surface") or "") == "api":
+            facts.append(
+                f"provider_operation {diagnostics['actual_provider_operation']} is the provider's declared method and path"
+            )
+            if diagnostics["required_input_targets"]:
+                facts.append(
+                    "every request field is mapped as a required target by name: "
+                    + ", ".join(diagnostics["required_input_targets"])
+                )
+            if diagnostics["authorization_required"]:
+                facts.append("auth_mapping is declared (the provider requires authentication or authorization)")
+            if _dict_items(contract.get("response_mapping", []), code="vertical_design_graph_invalid", run_id=run_id):
+                facts.append("response_mapping is declared")
+            if diagnostics["error_response_statuses"]:
+                facts.append(
+                    "error_mapping is declared for the provider's error statuses "
+                    + ", ".join(diagnostics["error_response_statuses"])
+                )
+        elif str(provider.get("surface") or "") == "business_rule" and diagnostics.get("required_input_targets"):
+            facts.append(
+                "every declared rule input is mapped as a required target by name: "
+                + ", ".join(_strings(diagnostics.get("required_input_targets")))
+            )
+        binding = _dict_value(provider.get("runtime_binding"))
+        operation = str(contract.get("provider_operation") or "").strip()
+        if str(binding.get("runtime_kind") or "") in {"service", "persistence_adapter"} and _TYPESCRIPT_IDENTIFIER.fullmatch(
+            operation
+        ):
+            # The same condition under which _runtime_operation_binding_diagnostics checked it (and it passed above).
+            facts.append(f"provider_operation {operation} is the callable the provider is bound to")
+        if returns:
+            paired = _paired_request_edge(edge, edges)
+            if paired and _mapping_pairs(_dict_value(paired.get("boundary_contract")).get("input_mapping")) == _mapping_pairs(
+                contract.get("input_mapping")
+            ):
+                facts.append(f"input_mapping repeats paired {paired.get('kind')} edge {paired.get('id')}")
+        if facts:
+            boundaries[edge_id] = facts
+
+    scenario: list[str] = []
+    sequence = _sequence_behavior_findings(nodes=nodes, edges=edges)
+    for scenario_id in scenario_ids:
+        scoped = [item for item in nodes if str(item.get("scenario_id") or "") == scenario_id]
+        if not scoped:
+            continue
+        if any(str(item.get("surface") or "") == "ui" for item in scoped) and not any(
+            str(item.get("subject_ref") or "") == scenario_id for item in sequence
+        ):
+            scenario.append(
+                f"{scenario_id}: the ordered behavior edges form one continuous path with exactly one terminal edge, last"
+            )
+    return {
+        "design": design,
+        "boundaries": boundaries,
+        "scenario": scenario,
+        "not_established": list(ESTABLISHED_NOT_PROVEN),
+    }
+
+
+def _copy_paired_input_mappings(candidate: dict[str, object], *, before: dict[str, object]) -> None:
+    """Give each new returns edge the input_mapping of its paired request edge.
+
+    The boundary gate requires the two to be identical, so the copy is mechanical; Conduit UC4 H-r1 lost two
+    Designer deltas to "copy input_mapping from paired calls edge". Existing edges are never changed.
+    """
+
+    existing = {str(item.get("id") or "") for item in before.get("edges") or [] if isinstance(item, dict)}
+    edges = [item for item in candidate.get("edges") or [] if isinstance(item, dict)]
+    for edge in edges:
+        contract = edge.get("boundary_contract")
+        if str(edge.get("kind") or "") != "returns" or str(edge.get("id") or "") in existing or not isinstance(contract, dict):
+            continue
+        paired_inputs = _dict_value(_paired_request_edge(edge, edges).get("boundary_contract")).get("input_mapping")
+        if isinstance(paired_inputs, list):
+            contract["input_mapping"] = json.loads(json.dumps(paired_inputs))
+
+
 def _paired_request_edge(edge: dict[str, object], edges: list[dict[str, object]]) -> dict[str, object]:
     """Latest calls/reads/writes edge before this returns edge, from its consumer to its provider."""
     contract = _dict_value(edge.get("boundary_contract"))
@@ -1887,20 +2380,29 @@ def _boundary_contract_diagnostics(
     if not contract:
         mismatches.append("add boundary_contract")
     if str(provider.get("surface") or "") == "business_rule" and contract:
-        mapped = {
+        mapped_all = {
+            str(item.get("to") or "")
+            for item in contract.get("input_mapping", [])
+            if isinstance(item, dict) and str(item.get("to") or "")
+        }
+        mapped_required = {
             str(item.get("to") or "")
             for item in contract.get("input_mapping", [])
             if isinstance(item, dict) and bool(item.get("required"))
         }
         declared = [name for name in _strings(surface.get("inputs")) if name]
-        missing = [name for name in declared if name not in mapped]
+        missing = [name for name in declared if name not in mapped_required]
+        undeclared = sorted(mapped_all - set(declared))
         if missing:
             mismatches.append(f"map required input targets {missing}")
+        if undeclared:
+            mismatches.append(f"remove undeclared input targets {undeclared}")
         return {
             "provider_surface": "business_rule",
             "required_input_targets": declared,
-            "mapped_input_targets": sorted(mapped),
+            "mapped_input_targets": sorted(mapped_all),
             "missing_input_targets": missing,
+            "undeclared_input_targets": undeclared,
             "mismatches": mismatches,
         }
     if str(provider.get("surface") or "") != "api":
@@ -1911,11 +2413,20 @@ def _boundary_contract_diagnostics(
         mismatches.append(f"set provider_operation to {expected}")
     fields = _dict_items(surface.get("request_fields", []), code="vertical_design_graph_invalid", run_id="")
     input_mappings = _dict_items(contract.get("input_mapping", []), code="vertical_design_graph_invalid", run_id="")
-    mapped_targets = {str(item.get("to") or "") for item in input_mappings if bool(item.get("required"))}
+    # Every request field must be mapped; the mapping's own `required` says whether the consumer may omit it
+    # (design_v19 designer-0007: Conduit's optional tagList mapped with required=false was rejected).
+    mapped_targets = {str(item.get("to") or "") for item in input_mappings}
     required_targets = [str(item.get("name") or "") for item in fields if str(item.get("name") or "")]
     missing_targets = [name for name in required_targets if name not in mapped_targets]
     if missing_targets:
-        mismatches.append(f"map required input targets {missing_targets}")
+        # A 'to' must equal a request field name exactly; naming the near misses (e.g. 'slug (path)') shows what to fix.
+        unmatched = sorted(
+            {str(item.get("to") or "") for item in input_mappings if str(item.get("to") or "")} - set(required_targets)
+        )
+        mismatches.append(
+            f"map required input targets {missing_targets}"
+            + (f" (mapped targets that match no request field name: {unmatched})" if unmatched else "")
+        )
     auth_required = (
         surface.get("authentication_required") is True
         or surface.get("authorization_required") is True
@@ -2051,6 +2562,25 @@ def _composition_finding(
     }
 
 
+def _reject_unknown_node_fields(raw: dict[str, object], *, where: str, run_id: str) -> None:
+    """A node field outside the contract means a malformed delta, e.g. the next operation nested inside the node."""
+
+    unknown = sorted(str(key) for key in raw if key not in DELTA_NODE_FIELDS)
+    if not unknown:
+        return
+    hint = (
+        " The next operation was written inside this node: close the node object before starting the next "
+        "{\"op\": ...} item of operations."
+        if {"op", "edge", "node"} & set(unknown)
+        else ""
+    )
+    raise HarnessError(
+        "designer_delta_invalid",
+        f"{where} has fields outside the Design node contract: {', '.join(unknown)}.{hint}",
+        run_id=run_id,
+    )
+
+
 def _apply_operation(
     graph: dict[str, object],
     operation: dict[str, object],
@@ -2061,6 +2591,7 @@ def _apply_operation(
     valid_evidence_refs: set[str],
     valid_guidance_refs: set[str],
     run_id: str,
+    edge_refs: dict[str, str] | None = None,
 ) -> None:
     op = str(operation.get("op") or "")
     if op == "set_partition_coverage":
@@ -2075,6 +2606,7 @@ def _apply_operation(
         raw = operation.get("node")
         if not isinstance(raw, dict):
             raise HarnessError("designer_delta_invalid", "add_node requires a node object.", run_id=run_id)
+        _reject_unknown_node_fields(raw, where="add_node.node", run_id=run_id)
         semantic_key = str(raw.get("semantic_key") or "").strip()
         if not _SAFE_KEY.fullmatch(semantic_key):
             raise HarnessError("designer_delta_invalid", "Design node semantic_key is invalid.", run_id=run_id)
@@ -2085,8 +2617,7 @@ def _apply_operation(
                 raise HarnessError("designer_delta_invalid", "Design node temp_ref is invalid.", run_id=run_id)
             temp_refs[temp_ref] = node_id
         evidence_refs = _strings(raw.get("evidence_refs"))
-        if any(ref not in valid_evidence_refs for ref in evidence_refs):
-            raise HarnessError("designer_delta_invalid", "Design node references evidence outside the frozen landscape.", run_id=run_id)
+        _reject_unknown_evidence(evidence_refs, valid_evidence_refs, where="Design node evidence_refs", run_id=run_id)
         _validate_delta_runtime_evidence(
             raw.get("runtime_binding"),
             valid_evidence_refs=valid_evidence_refs,
@@ -2112,6 +2643,26 @@ def _apply_operation(
         nodes = _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
         if any(str(item.get("id") or "") == node_id for item in nodes):
             raise HarnessError("designer_delta_invalid", f"Design node already exists: {node_id}", run_id=run_id)
+        target = _dict_value(_dict_value(node.get("runtime_binding")).get("target"))
+        planned_owner = next(
+            (
+                item
+                for item in nodes
+                if target
+                and str(item.get("disposition") or "") == "add"
+                and _dict_value(_dict_value(item.get("runtime_binding")).get("target")) == target
+            ),
+            None,
+        )
+        if str(node.get("disposition") or "") in {"reuse", "modify", "no_change"} and planned_owner is not None:
+            raise HarnessError(
+                "designer_delta_invalid",
+                "Design node shares a runtime target that is only planned by "
+                f"{str(planned_owner.get('id') or 'another node')}. Sharing the target does not make it repository "
+                "reuse; keep disposition=add, leave node.evidence_refs empty, and explain the planned GAP in "
+                "evidence_reason.",
+                run_id=run_id,
+            )
         graph["nodes"] = [*nodes, node]
         return
     if op == "update_node":
@@ -2119,8 +2670,11 @@ def _apply_operation(
         changes = operation.get("changes")
         if not isinstance(changes, dict) or any(key in changes for key in {"id", "scenario_id", "component_id", "use_case_id"}):
             raise HarnessError("designer_delta_invalid", "update_node changes are invalid.", run_id=run_id)
-        if "evidence_refs" in changes and any(ref not in valid_evidence_refs for ref in _strings(changes.get("evidence_refs"))):
-            raise HarnessError("designer_delta_invalid", "Updated node references unknown evidence.", run_id=run_id)
+        _reject_unknown_node_fields(changes, where="update_node.changes", run_id=run_id)
+        if "evidence_refs" in changes:
+            _reject_unknown_evidence(
+                _strings(changes.get("evidence_refs")), valid_evidence_refs, where="Updated node evidence_refs", run_id=run_id
+            )
         if "runtime_binding" in changes:
             _validate_delta_runtime_evidence(
                 changes.get("runtime_binding"),
@@ -2184,6 +2738,16 @@ def _apply_operation(
             raise HarnessError("designer_delta_invalid", "Design edge terminal must be boolean.", run_id=run_id)
         if not scenario_id or not _SAFE_KEY.fullmatch(scenario_id):
             raise HarnessError("designer_delta_invalid", "Design edge scenario_id is invalid.", run_id=run_id)
+        # A new edge may carry a temp_ref so order_edges of the same delta can place it among existing edges.
+        edge_ref = str(raw.get("temp_ref") or "").strip()
+        if edge_ref and (
+            edge_refs is None or not edge_ref.startswith("tmp:") or edge_ref in edge_refs or edge_ref in temp_refs
+        ):
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"Design edge temp_ref {edge_ref} is invalid or repeated: give each new edge its own 'tmp:' name.",
+                run_id=run_id,
+            )
         edges = _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id)
         requested_order = raw.get("order")
         if requested_order is None:
@@ -2209,10 +2773,12 @@ def _apply_operation(
                 f"Design edge already exists: {edge_id}. Remove this exact edge_id before re-adding it, or omit the duplicate add_edge.",
                 run_id=run_id,
             )
+        if edge_ref and edge_refs is not None:
+            edge_refs[edge_ref] = edge_id
         graph["edges"] = [
             *edges,
             {
-                **raw,
+                **{key: value for key, value in raw.items() if key != "temp_ref"},
                 "id": edge_id,
                 "from": source,
                 "to": target,
@@ -2243,6 +2809,207 @@ def _apply_operation(
                 run_id=run_id,
             )
         graph["edges"] = [item for item in edges if str(item.get("id") or "") != edge_id]
+        return
+    if op == "place_surface":
+        _apply_surface_placement(
+            graph,
+            operation,
+            partition=partition,
+            valid_evidence_refs=valid_evidence_refs,
+            run_id=run_id,
+        )
+        return
+    if op == "not_exercised":
+        _apply_not_exercised(
+            graph,
+            operation,
+            partition=partition,
+            valid_evidence_refs=valid_evidence_refs,
+            run_id=run_id,
+        )
+
+
+def _apply_not_exercised(
+    graph: dict[str, object],
+    operation: dict[str, object],
+    *,
+    partition: dict[str, object],
+    valid_evidence_refs: set[str],
+    run_id: str,
+) -> None:
+    """Record that the scenario runs nothing on a required surface; whether that is true is a semantic question."""
+
+    scenario_id = str(partition.get("scenario_id") or "")
+    surface = str(operation.get("surface") or "")
+    reason = str(operation.get("reason") or "").strip()
+    evidence_refs = _strings(operation.get("evidence_refs"))
+
+    def invalid(message: str) -> HarnessError:
+        return HarnessError("designer_delta_invalid", f"not_exercised {message}", run_id=run_id)
+
+    # requirement_refs is filled by the Harness from the approved Requirement before the delta is applied.
+    unknown = sorted(set(operation) - {"op", "surface", "reason", "evidence_refs", "requirement_refs"})
+    if unknown:
+        raise invalid(f"has fields outside its contract: {', '.join(unknown)}.")
+    if surface not in NOT_EXERCISABLE_SURFACES:
+        raise invalid(f"can only declare {', '.join(sorted(NOT_EXERCISABLE_SURFACES))}, not {surface or '<missing>'}.")
+    if not reason or not evidence_refs:
+        raise invalid("needs a reason and the evidence_refs of the code that ends the scenario before this surface.")
+    _reject_unknown_evidence(evidence_refs, valid_evidence_refs, where="not_exercised evidence_refs", run_id=run_id)
+    declarations = _dict_items(graph.get("surface_not_exercised", []), code="designer_delta_invalid", run_id=run_id)
+    if any(item.get("scenario_id") == scenario_id and item.get("surface") == surface for item in declarations):
+        raise invalid(f"{scenario_id} {surface} is already declared not exercised.")
+    graph["surface_not_exercised"] = sorted(
+        [
+            *declarations,
+            {
+                "scenario_id": scenario_id,
+                "surface": surface,
+                "reason": reason,
+                "evidence_refs": evidence_refs,
+                "requirement_refs": _strings(operation.get("requirement_refs")),
+                "declared_in_partition": f"{scenario_id}|{partition.get('component_id')}",
+            },
+        ],
+        key=lambda item: (str(item.get("scenario_id") or ""), str(item.get("surface") or "")),
+    )
+
+
+def _validate_not_exercised(candidate: dict[str, object], *, run_id: str) -> None:
+    """A declared surface has no node and no covered coverage; coverage not_exercised needs a declaration."""
+
+    declared = {(item.get("scenario_id"), item.get("surface")) for item in candidate.get("surface_not_exercised") or []}
+    nodes = [node for node in candidate.get("nodes") or [] if isinstance(node, dict)]
+    for scenario_id, surface in sorted(declared, key=str):
+        if any(node.get("scenario_id") == scenario_id and node.get("surface") == surface for node in nodes):
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"not_exercised {scenario_id} {surface} conflicts with a {surface} node of {scenario_id}; a surface the "
+                "scenario runs is designed as a node, not declared not exercised.",
+                run_id=run_id,
+            )
+        if not any(node.get("scenario_id") == scenario_id for node in nodes):
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"not_exercised: {scenario_id} has no Design node left; a scenario keeps at least one designed surface.",
+                run_id=run_id,
+            )
+    for item in candidate.get("partitions") or []:
+        for surface, status in _dict_value(item.get("coverage")).items():
+            key = (item.get("scenario_id"), surface)
+            if status == "not_exercised" and key not in declared:
+                raise HarnessError(
+                    "designer_delta_invalid",
+                    f"coverage {surface}=not_exercised needs a {{\"op\":\"not_exercised\"}} operation with its reason.",
+                    run_id=run_id,
+                )
+            if status in {"covered", "no_change"} and key in declared:
+                raise HarnessError(
+                    "designer_delta_invalid",
+                    f"{item.get('scenario_id')} {surface} is declared not exercised, so its coverage must be not_exercised.",
+                    run_id=run_id,
+                )
+
+
+def _validate_new_placements(
+    candidate: dict[str, object], *, before: dict[str, object], partition: dict[str, object], run_id: str
+) -> None:
+    """Placed here: this delta designs the surface. Placed elsewhere: this delta leaves it to that partition."""
+
+    old = {(item.get("scenario_id"), item.get("surface")) for item in before.get("surface_placements") or []}
+    component_id = str(partition.get("component_id") or "")
+    for placement in candidate.get("surface_placements") or []:
+        scenario_id, surface = placement.get("scenario_id"), placement.get("surface")
+        if (scenario_id, surface) in old:
+            continue
+        designed_here = any(
+            node.get("scenario_id") == scenario_id
+            and node.get("surface") == surface
+            and node.get("component_id") == component_id
+            for node in candidate.get("nodes") or []
+        )
+        covered_here = any(
+            item.get("scenario_id") == scenario_id
+            and item.get("component_id") == component_id
+            and str(_dict_value(item.get("coverage")).get(str(surface)) or "") in {"covered", "no_change"}
+            for item in candidate.get("partitions") or []
+        )
+        placed_here = placement.get("component_id") == component_id
+        if placed_here and not designed_here:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"place_surface puts {scenario_id} {surface} in {component_id}, the component of this delta, so this "
+                f"delta must also add the {surface} node (and cover {surface}).",
+                run_id=run_id,
+            )
+        if (designed_here or covered_here) and not placed_here:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"place_surface sends {scenario_id} {surface} to {placement.get('component_id')}, so this {component_id} "
+                f"delta must not add a {surface} node or cover {surface}; that partition designs it.",
+                run_id=run_id,
+            )
+
+
+def _apply_surface_placement(
+    graph: dict[str, object],
+    operation: dict[str, object],
+    *,
+    partition: dict[str, object],
+    valid_evidence_refs: set[str],
+    run_id: str,
+) -> None:
+    """Record where the scenario's business rule runs; whether that place is right is a semantic review question."""
+
+    scenario_id = str(partition.get("scenario_id") or "")
+    surface = str(operation.get("surface") or "")
+    component_id = str(operation.get("component_id") or "").strip()
+    reason = str(operation.get("reason") or "").strip()
+    evidence_refs = _strings(operation.get("evidence_refs"))
+
+    def invalid(message: str) -> HarnessError:
+        return HarnessError("designer_delta_invalid", f"place_surface {message}", run_id=run_id)
+
+    unknown = sorted(set(operation) - {"op", "surface", "component_id", "reason", "evidence_refs"})
+    if unknown:
+        raise invalid(f"has fields outside its contract: {', '.join(unknown)}.")
+    if surface not in PLACEABLE_SURFACES:
+        raise invalid(f"can only place {', '.join(sorted(PLACEABLE_SURFACES))}, not {surface or '<missing>'}.")
+    if not component_id or not reason or not evidence_refs:
+        raise invalid("needs component_id, a reason and the evidence_refs of the code that makes the decision.")
+    _reject_unknown_evidence(evidence_refs, valid_evidence_refs, where="place_surface evidence_refs", run_id=run_id)
+    if any(
+        str(node.get("scenario_id") or "") == scenario_id and str(node.get("surface") or "") == surface
+        for node in _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
+        if str(node.get("component_id") or "") != str(partition.get("component_id") or "")
+    ):
+        raise invalid(f"cannot move {scenario_id} {surface}: another partition already designed it.")
+    placements = _dict_items(graph.get("surface_placements", []), code="designer_delta_invalid", run_id=run_id)
+    existing = next(
+        (item for item in placements if item.get("scenario_id") == scenario_id and item.get("surface") == surface),
+        None,
+    )
+    if existing is not None:
+        # shortcut: a placement is final for construction, so a Validator repair cannot move it yet; add a repair path
+        # when a real run needs one.
+        raise invalid(
+            f"{scenario_id} {surface} is already placed in {existing.get('component_id')} by partition "
+            f"{existing.get('placed_in_partition')}; a placement is made once."
+        )
+    graph["surface_placements"] = sorted(
+        [
+            *placements,
+            {
+                "scenario_id": scenario_id,
+                "surface": surface,
+                "component_id": component_id,
+                "reason": reason,
+                "evidence_refs": evidence_refs,
+                "placed_in_partition": f"{scenario_id}|{partition.get('component_id')}",
+            },
+        ],
+        key=lambda item: (str(item.get("scenario_id") or ""), str(item.get("surface") or "")),
+    )
 
 
 def _validate_delta_runtime_evidence(
@@ -2255,12 +3022,7 @@ def _validate_delta_runtime_evidence(
         return
     binding = _dict_value(value)
     refs = _strings(binding.get("evidence_refs"))
-    if any(ref not in valid_evidence_refs for ref in refs):
-        raise HarnessError(
-            "designer_delta_invalid",
-            "Runtime binding references evidence outside the frozen or observed repository evidence.",
-            run_id=run_id,
-        )
+    _reject_unknown_evidence(refs, valid_evidence_refs, where="Runtime binding evidence_refs", run_id=run_id)
 
 
 def _validate_delta_access_evidence(
@@ -2271,10 +3033,18 @@ def _validate_delta_access_evidence(
 ) -> None:
     contract = _dict_value(value)
     refs = _strings(contract.get("authentication_evidence_refs"))
-    if any(ref not in valid_evidence_refs for ref in refs):
+    _reject_unknown_evidence(refs, valid_evidence_refs, where="API authentication_evidence_refs", run_id=run_id)
+
+
+def _reject_unknown_evidence(refs: list[str], valid_evidence_refs: set[str], *, where: str, run_id: str) -> None:
+    # Naming the refs lets the Designer fix them; a vague message made it guess and repeat the mistake.
+    unknown = [ref for ref in refs if ref not in valid_evidence_refs]
+    if unknown:
         raise HarnessError(
             "designer_delta_invalid",
-            "API authentication references evidence outside the frozen or observed repository evidence.",
+            f"{where} contain refs no Designer tool returned: {', '.join(unknown)}. Copy each evidence ref exactly "
+            "as a Designer tool or the prompt returned it; the #L line is part of the ref, never change it or write "
+            "a new one.",
             run_id=run_id,
         )
 
@@ -2288,6 +3058,43 @@ def _partition_key(value: dict[str, object], *, run_id: str) -> str:
 
 def _resolve_ref(value: str, temp_refs: dict[str, str]) -> str:
     return temp_refs.get(value, value)
+
+
+def _resolve_attachment_temp_refs(
+    graph: dict[str, object], temp_refs: dict[str, str], *, before: dict[str, object], run_id: str
+) -> None:
+    """A runtime owner added in the same delta is named by its temp_ref; store its node id, as edges do."""
+
+    def owner_of(node: object) -> object:
+        binding = node.get("runtime_binding") if isinstance(node, dict) else None
+        attachment = binding.get("attachment") if isinstance(binding, dict) else None
+        return attachment if isinstance(attachment, dict) else None
+
+    unchanged = {
+        str(node.get("id") or ""): (owner_of(node) or {}).get("owner_ref")
+        for node in before.get("nodes") or []
+        if isinstance(node, dict)
+    }
+    nodes = _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
+    for node in nodes:
+        attachment = owner_of(node)
+        owner_ref = str((attachment or {}).get("owner_ref") or "")
+        if not owner_ref.startswith("tmp:") or unchanged.get(str(node.get("id") or "")) == owner_ref:
+            continue
+        if owner_ref not in temp_refs:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"Node {node.get('id')} runtime_binding.attachment.owner_ref {owner_ref} is the temp_ref of no node "
+                "added in this delta; use the temp_ref of a node this delta adds, a runtime-bound VDN-* id or an "
+                "RLA-* anchor.",
+                run_id=run_id,
+            )
+        # New dicts so the Designer's own delta (saved as its artifact) keeps the temp_ref it wrote.
+        node["runtime_binding"] = {
+            **node["runtime_binding"],
+            "attachment": {**attachment, "owner_ref": temp_refs[owner_ref]},
+        }
+    graph["nodes"] = nodes
 
 
 def _dict_items(value: object, *, code: str, run_id: str) -> list[dict[str, Any]]:

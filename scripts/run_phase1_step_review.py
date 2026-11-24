@@ -15,6 +15,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.step_review import LlmStepReviewRequired
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 
 
@@ -42,7 +43,15 @@ def main() -> int:
     parser.add_argument("--review-call-id")
     parser.add_argument("--review-decision", choices=("approve", "reject"))
     parser.add_argument("--review-note", default="")
+    parser.add_argument("--answer-question-id", help="With --run-id: answer this clarification question.")
+    parser.add_argument("--answer", default="", help="Answer text or option key for --answer-question-id.")
+    parser.add_argument("--answered-by", default="owner")
     args = parser.parse_args()
+    if args.answer_question_id and (not args.run_id or not str(args.answer).strip()):
+        raise HarnessError(
+            "phase1_step_review_args_invalid",
+            "--answer-question-id needs --run-id and a non-empty --answer.",
+        )
 
     if bool(args.run_id) == bool(args.dataset or args.use_case):
         raise HarnessError(
@@ -115,15 +124,28 @@ def main() -> int:
             "note": str(args.review_note or ""),
         },
     )
-    result = (
-        workflow.continue_requirement_run(run_id=str(args.run_id))
-        if args.run_id
-        else workflow.start_or_get_run(
-            dataset=str(args.dataset),
-            use_case=str(args.use_case),
-            requested_by=str(args.requested_by),
+    if args.answer_question_id:
+        try:
+            result = workflow.answer_clarification(
+                run_id=str(args.run_id),
+                question_id=str(args.answer_question_id),
+                answer=str(args.answer),
+                answered_by=str(args.answered_by),
+            )
+        except LlmStepReviewRequired as exc:
+            # Nothing is written before the update call is approved: rerun with the same answer to resume.
+            print(json.dumps({"status": "clarification_update_paused", "pending_step_review": exc.progress}, indent=2))
+            return 0
+    else:
+        result = (
+            workflow.continue_requirement_run(run_id=str(args.run_id))
+            if args.run_id
+            else workflow.start_or_get_run(
+                dataset=str(args.dataset),
+                use_case=str(args.use_case),
+                requested_by=str(args.requested_by),
+            )
         )
-    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if str(result.get("status") or "") in {
         "requirement_paused",
