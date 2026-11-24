@@ -169,7 +169,7 @@ def _prompt_review_feedback(
 def _repair_source_paths(repair_task: dict[str, object]) -> list[str]:
     paths: list[str] = []
     graph_context = _dict(repair_task.get("graph_context"))
-    nodes = _dicts(graph_context.get("writable_nodes")) or _dicts(repair_task.get("nodes"))
+    nodes = _dicts(graph_context.get("writable_nodes"))
     for node in nodes:
         binding = _dict(node.get("runtime_binding"))
         target_path = str(_dict(binding.get("target")).get("path") or "").strip()

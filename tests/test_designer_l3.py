@@ -3115,6 +3115,42 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(session["budgets"]["invalid_action"]["used"], 1)
         self.assertEqual(session["observation_actions_since_delta"], 0)
 
+    def test_scenario_repair_sees_its_scenario_reads_on_every_component_only(self) -> None:
+        def read(partition_key: str, ref: str, status: str = "succeeded") -> dict[str, object]:
+            return {
+                "tool_id": "repo.read_batch",
+                "status": status,
+                "partition_key": partition_key,
+                "evidence_refs": [ref],
+            }
+
+        own_web = read("SC-3|web", "repo:apps/web/src/A.tsx#L1@sha256:a")
+        own_api = read("SC-3|api", "repo:apps/api/src/b.ts#L1@sha256:b")
+        own_db = read("SC-3|database", "repo:packages/db/src/c.ts#L1@sha256:c")
+        other_web = read("SC-1|web", "repo:apps/web/src/D.tsx#L1@sha256:d")
+        rejected = read("SC-3|api", "repo:apps/api/src/e.ts#L1@sha256:e", status="operator_rejected")
+        repair_read = read("SC-3@web", "repo:apps/api/src/f.ts#L1@sha256:f")
+        session = {
+            "observations": [other_web, own_web, own_api, rejected, own_db, repair_read],
+            "source_observations": {"web": [own_web["evidence_refs"][0], other_web["evidence_refs"][0]]},
+            "repair_observations": {"SC-3@web": [repair_read]},
+        }
+
+        observations = _prompt_observations(
+            session,
+            repair_task={"target_id": "SC-3@web", "partition": {"scenario_id": "SC-3", "component_id": "web"}},
+            active_component_id="web",
+        )
+        self.assertEqual(observations, [own_web, own_api, own_db, repair_read])
+
+        # A repair without a scenario keeps pinning the component's reads.
+        global_observations = _prompt_observations(
+            session,
+            repair_task={"target_id": "global"},
+            active_component_id="web",
+        )
+        self.assertEqual(global_observations, [other_web, own_web])
+
     def test_prompt_observations_pin_exact_source_for_active_component(self) -> None:
         source_ref = "repo:apps/api/src/app.ts#L1@sha256:api"
         source_observation = {
@@ -4253,7 +4289,9 @@ class DesignerResumeTest(unittest.TestCase):
         api_task = _active_repair_task(repair_feedback=feedback, graph=graph, completed_targets=[])
         self.assertEqual(api_task["target_id"], "SC-3@api")
         self.assertEqual(api_task["partition"]["component_id"], "api")
-        self.assertEqual([item["id"] for item in api_task["nodes"]], ["VDN-api"])
+        self.assertEqual([item["id"] for item in api_task["graph_context"]["writable_nodes"]], ["VDN-api"])
+        self.assertNotIn("nodes", api_task)
+        self.assertNotIn("edges_in_current_order", api_task["graph_context"])
         self.assertEqual(len(api_task["findings"]), 1)
 
         web_task = _active_repair_task(
@@ -4263,7 +4301,7 @@ class DesignerResumeTest(unittest.TestCase):
         )
         self.assertEqual(web_task["target_id"], "SC-3@web")
         self.assertEqual(web_task["partition"]["component_id"], "web")
-        self.assertEqual([item["id"] for item in web_task["nodes"]], ["VDN-web"])
+        self.assertEqual([item["id"] for item in web_task["graph_context"]["writable_nodes"]], ["VDN-web"])
         self.assertEqual(len(web_task["findings"]), 1)
 
     def test_active_partition_groups_missing_surfaces_and_advances_by_component(self) -> None:

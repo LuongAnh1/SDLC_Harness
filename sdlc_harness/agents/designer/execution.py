@@ -2734,12 +2734,19 @@ def _prompt_observations(
         return chronological
     target_id = str(repair_task.get("target_id") or "")
     selected = _dicts(_dict(session.get("repair_observations")).get(target_id))
-    pinned = [
-        item
-        for item in all_observations
-        if source_refs.intersection(_strings(item.get("evidence_refs")))
-        and str(item.get("status") or "") != "operator_rejected"
-    ]
+    repair_scenario_id = str(_dict(repair_task.get("partition")).get("scenario_id") or "")
+    # A scenario repair sees what its own scenario read, on every component: pinning the component's reads of every
+    # scenario sent design_v20 SC-3@web all 13 web batches (311k chars) but not SC-3's api/database reads.
+    pinned = (
+        _scenario_observations(session, repair_scenario_id)
+        if repair_scenario_id
+        else [
+            item
+            for item in all_observations
+            if source_refs.intersection(_strings(item.get("evidence_refs")))
+            and str(item.get("status") or "") != "operator_rejected"
+        ]
+    )
     merged: list[dict[str, object]] = []
     fingerprints: set[str] = set()
     for item in [*pinned, *selected]:
@@ -4246,10 +4253,10 @@ def _active_repair_task(
         else [],
         "allow_add_node": remediation_mode == "partition_rebuild" or bool(component_id and not target_nodes),
     }
+    # The edges are sent once, as active_repair_task.edges_in_current_order (the name the prompt rules use).
     graph_context = {
         "writable_nodes": target_nodes,
         "read_only_nodes": read_only_nodes,
-        "edges_in_current_order": target_edges,
         "preserved_edges": preserved_edges,
     }
     shared_edge_only = (
@@ -4283,7 +4290,6 @@ def _active_repair_task(
             if _dict(item.get("repair_step"))
         ],
         "graph_context": graph_context,
-        "nodes": target_nodes,
         "edges_in_current_order": target_edges,
         "write_scope": write_scope,
         "read_scope": {
