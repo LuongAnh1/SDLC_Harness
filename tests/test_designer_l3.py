@@ -4843,6 +4843,76 @@ class DesignerResumeTest(unittest.TestCase):
             },
         )
 
+    def test_active_partition_points_at_other_branch_targets_on_the_same_surface(self) -> None:
+        requirement = {
+            "use_case_id": "UC1",
+            "scenario_contract": {
+                "scenarios": [
+                    {"id": "SC-1", "kind": "main", "surfaces": {}},
+                    {"id": "SC-2", "kind": "exception", "surfaces": {}},
+                    {
+                        "id": "SC-3",
+                        "kind": "exception",
+                        "surfaces": {"business_rule": {"status": "required", "requirement_refs": ["EF-3"]}},
+                    },
+                ]
+            },
+        }
+        landscape = {
+            "components": [{"component_id": "api", "roots": ["apps/api"]}],
+            "anchors": [],
+            "scenario_matches": [],
+        }
+        graph = new_vertical_design_graph(
+            run_id="run-other-targets",
+            snapshot_binding={
+                "requirement_digest": "req",
+                "repo_landscape_digest": "repo",
+                "workspace_ref": "workspace",
+                "base_sha": "abc",
+            },
+        )
+
+        def node(node_id: str, scenario_id: str, surface: str, component_id: str = "api") -> dict[str, object]:
+            return {
+                "id": node_id,
+                "scenario_id": scenario_id,
+                "component_id": component_id,
+                "surface": surface,
+                "name": f"{node_id} name",
+                "disposition": "add",
+                "contract": "secret contract",
+                "runtime_binding": {
+                    "runtime_kind": "service_symbol",
+                    "target": {"path": f"apps/api/src/{node_id}.ts", "symbol": node_id},
+                },
+            }
+
+        graph["nodes"] = [
+            node("VDN-main-rule", "SC-1", "business_rule"),
+            node("VDN-sibling-rule", "SC-2", "business_rule"),
+            node("VDN-sibling-api", "SC-2", "api"),
+            node("VDN-sibling-web", "SC-2", "business_rule", component_id="web"),
+            {**node("VDN-unbound", "SC-2", "business_rule"), "runtime_binding": {}},
+        ]
+
+        active = _active_partition(requirement_model=requirement, landscape=landscape, graph=graph)
+
+        work = active["surface_work"][0]
+        self.assertEqual(work["surface"], "business_rule")
+        self.assertEqual(
+            work["other_scenario_targets"],
+            [
+                {
+                    "node_id": "VDN-sibling-rule",
+                    "scenario_id": "SC-2",
+                    "name": "VDN-sibling-rule name",
+                    "target": "apps/api/src/VDN-sibling-rule.ts#VDN-sibling-rule",
+                }
+            ],
+        )
+        self.assertEqual([item["node_id"] for item in work["shared_target_candidates"]], ["VDN-main-rule"])
+
     def test_scenario_wide_repair_preserves_only_parent_edge_and_uses_one_write_partition(self) -> None:
         graph = {
             "nodes": [

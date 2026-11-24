@@ -3710,6 +3710,13 @@ def _active_partition(
                         component_id=component_id,
                         surface=surface,
                     ),
+                    "other_scenario_targets": _other_scenario_targets(
+                        scenario_id=scenario_id,
+                        requirement_model=requirement_model,
+                        graph=graph,
+                        component_id=component_id,
+                        surface=surface,
+                    ),
                 }
             )
         component = next(
@@ -3898,6 +3905,47 @@ def _shared_target_candidates(
             "runtime_binding": item.get("runtime_binding"),
         }
         for item in sorted(candidates, key=lambda item: str(item.get("id") or ""))
+    ]
+
+
+def _other_scenario_targets(
+    *,
+    scenario_id: str,
+    requirement_model: dict[str, object],
+    graph: dict[str, object],
+    component_id: str,
+    surface: str,
+) -> list[dict[str, object]]:
+    """Point at other branch scenarios' nodes on this surface; design.inspect_partition shows them in full.
+
+    shared_target_candidates covers main-scenario nodes only, so a branch decided from a graph.index name alone
+    whether a sibling branch's rule makes the same decision (UC4 designer-0085 vs SC-9's title policy).
+    """
+
+    main_ids = {
+        str(item.get("id") or "")
+        for item in _scenarios(requirement_model)
+        if str(item.get("kind") or "") == "main"
+    }
+    rows = [
+        item
+        for item in _dicts(graph.get("nodes"))
+        if str(item.get("scenario_id") or "") not in {scenario_id, *main_ids}
+        and str(item.get("component_id") or "") == component_id
+        and str(item.get("surface") or "") == surface
+        and _dict(item.get("runtime_binding"))
+    ]
+    return [
+        {
+            "node_id": item.get("id"),
+            "scenario_id": item.get("scenario_id"),
+            "name": item.get("name"),
+            "target": "{path}#{symbol}".format(
+                path=_dict(_dict(item.get("runtime_binding")).get("target")).get("path") or "",
+                symbol=_dict(_dict(item.get("runtime_binding")).get("target")).get("symbol") or "",
+            ),
+        }
+        for item in sorted(rows, key=lambda item: (str(item.get("scenario_id") or ""), str(item.get("id") or "")))
     ]
 
 
