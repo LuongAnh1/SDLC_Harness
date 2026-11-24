@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from ...core.config import phase2_llm_call_options
 from ...core.errors import HarnessError
+from ...llm.client import strip_code_fence
 from ...llm.json_utils import parse_first_json_object
 from ...llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ...loop import RoleToolResultV1, canonical_json_hash
@@ -1139,6 +1140,9 @@ class DesignerToolLoopExecutor:
                 cursor = _dict(session.get("cursor"))
                 cursor["pending_call"] = {"call_id": call_id, "stage": "llm", "created_at": utc_now_iso()}
                 session["cursor"] = cursor
+                # The graph this prompt shows; a delta from this call is applied against it (see
+                # _apply_prompt_graph_digest).
+                session["prompt_graph_digest"] = str(registry.graph.get("artifact_digest") or "")
                 _write_json_atomic(session_file, session)
                 prompt = _designer_prompt(
                     requirement_model=requirement_model,
@@ -1532,6 +1536,12 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
+            if tool_id == "design.propose_delta":
+                arguments, digest_fix = _apply_prompt_graph_digest(
+                    arguments, prompt_digest=str(session.get("prompt_graph_digest") or "")
+                )
+                if digest_fix:
+                    _update_designer_exchange(exchange_path, {"harness_graph_digest": digest_fix})
             if tool_id == "design.propose_delta" and active_component_id and source_refs:
                 arguments = _attach_source_observations(arguments, component_id=active_component_id, refs=source_refs)
             if tool_id == "complete" and (active_partition is not None or repair_task is not None):
@@ -2169,6 +2179,14 @@ def _parse_designer_tool_action(
             **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
             "relocated_experience_fields": relocated_experience,
         }
+    relocated_summary = _relocate_argument_summary(payload)
+    if relocated_summary:
+        normalization = {
+            "schema_version": "designer_output_normalization_v1",
+            "kind": normalization.get("kind") or "relocated_summary",
+            **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
+            "relocated_summary": True,
+        }
     arguments, external_inputs = _normalize_external_inputs(payload.get("arguments"))
     if external_inputs:
         payload["arguments"] = arguments
@@ -2179,6 +2197,21 @@ def _parse_designer_tool_action(
             "canonicalized_external_inputs": external_inputs,
         }
     return payload, normalization
+
+
+def _relocate_argument_summary(payload: dict[str, object]) -> bool:
+    """Move a summary written inside arguments to the action's top level, where design notes read it.
+
+    design_v20 designer-0025, 0041 and 0046 wrote it as arguments.summary, so their notes were lost."""
+
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, dict) or str(payload.get("summary") or "").strip():
+        return False
+    summary = arguments.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    payload["summary"] = arguments.pop("summary")
+    return True
 
 
 def _relocate_misplaced_experience_fields(payload: dict[str, object]) -> list[str]:
@@ -2275,6 +2308,44 @@ def _repair_unbalanced_closers(text: str) -> str | None:
     return "".join(out) if changed else None
 
 
+# DeepSeek sometimes appends tool-call markup such as `</｜｜DSML｜｜ invoke>` after a complete object (design_v20 0011).
+_DSML_TAG = re.compile(r"</?[｜|][^<>]*>")
+
+
+def _text_after_action_object(raw: str) -> tuple[int, str]:
+    """Where the first action object ends and the non-markup text that follows it."""
+
+    text = strip_code_fence(raw).strip()
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            candidate, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and {"action", "arguments"} <= set(candidate):
+            return end, _DSML_TAG.sub("", text[end:]).strip()
+    return -1, ""
+
+
+def _rejoin_cut_summary(payload: dict[str, object], trailing: str) -> dict[str, object] | None:
+    """The action object when an extra closer cut off only its top-level summary.
+
+    design_v20 designer-0049 and 0065 closed the object one bracket early, right before `,"summary":"..."}`; the
+    object itself was complete. Anything else after the object (an operation, prose) still fails closed."""
+
+    if not trailing.startswith(",") or "summary" in payload:
+        return None
+    try:
+        rest = json.loads("{" + trailing[1:])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rest, dict) or set(rest) != {"summary"} or not isinstance(rest["summary"], str):
+        return None
+    return {**payload, "summary": rest["summary"]}
+
+
 def _json_structure_hint(raw: str) -> str:
     """Point the next Designer call at the exact place its JSON broke so it can fix its own nesting."""
 
@@ -2282,10 +2353,17 @@ def _json_structure_hint(raw: str) -> str:
     if start < 0:
         return ""
     try:
-        json.JSONDecoder().raw_decode(raw, start)
-        return ""
+        _, end = json.JSONDecoder().raw_decode(raw, start)
     except json.JSONDecodeError as error:
         position, reason = error.pos, error.msg
+    else:
+        if not _DSML_TAG.sub("", raw[end:]).strip():
+            return ""
+        return (
+            f" The action object ended at character {end}, but more text follows it: {raw[end:end + 80]!r}. An extra "
+            "closing bracket ended the object early, or text was added after it; return exactly one JSON object and "
+            "nothing after it."
+        )
     # Containers still open where parsing stopped, innermost last.
     stack: list[int] = []
     in_string = escaped = False
@@ -2474,7 +2552,16 @@ def _parse_designer_tool_action_text(
     repair_closers: bool = False,
 ) -> tuple[dict[str, object], dict[str, object]]:
     try:
-        return parse_first_json_object(raw, expected_keys={"action", "arguments"}), {}
+        payload = parse_first_json_object(raw, expected_keys={"action", "arguments"})
+        end, trailing = _text_after_action_object(raw)
+        rejoined = _rejoin_cut_summary(payload, trailing)
+        if rejoined is not None:
+            return rejoined, {"schema_version": "designer_output_normalization_v1", "kind": "rejoined_cut_summary"}
+        if trailing:
+            # design_v20 designer-0031/0049: text after a complete object (an extra closer that ended it early, or
+            # "Wait ... producing the full delta now") was silently dropped; fail closed into the repair path.
+            raise json.JSONDecodeError("Extra data after the action object", strip_code_fence(raw).strip(), end)
+        return payload, {}
     except json.JSONDecodeError as original_error:
         text = raw.strip()
         candidates: dict[str, dict[str, object]] = {}
@@ -5874,6 +5961,22 @@ def _record_source_observations(
     observations = _dict(session.get("source_observations"))
     observations[component_id] = list(dict.fromkeys([*_strings(observations.get(component_id)), *refs]))
     session["source_observations"] = observations
+
+
+def _apply_prompt_graph_digest(arguments: object, *, prompt_digest: str) -> tuple[object, dict[str, str] | None]:
+    """Set the delta's base_graph_digest to the digest of the graph the prompt showed.
+
+    The Designer copied the 71-character digest by hand and mistyped it (design_v20 designer-0031 inserted 8
+    characters, 0058 dropped 2), which the stale-revision check rejected as if the graph had changed. A graph that
+    really changed since the prompt still fails that check, because it compares against this prompt digest."""
+
+    delta = _dict(_dict(arguments).get("delta"))
+    written = str(delta.get("base_graph_digest") or "")
+    if not prompt_digest or not delta or written == prompt_digest:
+        return arguments, None
+    payload = json.loads(json.dumps(arguments, ensure_ascii=False))
+    payload["delta"]["base_graph_digest"] = prompt_digest
+    return payload, {"written": written, "applied": prompt_digest}
 
 
 def _attach_source_observations(

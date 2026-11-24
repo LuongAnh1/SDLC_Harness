@@ -2196,6 +2196,62 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(parsed, payload)
         self.assertEqual(normalization["kind"], "removed_single_extra_closing_brace")
 
+    def test_harness_sets_the_delta_digest_to_the_prompt_graph(self) -> None:
+        # design_v20 designer-0031 and 0058 mistyped the 71-character digest by hand.
+        from sdlc_harness.agents.designer.execution import _apply_prompt_graph_digest
+
+        arguments = {"delta": {"base_graph_digest": "sha256:abc", "operations": []}}
+        fixed, note = _apply_prompt_graph_digest(arguments, prompt_digest="sha256:abcd")
+        self.assertEqual(fixed["delta"]["base_graph_digest"], "sha256:abcd")
+        self.assertEqual(note, {"written": "sha256:abc", "applied": "sha256:abcd"})
+        self.assertEqual(arguments["delta"]["base_graph_digest"], "sha256:abc")
+        same, none = _apply_prompt_graph_digest(fixed, prompt_digest="sha256:abcd")
+        self.assertIs(same, fixed)
+        self.assertIsNone(none)
+        # Without a recorded prompt digest nothing is replaced.
+        self.assertEqual(_apply_prompt_graph_digest(arguments, prompt_digest=""), (arguments, None))
+
+    def test_text_after_the_action_object_fails_closed_and_argument_summary_moves_up(self) -> None:
+        # design_v20 designer-0031 ("Wait ... producing the full correct delta now" after a stub) and 0049 (an extra
+        # closer ended the object before its summary) were accepted with the rest silently dropped.
+        from sdlc_harness.agents.designer.execution import _json_structure_hint
+
+        read = {"action": "repo.read_batch", "arguments": {"requests": [{"path": "a.ts"}]}, "summary": "read a"}
+        text = json.dumps(read, separators=(",", ":"))
+        trailing = text + "\n\nWait - I must re-check this. Producing the full action now."
+        with self.assertRaisesRegex(json.JSONDecodeError, "Extra data after the action object"):
+            _parse_designer_tool_action(trailing, require_runtime_binding=True, repair_closers=True)
+        self.assertIn("The action object ended at character", _json_structure_hint(trailing))
+        # Tool-call markup after the object (design_v20 0011) is still ignored.
+        parsed, normalization = _parse_designer_tool_action(
+            text + "</｜｜DSML｜｜ invoke>", require_runtime_binding=True, repair_closers=True
+        )
+        self.assertEqual(parsed, read)
+        self.assertEqual(normalization, {})
+        self.assertEqual(_json_structure_hint(text + "</｜｜DSML｜｜ invoke>"), "")
+
+        # An extra closer that cut off only the top-level summary (design_v20 0049, 0065) is rejoined.
+        bare = {"action": "repo.read_batch", "arguments": {"requests": [{"path": "a.ts"}]}}
+        cut = json.dumps(bare, separators=(",", ":")) + ',"summary":"read a"}'
+        parsed, normalization = _parse_designer_tool_action(cut, require_runtime_binding=True, repair_closers=True)
+        self.assertEqual(parsed, read)
+        self.assertEqual(normalization["kind"], "rejoined_cut_summary")
+        # Anything else cut off still fails closed.
+        with self.assertRaises(json.JSONDecodeError):
+            _parse_designer_tool_action(
+                json.dumps(bare, separators=(",", ":")) + ',"summary":"read a","extra":1}',
+                require_runtime_binding=True,
+                repair_closers=True,
+            )
+
+        # A summary written inside arguments becomes the action summary.
+        nested = {"action": "repo.read_batch", "arguments": {"requests": [{"path": "a.ts"}], "summary": "read a"}}
+        parsed, normalization = _parse_designer_tool_action(
+            json.dumps(nested), require_runtime_binding=True, repair_closers=True
+        )
+        self.assertEqual(parsed, read)
+        self.assertEqual(normalization["kind"], "relocated_summary")
+
     def test_designer_prompt_prioritizes_last_rejected_action(self) -> None:
         message = "Design edge already exists: VDE-duplicate."
 
@@ -2388,6 +2444,7 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("the same list rule seen on two pages", prompt)
         self.assertIn("still gets its node, with disposition reuse", prompt)
         self.assertIn("structural edges such as depends_on are not listed", prompt)
+        self.assertIn("the Harness sets it to the digest of the graph this prompt", prompt)
         # design_v20 designer-0034 believed five branch paths could never pass the continuity check.
         self.assertIn("The continuity check skips a pair of consecutive edges when either carries a", prompt)
         # design_v20 designer-0029 left five SC-3 operation paths without branch_group "to keep it simple".
