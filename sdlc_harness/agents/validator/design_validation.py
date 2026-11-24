@@ -1002,6 +1002,20 @@ def _structural_findings(
         )
 
     classes = _class_symbols(class_graph)
+    # Class names are display names and need not be unique (design_v20: SC-3 and SC-4 both project "Refuse favoriting
+    # a draft (POST ...)"), so a receiver that is a class node id is checked against that node's own methods.
+    classes_by_id = {
+        str(node.get("id") or "").strip(): (
+            str(node.get("className") or node.get("id") or "").strip(),
+            {
+                str(method.get("name") or "").strip()
+                for method in _dict_items(node.get("methods"))
+                if str(method.get("name") or "").strip()
+            },
+        )
+        for node in _dict_items(class_graph.get("nodes"))
+        if str(node.get("id") or "").strip()
+    }
     for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):
         diagram_id = str(diagram.get("id") or "sequence_diagram")
         for issue in _dict_items(diagram.get("parseIssues")):
@@ -1028,8 +1042,19 @@ def _structural_findings(
             target_node = nodes.get(target_id, {})
             if str(target_node.get("type") or "").lower() == "actor":
                 continue
-            matches = _matching_classes(target_id, str(target_node.get("label") or ""), classes)
             event_id = str(message.get("id") or "")
+            if target_id in classes_by_id:
+                class_name, methods = classes_by_id[target_id]
+                if operation not in methods:
+                    add(
+                        "cross_diagram_contract",
+                        f"Sequence calls `{target_id}.{operation}` but `{class_name}` does not declare that operation.",
+                        f"Declare `{operation}` on `{class_name}` or change the sequence call to an existing operation.",
+                        diagram=diagram_id,
+                        evidence=event_id or str(message.get("message") or ""),
+                    )
+                continue
+            matches = _matching_classes(target_id, str(target_node.get("label") or ""), classes)
             if not matches:
                 add(
                     "unresolved_lifeline",

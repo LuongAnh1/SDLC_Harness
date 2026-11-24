@@ -1734,3 +1734,33 @@ def test_results_of_the_current_validation_version_are_not_reused_so_step_review
         replay = StaticLlmClient(list(responses))
         assert _cached_review(replay, graph, canonical, cache, version=7).ok
         assert len(replay.prompts) == 3
+
+
+def test_sequence_operation_is_checked_against_the_receiver_node_even_when_class_names_repeat() -> None:
+    from sdlc_harness.agents.validator.design_validation import _structural_findings
+
+    name = "Refuse favoriting a draft (POST /api/articles/:slug/favorite)"
+    class_graph = {
+        "nodes": [
+            {"id": "VDN-sc4", "className": name, "methods": [{"name": "listRequestsFavorite"}]},
+            {"id": "VDN-sc3", "className": name, "methods": [{"name": "execute"}]},
+        ]
+    }
+
+    def sequence(operation: str) -> dict[str, object]:
+        return {
+            "sequenceDiagrams": [
+                {
+                    "id": "sequence_sc_4",
+                    "nodes": [{"id": "VDN-web", "type": "participant"}, {"id": "VDN-sc4", "label": name}],
+                    "messages": [
+                        {"id": "m1", "from": "VDN-web", "to": "VDN-sc4", "type": "synchronous", "message": f"{operation}()"}
+                    ],
+                }
+            ]
+        }
+
+    assert _structural_findings(class_graph=class_graph, sequence_graph=sequence("listRequestsFavorite")) == []
+    missing = _structural_findings(class_graph=class_graph, sequence_graph=sequence("unknownOperation"))
+    assert [item.category for item in missing] == ["cross_diagram_contract"]
+    assert name in missing[0].message
