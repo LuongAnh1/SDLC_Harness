@@ -4,6 +4,14 @@ Traceability agent xác định các requirement đã duyệt có được biể
 diagram hay không. Module này bổ sung quality gate còn thiếu: contract graph
 tất định cùng một lượt LLM semantic review về thứ tự, trạng thái và bảo đảm
 transaction có điều kiện.
+
+Semantic task cache: a scenario/global task result is reused when its packet data and the rules version of its task
+type (SEMANTIC_TASK_RULES_VERSION) are unchanged; the prompt template text is not part of the key. Whoever edits a
+task prompt template (_semantic_task_prompt, _SEMANTIC_TASK_PROMPTS, the field/severity guides, the rules or the
+finding categories) must decide: bump that task type's version when the edit can change a verdict (every cached
+result of that type is reviewed again), or keep it for a wording-only edit (cached results stay valid). The test
+test_semantic_task_templates_match_their_rules_version in tests/test_design_validation_sliced.py fails until the
+template snapshot is updated, so the decision cannot be skipped.
 """
 
 from __future__ import annotations
@@ -33,6 +41,13 @@ from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value,
 
 FINDING_IDENTITY_VERSION = "design_finding_identity_v2"
 REMEDIATION_MODES = frozenset({"local_patch", "partition_rebuild", "inconclusive"})
+# Rules version of each semantic task type's prompt template, part of the task cache key (see the module docstring).
+# Bump a type's version only when a template edit can change that type's verdicts.
+SEMANTIC_TASK_RULES_VERSION = {
+    "cross_cutting": "2026-11-25.1",
+    "scenario_runtime": "2026-11-25.1",
+    "scenario_behavior": "2026-11-25.1",
+}
 
 
 @dataclass(frozen=True)
@@ -316,11 +331,19 @@ class DesignValidator:
                 )
 
                 cache_key = (
-                    semantic_task_cache_key(self._semantic_task_prompt(task_context=task_context, rule_review=rule_payload))
+                    semantic_task_cache_key(task_context=task_context, rule_review=rule_payload)
                     if task_cache is not None
                     else ""
                 )
                 cached_payload = task_cache.get(cache_key) if task_cache is not None else None
+                if task_cache is not None and cached_payload is None:
+                    # shortcut: results cached before packet keys (2026-11-25) are found by their whole-prompt key;
+                    # drop this fallback once no paused run needs them (UC4 H-r1 Design validation).
+                    cached_payload = task_cache.get(
+                        _legacy_semantic_task_cache_key(
+                            self._semantic_task_prompt(task_context=task_context, rule_review=rule_payload)
+                        )
+                    )
 
                 task_attempt_payload: dict[str, object] | None = None
 
@@ -784,6 +807,7 @@ class DesignValidator:
 
     @staticmethod
     def _semantic_task_prompt(*, task_context: dict[str, object], rule_review: dict[str, object]) -> str:
+        # Template text here is not in the task cache key: after editing it, follow SEMANTIC_TASK_RULES_VERSION.
         task = _dict_value(task_context.get("task"))
         task_type = str(task.get("task_type") or "")
         header, scope, task_rules = _SEMANTIC_TASK_PROMPTS.get(task_type, _SEMANTIC_TASK_PROMPTS["cross_cutting"])
@@ -823,8 +847,7 @@ class DesignValidator:
             if task_type == "scenario_behavior"
             else _DETERMINISTIC_REVIEW_NOTE
         )
-        review_context = dict(task_context)
-        review_context["task"] = {key: value for key, value in task.items() if key != "focus"}
+        review_context = _semantic_review_context(task_context)
         return f"""{header}
 
 This reviews a real Design before it is implemented in a real repository. It is not a test: no defect was planted,
@@ -886,6 +909,15 @@ Emit a new finding only for a cross-task defect with exact Requirement and Desig
 as the specialists; its expected_change states what must become true on existing node and edge ids, without
 prescribing a design or introducing a system the Requirement and graph do not contain. Put genuine disagreement or blocking uncertainty in conflicts; cosmetic wording differences are not
 conflicts. Pay special attention to a state or event being treated incompatibly across runtime, UI and data tasks.
+
+Severity of a cross-task finding (decide it from the packet; an existing specialist finding's severity is not a
+precedent):
+- blocking: the projections give the same event, state or stored value incompatible meanings and at least one
+  primary claim of the tasks involved cannot hold under both of them, or one implementation cannot realize both
+  projections at once.
+- warning: the projections differ only in wording, or the difference stops no primary claim, such as a non-required
+  alternative or error outcome, or a visual-taste difference.
+
 Review whether each shared surface's scenario-owned projections can coexist in one implementation across state,
 actions, responses, feedback, layout, focus, inputs and availability; visual taste alone is only a warning. A shared
 screen or runtime target does not make each projection a complete global contract. Additive slices are expected: for
@@ -1851,6 +1883,9 @@ def _summarize_call_metrics(metrics: list[dict[str, object]]) -> dict[str, objec
     }
 
 
+# Semantic task prompt templates (guides, rules, _SEMANTIC_TASK_PROMPTS, _SEMANTIC_FINDING_CATEGORIES): their text is
+# not in the task cache key. After editing one, bump SEMANTIC_TASK_RULES_VERSION for the affected task types when the
+# edit can change a verdict, then update the snapshot in test_semantic_task_templates_match_their_rules_version.
 _PACKET_FIELD_GUIDE = """
 Packet field guide (Harness-owned meanings; do not reinterpret them):
 - task.primary_claim_ids are assessed once each; context claims are evidence governed by the task-specific scope.
@@ -2108,10 +2143,42 @@ _SEMANTIC_FINDING_CATEGORIES = {
 _GRAPH_DIGEST_FIELD = re.compile(r'"graph_digest":"[^"]*",?')
 
 
-def semantic_task_cache_key(prompt: str) -> str:
-    """Identity of a task review input; the whole-graph digest is dropped because it changes on any unrelated edit."""
+def _semantic_review_context(task_context: dict[str, object]) -> dict[str, object]:
+    """The packet a semantic task reviews, as rendered into its prompt (the task's focus note is left out)."""
+
+    review_context = dict(task_context)
+    task = _dict_value(task_context.get("task"))
+    review_context["task"] = {key: value for key, value in task.items() if key != "focus"}
+    return review_context
+
+
+def semantic_task_cache_key(*, task_context: dict[str, object], rule_review: dict[str, object]) -> str:
+    """Identity of a task review input: its packet data plus its task type's rules version, not the template text.
+
+    A wording-only template edit then reuses cached results; an edit that can change a verdict bumps
+    SEMANTIC_TASK_RULES_VERSION. The whole-graph digest is dropped because it changes on any unrelated edit.
+    """
 
     # shortcut: the key ignores the provider model; clear the cache file when the Validator model changes.
+    task_type = str(_dict_value(task_context.get("task")).get("task_type") or "")
+    version = SEMANTIC_TASK_RULES_VERSION.get(task_type, SEMANTIC_TASK_RULES_VERSION["cross_cutting"])
+    data = json.dumps(
+        {
+            "rules_version": version,
+            "task_type": task_type,
+            "packet": _semantic_review_context(task_context),
+            "rule_review": rule_review,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(_GRAPH_DIGEST_FIELD.sub("", data).encode("utf-8")).hexdigest()
+
+
+def _legacy_semantic_task_cache_key(prompt: str) -> str:
+    """The whole-prompt key used before 2026-11-25; an identical prompt also means an identical template."""
+
     return "sha256:" + hashlib.sha256(_GRAPH_DIGEST_FIELD.sub("", prompt).encode("utf-8")).hexdigest()
 
 

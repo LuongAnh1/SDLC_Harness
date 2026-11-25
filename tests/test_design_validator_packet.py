@@ -7,6 +7,7 @@ import unittest
 
 from sdlc_harness.agents.designer.graph import ESTABLISHED_NOT_PROVEN, _runtime_composition_findings, established_facts
 from sdlc_harness.agents.validator.semantic_review import materialize_task_context, review_ui_repo_context
+from sdlc_harness.agents.designer.graph import established_facts
 
 PATH = "apps/web/src/App.tsx#App"
 SCREEN = "apps/web/src/Editor.tsx#Editor"
@@ -283,3 +284,32 @@ class TraceMappingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+def test_harness_states_one_binding_serves_every_caller_of_a_shared_callable() -> None:
+    """UC4 validation v7 runtime-sc-1 blocked SC-1's draft policy for lacking a binding per calling controller."""
+
+    def node(node_id: str, path: str, **binding: object) -> dict[str, object]:
+        return {"id": node_id, "scenario_id": "SC-1",
+                "runtime_binding": {"target": {"path": path, "symbol": node_id}, **binding}}
+
+    policy = node("VDN-policy", "policy.ts", attachment={"relation": "called_by", "owner_path": "create.ts",
+                                                         "owner_symbol": "VDN-create"})
+    graph = {
+        "nodes": [policy, node("VDN-create", "create.ts"), node("VDN-update", "update.ts")],
+        "edges": [
+            {"id": "VDE-1", "kind": "calls", "from": "VDN-create", "to": "VDN-policy", "scenario_id": "SC-1"},
+            {"id": "VDE-2", "kind": "calls", "from": "VDN-update", "to": "VDN-policy", "scenario_id": "SC-1"},
+        ],
+    }
+    facts = established_facts(graph, scenario_ids=["SC-1"], edge_ids=[])
+    assert "one runtime binding serves every caller" in facts["bindings"]["VDN-policy"][1]
+    assert "VDN-create, VDN-update" in facts["bindings"]["VDN-policy"][1]
+    # One caller, another scenario, or an owner that is no caller: nothing is stated (packets stay byte-identical).
+    single = {**graph, "edges": graph["edges"][:1]}
+    assert "bindings" not in established_facts(single, scenario_ids=["SC-1"], edge_ids=[])
+    assert "bindings" not in established_facts(graph, scenario_ids=["SC-2"], edge_ids=[])
+    off = {**graph, "nodes": [{**policy, "runtime_binding": {**policy["runtime_binding"], "attachment": {
+        "relation": "called_by", "owner_path": "app.ts", "owner_symbol": "createApp"}}}, *graph["nodes"][1:]]}
+    assert "bindings" not in established_facts(off, scenario_ids=["SC-1"], edge_ids=[])

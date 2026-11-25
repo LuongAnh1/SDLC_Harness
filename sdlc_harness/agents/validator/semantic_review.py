@@ -10,6 +10,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 from ..designer.graph import established_facts
+from ...profiles.planning import DATABASE_SCHEMA_ROOT
 
 
 
@@ -412,7 +413,7 @@ def review_node_view(
         view["surface_contract"] = contract
     if task_type == "scenario_behavior":
         view.pop("runtime_binding", None)
-        owned = _owned_code(binding)
+        owned = _owned_code(binding, node=node)
         if owned:
             view["owned_code"] = owned
         node_scenario = str(view.get("scenario_id") or "")
@@ -432,8 +433,14 @@ def review_node_view(
     return view
 
 
-def _owned_code(binding: dict[str, Any]) -> list[str]:
-    """The code a node's work may change: its runtime binding target and attachment owner."""
+def _owned_code(binding: dict[str, Any], *, node: dict[str, Any] | None = None) -> list[str]:
+    """The code a node's work may change: its runtime binding target and attachment owner.
+
+    A data node whose migration_intent declares a schema change (add/alter) also owns the database schema root:
+    Phase 3 lets every data unit edit the schema and add migrations there and carries that intent into the unit
+    (component_plan migration_impact). Without it the Validator blocked UC4 SC-9's published-only title index as
+    owned by no node (validation design_v5, scenario-sc-9:SEM-001).
+    """
 
     target = _dict_value(binding.get("target"))
     attachment = _dict_value(binding.get("attachment"))
@@ -444,6 +451,16 @@ def _owned_code(binding: dict[str, Any]) -> list[str]:
     ):
         if path:
             owned.append(f"{path}#{symbol}" if symbol else str(path))
+    node = node or {}
+    intent = str(_dict_value(node.get("surface_contract")).get("migration_intent") or "").strip().lower()
+    declares_schema_change = re.match(r"(add|alter)\b", intent) is not None
+    target_path = str(target.get("path") or "")
+    if (
+        str(node.get("surface") or "") == "data"
+        and declares_schema_change
+        and not target_path.startswith(f"{DATABASE_SCHEMA_ROOT}/")
+    ):
+        owned.append(f"{DATABASE_SCHEMA_ROOT}/ (database schema and new migrations)")
     return owned
 
 

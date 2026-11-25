@@ -2439,10 +2439,43 @@ def established_facts(
             scenario.append(
                 f"{scenario_id}: the ordered behavior edges form one continuous path with exactly one terminal edge, last"
             )
+    # A shared callable names one called_by owner. UC4 validation v7 runtime-sc-1 blocked SC-1's draft policy for having
+    # no binding per caller, although the same shape passed for SC-3's and SC-4's policies. Stated only for callables
+    # with several callers, so packets without one stay byte-identical (task cache).
+    bindings: dict[str, list[str]] = {}
+    in_scope = set(scenario_ids)
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        binding = _dict_value(node.get("runtime_binding"))
+        attachment = _dict_value(binding.get("attachment"))
+        if str(node.get("scenario_id") or "") not in in_scope or str(attachment.get("relation") or "") != "called_by":
+            continue
+        callers = sorted(
+            {
+                str(edge.get("from") or "")
+                for edge in edges
+                if str(edge.get("kind") or "") == "calls"
+                and str(edge.get("to") or "") == node_id
+                and str(edge.get("scenario_id") or "") in in_scope
+            }
+            - {""}
+        )
+        if len(callers) < 2 or _called_by_owner_off_caller(
+            node, attachment, nodes_by_id=nodes_by_id, edges=edges, anchors={}
+        ):
+            continue
+        target = _dict_value(binding.get("target"))
+        bindings[node_id] = [
+            f"runtime_binding.attachment called_by {attachment.get('owner_path')}#{attachment.get('owner_symbol') or ''} "
+            "names one of the nodes calling it (the Harness attachment gate passed)",
+            f"its callers {', '.join(callers)} all call the same callable {target.get('path')}#{target.get('symbol') or ''}; "
+            "one runtime binding serves every caller of a shared callable, so no caller needs its own binding",
+        ]
     return {
         "design": design,
         "boundaries": boundaries,
         "scenario": scenario,
+        **({"bindings": bindings} if bindings else {}),
         "not_established": list(ESTABLISHED_NOT_PROVEN),
     }
 
