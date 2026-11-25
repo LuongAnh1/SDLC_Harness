@@ -31,6 +31,7 @@ from sdlc_harness.agents.designer.execution import (
     _active_requirement_slice,
     _construction_graph_view,
     _designer_prompt,
+    _delta_contains_ui_experience,
     _guidance_key,
     _json_structure_hint,
     _parse_designer_tool_action,
@@ -1491,6 +1492,27 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         payload, normalization = _parse_designer_tool_action(json.dumps(self._action(node)), require_runtime_binding=True)
         self.assertIn("visual_contract", payload["arguments"]["delta"]["operations"][0]["node"]["surface_contract"])
         self.assertNotIn("relocated_experience_fields", normalization)
+
+    def test_experience_version_written_on_the_surface_contract_is_relocated(self) -> None:
+        # r7 designer-0017 and design_v26 designer-0002 wrote ui_experience_contract_v2 one level too high.
+        action = self._action(json.loads(json.dumps(self.NODE)))
+        experience = {"component_structure": ["ArticlesViewer renders the comment field."]}
+        action["arguments"]["delta"]["operations"] = [{
+            "op": "update_node", "node_id": "VDN-ui",
+            "changes": {"surface_contract": {"schema_version": "ui_experience_contract_v2", "experience_contract": experience}},
+        }]
+        payload, normalization = _parse_designer_tool_action(json.dumps(action), require_runtime_binding=True)
+        contract = payload["arguments"]["delta"]["operations"][0]["changes"]["surface_contract"]
+        self.assertNotIn("schema_version", contract)
+        self.assertEqual(contract["experience_contract"]["schema_version"], "ui_experience_contract_v2")
+        self.assertEqual(normalization["relocated_experience_fields"], ["VDN-ui.schema_version"])
+        self.assertTrue(_delta_contains_ui_experience(payload["arguments"]))
+        # The surface contract's own version stays where it is.
+        contract["schema_version"] = "design_surface_contract_v1"
+        contract["experience_contract"].pop("schema_version")
+        payload, normalization = _parse_designer_tool_action(json.dumps(payload), require_runtime_binding=True)
+        self.assertNotIn("relocated_experience_fields", normalization)
+        self.assertTrue(_delta_contains_ui_experience(payload["arguments"]))  # merged onto the node's own version
 
     def test_unrepairable_json_names_the_misclosed_array(self) -> None:
         raw = '{"action":"design.propose_delta","arguments":{"delta":{"operations":[{"op":"add_node"}},"completion_claims":[]}}}'

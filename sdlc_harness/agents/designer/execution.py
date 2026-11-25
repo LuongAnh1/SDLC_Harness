@@ -24,6 +24,7 @@ from .graph import (
     EXTERNAL_DEPENDENCY_REF_PREFIXES,
     PLACEABLE_SURFACES,
     GRAPH_VERSION,
+    RUNTIME_ATTACHMENT_RELATIONS,
     RUNTIME_BINDING_VERSION,
     STRUCTURAL_EDGE_KINDS,
     SURFACE_CONTRACT_VERSION,
@@ -1688,6 +1689,12 @@ class DesignerToolLoopExecutor:
                         graph=registry.graph,
                         run_id=run_id,
                     )
+                    _reject_stranded_scenario_nodes(
+                        arguments=arguments,
+                        repair_task=repair_task,
+                        graph=registry.graph,
+                        run_id=run_id,
+                    )
                 if tool_id == "design.propose_delta":
                     _reject_unbound_new_nodes(arguments, run_id=run_id)
                     arguments = _validate_surface_placement_ops(
@@ -1699,6 +1706,21 @@ class DesignerToolLoopExecutor:
                 if tool_id == "design.propose_delta" and active_partition is not None and repair_task is None:
                     _reject_discontinuous_completed_scenario(
                         arguments,
+                        registry=registry,
+                        requirement_model=requirement_model,
+                        landscape=landscape,
+                        run_id=run_id,
+                    )
+                if tool_id == "design.propose_delta" and repair_task is not None:
+                    _reject_unserved_repeat_requests(
+                        arguments,
+                        repair_task=repair_task,
+                        registry=registry,
+                        run_id=run_id,
+                    )
+                    _reject_new_node_binding_findings(
+                        arguments,
+                        repair_task=repair_task,
                         registry=registry,
                         requirement_model=requirement_model,
                         landscape=landscape,
@@ -2237,6 +2259,10 @@ def _relocate_misplaced_experience_fields(payload: dict[str, object]) -> list[st
             if key in contract and key not in experience:
                 experience[key] = contract.pop(key)
                 moved.append(f"{name}.{key}")
+        # The experience version is unambiguous by value (design_v26 designer-0002 wrote it on the surface_contract).
+        if contract.get("schema_version") == UI_EXPERIENCE_CONTRACT_V2 and "schema_version" not in experience:
+            experience["schema_version"] = contract.pop("schema_version")
+            moved.append(f"{name}.schema_version")
     return moved
 
 
@@ -2882,7 +2908,8 @@ def _delta_contains_ui_experience(arguments: object) -> bool:
                 return True
         if str(operation.get("op") or "") == "update_node":
             experience = _dict(_dict(_dict(operation.get("changes")).get("surface_contract")).get("experience_contract"))
-            if experience.get("schema_version") == UI_EXPERIENCE_CONTRACT_V2:
+            # A partial update keeps the node's schema_version (apply_designer_delta merges experience_contract).
+            if experience and experience.get("schema_version", UI_EXPERIENCE_CONTRACT_V2) == UI_EXPERIENCE_CONTRACT_V2:
                 return True
     return False
 
@@ -3956,6 +3983,64 @@ def _other_scenario_targets(
     ]
 
 
+def _other_scenario_projections(
+    *,
+    target_nodes: list[dict[str, object]],
+    findings: list[dict[str, object]],
+    nodes: list[dict[str, object]],
+    scenario_id: str,
+) -> list[dict[str, object]]:
+    """Read-only contracts of other scenarios' nodes a repair must stay compatible with.
+
+    A node counts when it shares a runtime target with a writable node or a finding cites it (subject_ref, design
+    evidence). The repair task listed only the target scenario's nodes, so UC4 H-r1 design_v25 designer-0005 repaired
+    SC-1's articleCreatePrisma without seeing that SC-9's projection of the same adapter already disambiguates the
+    title-derived slug, and left two same-title drafts colliding on the slug primary key.
+    """
+
+    def runtime_target(node: dict[str, object]) -> str:
+        target = _dict(_dict(node.get("runtime_binding")).get("target"))
+        path = str(target.get("path") or "")
+        return f"{path}#{target.get('symbol') or ''}" if path else ""
+
+    targets = {runtime_target(item) for item in target_nodes} - {""}
+    cited = {
+        ref
+        for item in findings
+        for ref in [
+            str(item.get("subject_ref") or ""),
+            *(
+                str(_dict(evidence).get("ref") or "")
+                for evidence in item.get("evidence") or []
+                if str(_dict(evidence).get("source") or "") == "design"
+            ),
+        ]
+    }
+    rows = [
+        item
+        for item in nodes
+        if str(item.get("scenario_id") or "") not in {"", scenario_id}
+        and (runtime_target(item) in targets or str(item.get("id") or "") in cited)
+    ]
+    projections = []
+    for item in sorted(rows, key=lambda node: (str(node.get("scenario_id") or ""), str(node.get("id") or ""))):
+        surface_contract = {
+            key: value for key, value in _dict(item.get("surface_contract")).items() if key != "experience_contract"
+        }
+        projections.append(
+            {
+                "id": item.get("id"),
+                "scenario_id": item.get("scenario_id"),
+                "component_id": item.get("component_id"),
+                "name": item.get("name"),
+                "runtime_target": runtime_target(item),
+                "contract": item.get("contract"),
+                "surface_contract": surface_contract,
+            }
+        )
+    return projections
+
+
 def _main_flow_entry_node(
     *,
     requirement_model: dict[str, object],
@@ -4254,21 +4339,43 @@ def _active_repair_task(
         "allow_add_node": remediation_mode == "partition_rebuild" or bool(component_id and not target_nodes),
     }
     # The edges are sent once, as active_repair_task.edges_in_current_order (the name the prompt rules use).
+    # Each writable node also lists its own scenario edges: UC4 H-r1 design_v23 designer-0021 removed the only two
+    # edges of EditArticle without noticing, because it had to rebuild that fact from the whole edge list.
     graph_context = {
-        "writable_nodes": target_nodes,
+        "writable_nodes": [
+            {
+                **item,
+                "scenario_edges": _node_scenario_edges(
+                    item, edges=[*target_edges, *preserved_edges], nodes_by_id=nodes_by_id
+                ),
+            }
+            for item in target_nodes
+        ],
         "read_only_nodes": read_only_nodes,
         "preserved_edges": preserved_edges,
     }
+    projections = _other_scenario_projections(
+        target_nodes=target_nodes, findings=findings, nodes=nodes, scenario_id=scenario_id
+    )
+    if projections:
+        graph_context["other_scenario_projections"] = projections
     shared_edge_only = (
         remediation_mode == "local_patch"
         and source != "inline_composition"
         and target_id != "global"
         and bool(findings)
         and all(
-            _is_shared_edge_finding(item, nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
+            _is_shared_edge_finding(item, nodes_by_id=nodes_by_id, edges_by_id=edges_by_id, target_id=target_id)
             for item in findings
         )
     )
+    has_repair_steps = any(_dict(item.get("repair_step")) for item in findings)
+    # The Validator's step text reaches the Designer once, as each finding's expected_change. design_v23 0017/0021 got
+    # it five times plus "No blocking finding remains" and read it as the answer key.
+    prompt_findings = [
+        {key: value for key, value in item.items() if key not in {"repair_step", "repair_steps"}}
+        for item in findings
+    ]
     shared_edge_instruction = (
         " Every finding here is on an edge shared with another component of this scenario, and that component gets its "
         "own repair turn. Change this side only if the fix belongs here. If this side needs no change, submit a delta "
@@ -4283,12 +4390,7 @@ def _active_repair_task(
         "remediation_mode": remediation_mode,
         "shared_edge_only": shared_edge_only,
         "partition": task_partition,
-        "findings": findings,
-        "repair_steps": [
-            _dict(item.get("repair_step"))
-            for item in findings
-            if _dict(item.get("repair_step"))
-        ],
+        "findings": prompt_findings,
         "graph_context": graph_context,
         "edges_in_current_order": target_edges,
         "write_scope": write_scope,
@@ -4303,15 +4405,6 @@ def _active_repair_task(
             "profile_roots": component_roots,
             "instruction": "Read any related profile component; only write inside write_scope.",
         },
-        "expected_postconditions": [
-            *[
-                str(item.get("expected_change") or item.get("message") or "").strip()
-                for item in findings
-                if str(item.get("expected_change") or item.get("message") or "").strip()
-            ],
-            "No blocking finding remains for this repair target.",
-            "Unrelated scenarios and component partitions remain unchanged.",
-        ],
         "delta_scaffold": _repair_delta_scaffold(
             graph=graph,
             partition=task_partition,
@@ -4333,14 +4426,14 @@ def _active_repair_task(
                 else "Repair every listed finding for this exact target. "
             )
             + (
-                "The structured repair_steps below are authoritative for this turn; prerequisite targets are already "
-                "complete and later targets are deferred. "
-                if any(_dict(item.get("repair_step")) for item in findings)
+                "Each finding's diagram_ids and expected_change are scoped to this target; prerequisite targets are "
+                "already complete and later targets are deferred. "
+                if has_repair_steps
                 else ""
             )
+            # The read-only, preserve, update_edge/order_edges and no-remove-and-re-add rules are in the prompt's repair
+            # and delta rules already; repeated here they framed a repair as edit-and-reorder only (design_v23 0026/0027).
             + "Read related components when needed, but mutate only write_scope. "
-            "Do not update read_only_nodes. Preserve unrelated partitions. "
-            "Use remove_edge plus ordered add_edge operations when interaction order must change. "
             "A returns edge's boundary_contract.input_mapping repeats its paired calls/reads/writes edge exactly "
             "(consumer field -> provider field); only response_mapping and error_mapping flow provider -> consumer."
             + shared_edge_instruction
@@ -4364,29 +4457,22 @@ def _repair_delta_scaffold(
     nodes_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("nodes"))}
     codes = {str(item.get("code") or item.get("category") or "") for item in findings}
     if codes and codes <= {"boundary_contract_mismatch"}:
-        removals: list[dict[str, object]] = []
-        additions: list[dict[str, object]] = []
+        scaffolded_edge_ids: set[str] = set()
         for finding in findings:
             edge_id = str(finding.get("subject_ref") or "")
             edge = edges_by_id.get(edge_id)
-            if edge is None:
+            if edge is None or edge_id in scaffolded_edge_ids:
                 continue
-            replacement = {
-                key: value
-                for key, value in edge.items()
-                if key not in {"id", "order", "boundary_contract"}
-            }
             provider_id = str(edge.get("from") if str(edge.get("kind") or "") == "returns" else edge.get("to") or "")
-            replacement["boundary_contract"] = _boundary_contract_repair_scaffold(
+            contract = _boundary_contract_repair_scaffold(
                 edge=edge,
                 provider=nodes_by_id.get(provider_id, {}),
                 paired_input_mapping=_dicts(
                     _dict(finding.get("contract_diagnostics")).get("paired_input_mapping")
                 ),
             )
-            removals.append({"op": "remove_edge", "edge_id": edge_id})
-            additions.append({"op": "add_edge", "edge": replacement})
-        operations.extend([*removals, *additions])
+            operations.append({"op": "update_edge", "edge_id": edge_id, "changes": {"boundary_contract": contract}})
+            scaffolded_edge_ids.add(edge_id)
     elif codes and codes <= {"branch_parent_ambiguous"}:
         operations.extend(
             {"op": "remove_edge", "edge_id": edge_id}
@@ -4458,20 +4544,8 @@ def _repair_delta_scaffold(
                 },
             }
         )
-    else:
-        subject_node_ids = [
-            str(item.get("subject_ref") or "")
-            for item in findings
-            if any(str(node.get("id") or "") == str(item.get("subject_ref") or "") for node in target_nodes)
-        ]
-        if subject_node_ids:
-            operations.append(
-                {
-                    "op": "update_node",
-                    "node_id": subject_node_ids[0],
-                    "changes": {"<field named by finding>": "<corrected value>"},
-                }
-            )
+    # Other findings get no placeholder operation: the Designer chooses the nodes and edges the finding needs
+    # (UC4 H-r1 design_v23 designer-0010 debated a node update the edge-only finding did not need).
     return {
         "schema_version": DELTA_VERSION,
         "base_graph_digest": graph.get("artifact_digest"),
@@ -4591,12 +4665,54 @@ def _is_shared_edge_finding(
     *,
     nodes_by_id: dict[str, dict[str, object]],
     edges_by_id: dict[str, dict[str, object]],
+    target_id: str,
 ) -> bool:
+    """True only when the edge's other end really gets its own repair turn for this finding."""
+
     edge = edges_by_id.get(str(finding.get("subject_ref") or ""))
     if edge is None:
         return False
     endpoints = _shared_edge_endpoints(edge, nodes_by_id=nodes_by_id)
-    return len({str(item.get("component_id") or "") for item in endpoints}) > 1
+    if len({str(item.get("component_id") or "") for item in endpoints}) <= 1:
+        return False
+    steps = _dicts(finding.get("repair_steps"))
+    if not steps:
+        # Without structured steps _repair_work_targets gives every endpoint partition its own target.
+        return True
+    # Adjudication may route a cross-component finding to one side only (UC4 H-r1 design_v23 SC-2@api, SC-3@web):
+    # then nobody else repairs it and "that component gets its own repair turn" would be false.
+    other_ends = {
+        f"{item.get('scenario_id') or ''}@{item.get('component_id') or ''}" for item in endpoints
+    } - {target_id}
+    return bool(other_ends & {str(step.get("target_id") or "") for step in steps})
+
+
+def _node_scenario_edges(
+    node: dict[str, object],
+    *,
+    edges: list[dict[str, object]],
+    nodes_by_id: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    """The edges of the repair scenario that start or end at this node, in scenario order."""
+
+    node_id = str(node.get("id") or "")
+    result: list[dict[str, object]] = []
+    for edge in edges:
+        source, target = str(edge.get("from") or ""), str(edge.get("to") or "")
+        if node_id not in {source, target}:
+            continue
+        peer_id = target if source == node_id else source
+        result.append(
+            {
+                "edge_id": str(edge.get("id") or ""),
+                "order": edge.get("order"),
+                "kind": str(edge.get("kind") or ""),
+                "direction": "outgoing" if source == node_id else "incoming",
+                "peer_id": peer_id,
+                "peer_name": str(nodes_by_id.get(peer_id, {}).get("name") or ""),
+            }
+        )
+    return sorted(result, key=lambda item: item["order"] if isinstance(item["order"], int) else float("inf"))
 
 
 def _repair_work_targets(
@@ -5184,12 +5300,19 @@ def _validate_repair_delta_scope(
                     run_id=run_id,
                 )
             continue
-        if op == "remove_edge":
+        if op in {"update_edge", "remove_edge"}:
+            action = "update" if op == "update_edge" else "remove"
             edge_id = str(operation.get("edge_id") or "")
             if edge_id not in removable_edges:
                 raise HarnessError(
                     "designer_delta_invalid",
-                    f"Repair cannot remove edge outside write_scope: {edge_id}.",
+                    f"Repair cannot {action} edge outside write_scope: {edge_id}.",
+                    run_id=run_id,
+                )
+            if op == "update_edge" and restricted_pairs and _dict(operation.get("changes")).keys() - {"boundary_contract"}:
+                raise HarnessError(
+                    "designer_delta_invalid",
+                    "Boundary repair may only change boundary_contract with update_edge.",
                     run_id=run_id,
                 )
             continue
@@ -5231,10 +5354,73 @@ def _validate_repair_delta_scope(
             if restricted_pairs and identity not in restricted_pairs:
                 raise HarnessError(
                     "designer_delta_invalid",
-                    "Boundary repair may only replace a listed target edge; copy its from, to, kind, and label "
-                    "exactly from active_repair_task.delta_scaffold and do not add unrelated edges.",
+                    "Boundary repair may only edit a listed target edge's boundary_contract. Use the update_edge "
+                    "operation from active_repair_task.delta_scaffold. A remove_edge + add_edge replacement must "
+                    "preserve the listed edge's from, to, kind, and label.",
                     run_id=run_id,
                 )
+
+
+def _reject_stranded_scenario_nodes(
+    *,
+    arguments: object,
+    repair_task: dict[str, object],
+    graph: dict[str, object],
+    run_id: str,
+) -> None:
+    """A repair may not leave a node that takes part in its scenario's messages with no message left there.
+
+    UC4 H-r1 design_v23 designer-0021 removed EditArticle's only two SC-3 edges on the Validator's hint; every gate
+    passed. Only calls/reads/writes/returns count, and only a node that had one before the delta, so nodes that never
+    had messages (a schema node with only depends_on) are not affected. A Harness-built exact scaffold is exempt: the
+    runtime_boundary_unreachable removals leave the surface for the next construction partition on purpose.
+    """
+
+    delta = _dict(_dict(arguments).get("delta"))
+    scenario_id = str(_dict(repair_task.get("write_scope")).get("scenario_id") or "")
+    if not scenario_id or delta == repair_task.get("delta_scaffold"):
+        return
+    operations = _dicts(delta.get("operations"))
+    removed_edges = {
+        str(item.get("edge_id") or "") for item in operations if str(item.get("op") or "") == "remove_edge"
+    }
+    removed_nodes = {
+        str(item.get("node_id") or "") for item in operations if str(item.get("op") or "") == "remove_node"
+    }
+
+    def is_message(edge: dict[str, object], default_scenario: str = "") -> bool:
+        return (
+            str(edge.get("scenario_id") or default_scenario) == scenario_id
+            and str(edge.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
+        )
+
+    lost: dict[str, list[str]] = {}
+    kept: set[str] = set()
+    for edge in _dicts(graph.get("edges")):
+        if not is_message(edge):
+            continue
+        ends = {str(edge.get("from") or ""), str(edge.get("to") or "")}
+        if str(edge.get("id") or "") in removed_edges or ends & removed_nodes:
+            for node_id in ends:
+                lost.setdefault(node_id, []).append(str(edge.get("id") or ""))
+        else:
+            kept |= ends
+    delta_scenario = str(_dict(delta.get("partition")).get("scenario_id") or "")
+    for item in operations:
+        edge = _dict(item.get("edge"))
+        if str(item.get("op") or "") == "add_edge" and is_message(edge, delta_scenario):
+            kept |= {str(edge.get("from") or ""), str(edge.get("to") or "")}
+    names = {str(item.get("id") or ""): str(item.get("name") or "") for item in _dicts(graph.get("nodes"))}
+    stranded = [node_id for node_id in lost if node_id and node_id not in kept and node_id not in removed_nodes]
+    if stranded:
+        details = "; ".join(f"{node_id} ({names.get(node_id) or '?'}) loses {lost[node_id]}" for node_id in stranded)
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Repair delta leaves {scenario_id} node(s) with no calls/reads/writes/returns edge in the scenario: "
+            f"{details}. Give each node the {scenario_id} messages it really sends or receives, or remove_node it "
+            "when it no longer takes part in the scenario.",
+            run_id=run_id,
+        )
 
 
 def _blocking_unresolved_items(delta: dict[str, object]) -> list[dict[str, object]]:
@@ -5916,27 +6102,14 @@ def _reject_discontinuous_completed_scenario(
     if following is not None and str(_dict(following.get("partition")).get("scenario_id") or "") == scenario_id:
         return
     nodes = _dicts(candidate.get("nodes"))
-    findings = [
-        item
-        for item in _sequence_behavior_findings(nodes=nodes, edges=_dicts(candidate.get("edges")))
-        if str(item.get("subject_ref") or "") == scenario_id
-    ]
-    if not findings:
+    sequence = _sequence_behavior_findings(nodes=nodes, edges=_dicts(candidate.get("edges")))
+    findings = [item for item in sequence if str(item.get("subject_ref") or "") == scenario_id]
+    unserved = _scenario_unserved_requests(sequence, scenario_id=scenario_id)
+    if not findings and not unserved:
         return
-    written = _delta_written_names(registry.graph, candidate, temp_refs)
-    existing_edges = {str(item.get("id") or "") for item in _dicts(registry.graph.get("edges"))}
-    node_names = {str(item.get("id") or ""): str(item.get("name") or "")[:48] for item in nodes}
-
-    def participant(node_id: str) -> str:
-        return written.get(node_id) or f"{node_id} ({node_names.get(node_id, '')})"
-
-    lines = [
-        f"{item.get('order')}. {item.get('id') if str(item.get('id') or '') in existing_edges else 'new edge'} "
-        f"{item.get('kind')}: {participant(str(item.get('from') or ''))} -> {participant(str(item.get('to') or ''))}"
-        + (" [terminal]" if item.get("terminal") else "")
-        for item in sorted(_dicts(candidate.get("edges")), key=lambda edge: int(edge.get("order") or 0))
-        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
-    ]
+    lines = _scenario_order_lines(registry.graph, candidate, temp_refs, scenario_id=scenario_id)
+    if not findings:
+        _raise_unserved_requests(unserved, lines=lines, scenario_id=scenario_id, run_id=run_id)
     raise HarnessError(
         "designer_delta_invalid",
         f"This delta completes scenario {scenario_id}, but its ordered behavior edges do not form one continuous path: "
@@ -5947,9 +6120,168 @@ def _reject_discontinuous_completed_scenario(
         + f". Resubmit the delta with a temp_ref on each new edge and one order_edges operation listing every behavior "
         f"edge of {scenario_id} (VDE-* ids of existing edges, temp_refs of new ones) in behavioral order, with terminal "
         "naming the last one. Where the user moves from one screen to the next, the path needs a calls edge from the "
-        "ui node the user leaves to the ui node the user opens.",
+        "ui node the user leaves to the ui node the user opens."
+        + "".join(f" Also: {item.get('message')} {item.get('expected_change')}" for item in unserved),
         run_id=run_id,
     )
+
+
+def _scenario_unserved_requests(sequence: list[dict[str, object]], *, scenario_id: str) -> list[dict[str, object]]:
+    return [
+        item
+        for item in sequence
+        if str(item.get("code") or "") == "sequence_request_unserved"
+        and str(_dict(item.get("partition")).get("scenario_id") or "") == scenario_id
+    ]
+
+
+def _scenario_order_lines(
+    graph: dict[str, object],
+    candidate: dict[str, object],
+    temp_refs: dict[str, str],
+    *,
+    scenario_id: str,
+) -> list[str]:
+    written = _delta_written_names(graph, candidate, temp_refs)
+    existing_edges = {str(item.get("id") or "") for item in _dicts(graph.get("edges"))}
+    node_names = {str(item.get("id") or ""): str(item.get("name") or "")[:48] for item in _dicts(candidate.get("nodes"))}
+
+    def participant(node_id: str) -> str:
+        return written.get(node_id) or f"{node_id} ({node_names.get(node_id, '')})"
+
+    return [
+        f"{item.get('order')}. {item.get('id') if str(item.get('id') or '') in existing_edges else 'new edge'} "
+        f"{item.get('kind')}: {participant(str(item.get('from') or ''))} -> {participant(str(item.get('to') or ''))}"
+        + (" [terminal]" if item.get("terminal") else "")
+        for item in sorted(_dicts(candidate.get("edges")), key=lambda edge: int(edge.get("order") or 0))
+        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
+    ]
+
+
+def _raise_unserved_requests(
+    unserved: list[dict[str, object]], *, lines: list[str], scenario_id: str, run_id: str
+) -> None:
+    raise HarnessError(
+        "designer_delta_invalid",
+        " ".join(str(item.get("message") or "") for item in unserved)
+        + " "
+        + str(unserved[0].get("expected_change") or "")
+        + f" Current order: {'; '.join(lines)}. Resubmit with a temp_ref on each new edge and one order_edges operation "
+        f"listing every behavior edge of {scenario_id} in behavioral order, with terminal naming the last one.",
+        run_id=run_id,
+    )
+
+
+def _reject_unserved_repeat_requests(
+    arguments: object,
+    *,
+    repair_task: dict[str, object],
+    registry: DesignerToolRegistry,
+    run_id: str,
+) -> None:
+    """A repair may not leave a writable node answering one request of its scenario with no provider messages while it
+    serves another request with them (sequence_request_unserved; UC4 H-r1 design_v23 designer-0026 SC-2@api).
+
+    Only nodes this target may change count, so a step of a multi-target repair is not blocked by another component's
+    side. Harness-built exact scaffolds and boundary-contract-only repairs (no add_edge allowed) are exempt.
+    """
+
+    delta = _dict(_dict(arguments).get("delta"))
+    scope = _dict(repair_task.get("write_scope"))
+    scenario_id = str(scope.get("scenario_id") or "")
+    if not scenario_id or delta == repair_task.get("delta_scaffold") or _dicts(scope.get("restricted_edge_pairs")):
+        return
+    candidate, temp_refs = apply_designer_delta(
+        registry.graph,
+        delta,
+        valid_evidence_refs=registry.valid_evidence_refs,
+        valid_guidance_refs=registry.valid_guidance_refs,
+    )
+    writable = set(_strings(scope.get("writable_node_ids")))
+    unserved = [
+        item
+        for item in _scenario_unserved_requests(
+            _sequence_behavior_findings(nodes=_dicts(candidate.get("nodes")), edges=_dicts(candidate.get("edges"))),
+            scenario_id=scenario_id,
+        )
+        if str(item.get("subject_ref") or "").split(":", 1)[-1] in writable
+    ]
+    if unserved:
+        _raise_unserved_requests(
+            unserved,
+            lines=_scenario_order_lines(registry.graph, candidate, temp_refs, scenario_id=scenario_id),
+            scenario_id=scenario_id,
+            run_id=run_id,
+        )
+
+
+# Node-local binding facts: the delta that adds or updates the node fully decides them, so a repair may not introduce
+# one and leave it for the next validation round.
+NODE_BINDING_FINDING_CODES = frozenset(
+    {"runtime_binding_missing", "runtime_attachment_missing", "component_ownership_invalid"}
+)
+
+
+def _reject_new_node_binding_findings(
+    arguments: object,
+    *,
+    repair_task: dict[str, object],
+    registry: DesignerToolRegistry,
+    requirement_model: dict[str, object],
+    landscape: dict[str, object],
+    run_id: str,
+) -> None:
+    """A repair may not add or update a node into a binding defect the graph did not have (UC4 H-r1 design_v23
+    designer-0042 attached a new persistence_adapter called_by its caller; post_delta_findings saw it, yet a
+    Validator-feedback repair marks its target completed, so the defect waited for the next validation round)."""
+
+    delta = _dict(_dict(arguments).get("delta"))
+    if delta == repair_task.get("delta_scaffold"):
+        return
+    candidate, temp_refs = apply_designer_delta(
+        registry.graph,
+        delta,
+        valid_evidence_refs=registry.valid_evidence_refs,
+        valid_guidance_refs=registry.valid_guidance_refs,
+    )
+    touched = {
+        temp_refs.get(str(_dict(operation.get("node")).get("temp_ref") or ""), "")
+        if operation.get("op") == "add_node"
+        else str(operation.get("node_id") or "")
+        for operation in _dicts(delta.get("operations"))
+        if operation.get("op") in {"add_node", "update_node"}
+    } - {""}
+    if not touched:
+        return
+
+    def binding_findings(graph: dict[str, object]) -> list[dict[str, object]]:
+        return [
+            item
+            for item in _composition_repair_findings(graph, requirement_model=requirement_model, landscape=landscape)
+            if str(item.get("code") or "") in NODE_BINDING_FINDING_CODES
+        ]
+
+    before = {(str(item.get("id") or ""), str(item.get("message") or "")) for item in binding_findings(registry.graph)}
+    new = [
+        item
+        for item in binding_findings(candidate)
+        if str(item.get("subject_ref") or "") in touched
+        and (str(item.get("id") or ""), str(item.get("message") or "")) not in before
+    ]
+    if not new:
+        return
+    written = _delta_written_names(registry.graph, candidate, temp_refs)
+    nodes_by_id = {str(item.get("id") or ""): item for item in _dicts(candidate.get("nodes"))}
+    parts = [
+        f"{written.get(str(item.get('subject_ref') or '')) or item.get('subject_ref')}: {item.get('message')} "
+        f"{item.get('expected_change')}"
+        for item in new
+    ]
+    for node_id in dict.fromkeys(str(item.get("subject_ref") or "") for item in new):
+        kind = str(_dict(_dict(nodes_by_id.get(node_id)).get("runtime_binding")).get("runtime_kind") or "")
+        allowed = ", ".join(sorted(RUNTIME_ATTACHMENT_RELATIONS.get(kind, frozenset()))) or "none"
+        parts.append(f"Allowed attachment relations for {kind or '<missing runtime_kind>'}: {allowed}.")
+    raise HarnessError("designer_delta_invalid", " ".join(parts), run_id=run_id)
 
 
 def _requested_read_paths(tool_id: str, arguments: object) -> list[str]:
@@ -6105,5 +6437,5 @@ def _delta_invalid_message(
     return (
         "Design edges already exist: "
         + ", ".join(duplicates)
-        + ". Remove every listed exact edge_id before re-adding those edges, in remove-before-add order."
+        + ". Omit the duplicate add_edge operations. Use update_edge to edit existing edges or order_edges to move them."
     )

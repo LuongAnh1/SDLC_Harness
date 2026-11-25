@@ -220,6 +220,7 @@ OPERATIONS = frozenset(
         "update_node",
         "remove_node",
         "add_edge",
+        "update_edge",
         "remove_edge",
         "order_edges",
         "set_partition_coverage",
@@ -557,7 +558,82 @@ def _sequence_behavior_findings(
                 )
             )
             break
+        findings.extend(_unserved_repeat_request_findings(scenario_id, behavior, nodes=nodes))
 
+    return findings
+
+
+def _unserved_repeat_request_findings(
+    scenario_id: str,
+    behavior: list[dict[str, object]],
+    *,
+    nodes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """A node that serves one main-path request with messages to its providers must not answer another empty-handed.
+
+    The ordered edges are one linear path, so each request has its own call/return pairs. UC4 H-r1 design_v23 SC-2: Home
+    and ProfilePage both call articlesList; the only policy/read pairs sat in one request, so the other request returned
+    with no draft filter on its path, and the Designer believed a second pair was impossible. Branch edges are skipped:
+    a refusal branch may answer before any provider runs.
+    """
+
+    nodes_by_id = {str(item.get("id") or ""): item for item in nodes}
+    spans: dict[str, list[tuple[dict[str, object], dict[str, object], list[dict[str, object]]]]] = {}
+    for index, call in enumerate(behavior):
+        if str(call.get("kind") or "") != "calls" or call.get("branch_group"):
+            continue
+        provider, caller = str(call.get("to") or ""), str(call.get("from") or "")
+        end = next(
+            (
+                position
+                for position in range(index + 1, len(behavior))
+                if str(behavior[position].get("kind") or "") == "returns"
+                and str(behavior[position].get("from") or "") == provider
+                and str(behavior[position].get("to") or "") == caller
+                and not behavior[position].get("branch_group")
+            ),
+            None,
+        )
+        if end is None:
+            continue
+        outbound = [
+            edge
+            for edge in behavior[index + 1:end]
+            if str(edge.get("from") or "") == provider and str(edge.get("kind") or "") in {"calls", "reads", "writes"}
+        ]
+        spans.setdefault(provider, []).append((call, behavior[end], outbound))
+
+    def name(node_id: str) -> str:
+        return f"{node_id} ({str(nodes_by_id.get(node_id, {}).get('name') or '')[:60]})"
+
+    findings: list[dict[str, object]] = []
+    for provider, items in spans.items():
+        served = [item for item in items if item[2]]
+        unserved = [item for item in items if not item[2]]
+        if not served or not unserved:
+            continue
+        call, _, outbound = served[0]
+        missing = "; ".join(
+            f"the request {item[0].get('id')} at order {item[0].get('order')} from "
+            f"{name(str(item[0].get('from') or ''))} is answered by {item[1].get('id')} at order {item[1].get('order')}"
+            for item in unserved
+        )
+        findings.append(
+            _composition_finding(
+                "sequence_request_unserved",
+                f"{scenario_id}:{provider}",
+                f"Scenario {scenario_id}: {name(provider)} answers a request without any message of its own: {missing}, "
+                f"while it serves the request {call.get('id')} at order {call.get('order')} with "
+                + ", ".join(f"{edge.get('kind')} {edge.get('id')} to {name(str(edge.get('to') or ''))}" for edge in outbound)
+                + ".",
+                "Ordered edges form one linear path, so each request needs its own call/return pairs to the providers it "
+                "uses, placed between that request and its return. Add new edges between the same nodes for the other "
+                "request (an edge between the same endpoints is allowed when its label differs, so name that request in "
+                "the label), with boundary_contract where the edge crosses components.",
+                node=nodes_by_id.get(provider),
+                scenario_id=scenario_id,
+            )
+        )
     return findings
 
 
@@ -949,6 +1025,21 @@ def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run
         raise invalid("repo_evidence_refs needs the ui_repo_context evidence used for these decisions")
 
 
+def _merge_surface_contract(old: object, new: object) -> object:
+    """update_node keeps the surface_contract and experience_contract fields the Designer leaves out.
+
+    design_v26 designer-0002 retyped a whole UI contract to change one sentence and dropped states, transitions and
+    outcomes on the way."""
+
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return new
+    merged = {**old, **new}
+    old_experience, new_experience = old.get("experience_contract"), new.get("experience_contract")
+    if isinstance(old_experience, dict) and isinstance(new_experience, dict):
+        merged["experience_contract"] = {**old_experience, **new_experience}
+    return merged
+
+
 def _validate_delta_guidance_refs(
     surface_contract: object,
     *,
@@ -1099,6 +1190,9 @@ def _apply_designer_delta(
         raise HarnessError("designer_delta_invalid", "A delta may contain at most one order_edges operation.", run_id=run_id)
     remove_ops = [item for item in operations if str(item.get("op") or "") == "remove_edge"]
     add_ops = [item for item in operations if str(item.get("op") or "") == "add_edge"]
+    removed_edge_ids = {str(item.get("edge_id") or "") for item in remove_ops}
+    updated_edge_ids: set[str] = set()
+    updated_contract_edge_ids: set[str] = set()
     replacement_order: int | None = None
     if len(remove_ops) == len(add_ops) == 1:
         removed = next(
@@ -1138,6 +1232,17 @@ def _apply_designer_delta(
                 operation = {**operation, "edge": {**edge, "order": replacement_order}}
         if op == "order_edges":
             continue  # applied below, once every add_edge and remove_edge of the delta exists
+        if op == "update_edge":
+            edge_id = str(operation.get("edge_id") or "")
+            if edge_id in updated_edge_ids or edge_id in removed_edge_ids:
+                raise HarnessError(
+                    "designer_delta_invalid",
+                    f"A delta may update edge {edge_id} at most once and cannot also remove it.",
+                    run_id=run_id,
+                )
+            updated_edge_ids.add(edge_id)
+            if "boundary_contract" in _dict_value(operation.get("changes")):
+                updated_contract_edge_ids.add(edge_id)
         _apply_operation(
             candidate,
             operation,
@@ -1149,6 +1254,18 @@ def _apply_designer_delta(
             run_id=run_id,
             edge_refs=edge_refs,
         )
+    if updated_edge_ids:
+        remaining_edge_ids = {
+            str(item.get("id") or "")
+            for item in _dict_items(candidate.get("edges"), code="designer_delta_invalid", run_id=run_id)
+        }
+        removed_updates = sorted(updated_edge_ids - remaining_edge_ids)
+        if removed_updates:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"A delta cannot also remove edges it updates: {removed_updates}.",
+                run_id=run_id,
+            )
     if order_ops:
         _apply_edge_order(candidate, order_ops[0], partition=partition, edge_refs=edge_refs, run_id=run_id)
     _resolve_attachment_temp_refs(candidate, temp_refs, before=graph, run_id=run_id)
@@ -1160,7 +1277,7 @@ def _apply_designer_delta(
         run_id=run_id,
     )
     _materialize_composition_forwarding(candidate)
-    _copy_paired_input_mappings(candidate, before=graph)
+    _copy_paired_input_mappings(candidate, before=graph, updated_contract_edge_ids=updated_contract_edge_ids)
     candidate["revision"] = int(graph.get("revision") or 0) + 1
     candidate["nodes"] = sorted(_dict_items(candidate.get("nodes"), code="designer_delta_invalid", run_id=run_id), key=lambda item: str(item.get("id") or ""))
     candidate["edges"] = sorted(
@@ -2330,14 +2447,16 @@ def established_facts(
     }
 
 
-def _copy_paired_input_mappings(candidate: dict[str, object], *, before: dict[str, object]) -> None:
-    """Give each new returns edge the input_mapping of its paired request edge.
+def _copy_paired_input_mappings(
+    candidate: dict[str, object], *, before: dict[str, object], updated_contract_edge_ids: set[str] | None = None
+) -> None:
+    """Copy the paired request's input_mapping onto new returns edges and explicitly replaced returns contracts.
 
-    The boundary gate requires the two to be identical, so the copy is mechanical; Conduit UC4 H-r1 lost two
-    Designer deltas to "copy input_mapping from paired calls edge". Existing edges are never changed.
+    The boundary gate requires the two to be identical, but copying onto other existing edges would hide a mismatch.
     """
 
     existing = {str(item.get("id") or "") for item in before.get("edges") or [] if isinstance(item, dict)}
+    existing.difference_update(updated_contract_edge_ids or ())
     edges = [item for item in candidate.get("edges") or [] if isinstance(item, dict)]
     for edge in edges:
         contract = edge.get("boundary_contract")
@@ -2698,6 +2817,11 @@ def _apply_operation(
             raise HarnessError("designer_delta_invalid", f"Design node does not exist: {node_id}", run_id=run_id)
         if _partition_key(target_node, run_id=run_id) != partition_key:
             raise HarnessError("designer_delta_invalid", "Designer delta cannot update a node outside its partition.", run_id=run_id)
+        if "surface_contract" in changes:
+            changes = {
+                **changes,
+                "surface_contract": _merge_surface_contract(target_node.get("surface_contract"), changes["surface_contract"]),
+            }
         graph["nodes"] = [{**item, **changes} if str(item.get("id") or "") == node_id else item for item in nodes]
         return
     if op == "remove_node":
@@ -2770,7 +2894,8 @@ def _apply_operation(
         if any(str(item.get("id") or "") == edge_id for item in edges):
             raise HarnessError(
                 "designer_delta_invalid",
-                f"Design edge already exists: {edge_id}. Remove this exact edge_id before re-adding it, or omit the duplicate add_edge.",
+                f"Design edge already exists: {edge_id}. Omit the duplicate add_edge. "
+                "Use update_edge to edit the existing edge or order_edges to move it.",
                 run_id=run_id,
             )
         if edge_ref and edge_refs is not None:
@@ -2792,23 +2917,49 @@ def _apply_operation(
             },
         ]
         return
-    if op == "remove_edge":
+    if op in {"update_edge", "remove_edge"}:
+        action = "update" if op == "update_edge" else "remove"
         edge_id = str(operation.get("edge_id") or "")
         edges = _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id)
         target_edge = next((item for item in edges if str(item.get("id") or "") == edge_id), None)
         if target_edge is None:
             raise HarnessError(
                 "designer_delta_invalid",
-                "remove_edge requires edge_id for an existing Design edge.",
+                f"{op} requires edge_id for an existing Design edge.",
                 run_id=run_id,
             )
         if str(target_edge.get("scenario_id") or "") != str(partition.get("scenario_id") or ""):
             raise HarnessError(
                 "designer_delta_invalid",
-                "Designer delta cannot remove an edge outside its scenario partition.",
+                f"Designer delta cannot {action} an edge outside its scenario partition.",
                 run_id=run_id,
             )
-        graph["edges"] = [item for item in edges if str(item.get("id") or "") != edge_id]
+        if op == "remove_edge":
+            graph["edges"] = [item for item in edges if str(item.get("id") or "") != edge_id]
+            return
+        changes = operation.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            raise HarnessError("designer_delta_invalid", "update_edge.changes must be a non-empty object.", run_id=run_id)
+        unknown_keys = sorted(changes.keys() - {"boundary_contract", "label"}, key=str)
+        if unknown_keys:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"update_edge.changes only accepts boundary_contract and label; remove {unknown_keys}. "
+                "Use order_edges to move an edge or change the terminal marker, and remove_edge + add_edge "
+                "to change endpoints, kind or branch.",
+                run_id=run_id,
+            )
+        if "label" in changes:
+            label = changes["label"]
+            if not isinstance(label, str) or not label.strip():
+                raise HarnessError("designer_delta_invalid", "update_edge.changes.label must be a non-empty string.", run_id=run_id)
+            target_edge["label"] = label.strip()
+        if "boundary_contract" in changes:
+            contract = changes["boundary_contract"]
+            if not isinstance(contract, dict):
+                raise HarnessError("designer_delta_invalid", "update_edge.changes.boundary_contract must be an object.", run_id=run_id)
+            target_edge["boundary_contract"] = json.loads(json.dumps(contract))
+        graph["edges"] = edges
         return
     if op == "place_surface":
         _apply_surface_placement(
