@@ -28,6 +28,12 @@ class CheckpointApprovalWorkflow:
         if status in APPROVAL_REFUSALS:
             error_code, message = APPROVAL_REFUSALS[status]
             raise HarnessError(error_code, message, run_id=run_id)
+        if status == "waiting_requirement_approval" and state.get("requirement_opencode_flow"):
+            raise HarnessError(
+                "requirement_hoc_design_unavailable",
+                "This OpenCode run has a Markdown requirement with a trace; its Design phase is not built yet.",
+                run_id=run_id,
+            )
         approval = approval_for(status)
         if approval is None:
             raise HarnessError(

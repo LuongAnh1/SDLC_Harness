@@ -371,6 +371,20 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_LLM_BASE_URL", "Base URL", "string", "https://api.deepseek.com", "URL gốc, không gồm /chat/completions."),
             _field("SDLC_LLM_MODEL", "Model", "string", "deepseek-flash", "Tên model gửi trong request."),
             _field(
+                "SDLC_PHASE1_OPENCODE_MODEL",
+                "Phase 1 OpenCode model",
+                "string",
+                "deepseek/deepseek-flash#high",
+                "Model đã cấu hình trong OpenCode v2, dạng provider/model#variant.",
+            ),
+            _field(
+                "SDLC_PHASE1_OPENCODE_REVIEWER_MODEL",
+                "Phase 1 OpenCode Reviewer model",
+                "string",
+                "deepseek/deepseek-v4-pro#high",
+                "Model của Reviewer chấm bản Requirement Markdown, dạng provider/model#variant.",
+            ),
+            _field(
                 "SDLC_LLM_THINKING_MODE",
                 "Thinking mode",
                 "enum",

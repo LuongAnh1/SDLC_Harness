@@ -7,6 +7,8 @@ render các projection và lưu checkpoint để Niko có thể kiểm soát t�
 from __future__ import annotations
 
 from dataclasses import replace
+import json
+from pathlib import Path
 from typing import Any
 
 from ..artifacts.writers import write_use_case_packet
@@ -27,6 +29,7 @@ from ..profiles import CURRENT_CONTRACT_PINS, build_profile_snapshot, profile_st
 from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_entry
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
+from ..repo_context import CodeGraphContextProvider
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..agents.developer import (
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
@@ -85,7 +88,18 @@ from ..agents.designer import (
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
+from ..workspaces.manager import RunWorkspaceManager
 from .repo_discovery import REPO_DISCOVERY_CONTRACT_STATE_KEY, REPO_DISCOVERY_CONTRACT_VERSION
+from .requirement_markdown_flow import (
+    ANSWERS_RECORD,
+    FLOW_RECORD,
+    MARKDOWN_FLOW_VERSION,
+    MarkdownQuestionsPending,
+    MarkdownRequirementResult,
+    run_markdown_requirement,
+)
+
+TRACE_ARTIFACT = "requirement_trace_v1_r1.json"
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
@@ -105,6 +119,7 @@ ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS = [
     "cancel_run",
 ]
 ALLOWED_REQUIREMENT_DRAFTING_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_MARKDOWN_QUESTION_ACTIONS = ["answer_markdown_questions", "get_status", "cancel_run"]
 INTERPRETATION_REPAIR_LIMIT = 2
 ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS = [
     "clarify_more",
@@ -140,6 +155,20 @@ class PhaseOneWorkflow:
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
         self.coverage_reviewer = RequirementCoverageReviewer(self.llm_client)
         self.interpretation_repairer = RequirementInterpretationRepairer(self.llm_client)
+
+    def _opencode_model(self, state: dict[str, Any], *, run_id: str) -> str | None:
+        """The run's OpenCode model; a run pinned to a retired OpenCode Phase 1 flow cannot continue."""
+
+        model = state.get("requirement_opencode_model")
+        if not model:
+            return None
+        if state.get("requirement_opencode_flow") != MARKDOWN_FLOW_VERSION:
+            raise HarnessError(
+                "requirement_session_not_resumable",
+                "This run uses a retired OpenCode Phase 1 flow; start a new run.",
+                run_id=run_id,
+            )
+        return str(model)
 
     def _interpretation_repairer_for(self, *, run_id: str, revision: int) -> RequirementInterpretationRepairer:
         if not bool(self.requirement_step_review.get("enabled")):
@@ -308,6 +337,10 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
+        if self.settings.llm_mode == "deepseek":
+            state["requirement_opencode_flow"] = MARKDOWN_FLOW_VERSION
+            state["requirement_opencode_model"] = self.settings.phase1_opencode_model
+            state["requirement_opencode_reviewer_model"] = self.settings.phase1_opencode_reviewer_model
         state.update(CURRENT_CONTRACT_PINS)
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         if self.settings.project_profile_id:
@@ -402,55 +435,81 @@ class PhaseOneWorkflow:
                 "source_artifact_ref": source_snapshot_path,
                 "source_catalog": source_catalog,
             }
-            if resume:
-                refinement_kwargs["resume"] = True
-            refinement = self.refiner_v2.refine(source, **refinement_kwargs)
-            policy_validation = normalize_and_validate_requirement_model_v2(
-                refinement.model,
-                source_catalog.source_text_by_id,
-                clarification_policy_version=self._clarification_policy_version(state),
-            )
-            refinement = replace(
-                refinement,
-                model=policy_validation.model,
-                final_report=policy_validation.report,
-            )
-            coverage = self._coverage_reviewer_for(
-                run_id=run_id,
-                revision=refinement.model.revision,
-            ).review(
-                model=refinement.model,
-                source_text_by_id=source_catalog.source_text_by_id,
-                validation_report=refinement.final_report,
-                semantic=True,
-                question_limit=5,
-            )
-            refinement = replace(
-                refinement,
-                model=coverage.model,
-                final_report=coverage.validation_report,
-            )
-            policy_validation = normalize_and_validate_requirement_model_v2(
-                refinement.model,
-                source_catalog.source_text_by_id,
-                clarification_policy_version=self._clarification_policy_version(state),
-            )
-            refinement = replace(
-                refinement,
-                model=policy_validation.model,
-                final_report=policy_validation.report,
-            )
-            refinement, coverage, interpretation_repairs = self._repair_interpretations(
-                run_id=run_id,
-                state=state,
-                refinement=refinement,
-                coverage=coverage,
-                source_text_by_id=source_catalog.source_text_by_id,
-            )
+            opencode_model = self._opencode_model(state, run_id=run_id)
+            if opencode_model:
+                workspace = RunWorkspaceManager(self.settings).create_for_run(run_id)
+                worktree = Path(workspace.worktree_path)
+                if not (worktree / ".codegraph").exists():
+                    # OpenCode explores the repository through CodeGraph from the first Requirement turn.
+                    CodeGraphContextProvider(fake_mode=self.settings.llm_mode == "fake").prepare_index(worktree)
+                state = self.store.read_state(run_id)
+                existing_artifacts = self._normalized_artifacts(state)
+                markdown = run_markdown_requirement(
+                    settings=self.settings,
+                    store=self.store,
+                    run_id=run_id,
+                    model=opencode_model,
+                    reviewer_model=str(
+                        state.get("requirement_opencode_reviewer_model") or self.settings.phase1_opencode_reviewer_model
+                    ),
+                    source=source,
+                    catalog=source_catalog,
+                    step_review=self.requirement_step_review,
+                )
+                return self._finish_markdown_requirement(
+                    state=state, source=source, markdown=markdown, artifacts=existing_artifacts, resume=resume,
+                )
+            else:
+                if resume:
+                    refinement_kwargs["resume"] = True
+                refinement = self.refiner_v2.refine(source, **refinement_kwargs)
+                policy_validation = normalize_and_validate_requirement_model_v2(
+                    refinement.model,
+                    source_catalog.source_text_by_id,
+                    clarification_policy_version=self._clarification_policy_version(state),
+                )
+                refinement = replace(
+                    refinement,
+                    model=policy_validation.model,
+                    final_report=policy_validation.report,
+                )
+                coverage = self._coverage_reviewer_for(
+                    run_id=run_id,
+                    revision=refinement.model.revision,
+                ).review(
+                    model=refinement.model,
+                    source_text_by_id=source_catalog.source_text_by_id,
+                    validation_report=refinement.final_report,
+                    semantic=True,
+                    question_limit=5,
+                )
+                refinement = replace(
+                    refinement,
+                    model=coverage.model,
+                    final_report=coverage.validation_report,
+                )
+                policy_validation = normalize_and_validate_requirement_model_v2(
+                    refinement.model,
+                    source_catalog.source_text_by_id,
+                    clarification_policy_version=self._clarification_policy_version(state),
+                )
+                refinement = replace(
+                    refinement,
+                    model=policy_validation.model,
+                    final_report=policy_validation.report,
+                )
+                refinement, coverage, interpretation_repairs = self._repair_interpretations(
+                    run_id=run_id,
+                    state=state,
+                    refinement=refinement,
+                    coverage=coverage,
+                    source_text_by_id=source_catalog.source_text_by_id,
+                )
+                coverage_analysis = coverage.analysis
             quality_checklist = build_requirement_quality_checklist(
                 model=refinement.model,
                 validation_report=refinement.final_report,
-                analysis=coverage.analysis,
+                analysis=coverage_analysis,
             )
             gap_report = refinement.gap_report or build_requirement_gap_report(
                 run_id=run_id,
@@ -462,6 +521,7 @@ class PhaseOneWorkflow:
                 report=gap_report,
             )
             artifact_paths = {
+                **existing_artifacts,
                 "use_case_packet": use_case_packet_path,
                 "requirement_source_snapshot": source_snapshot_path,
                 **(
@@ -490,7 +550,7 @@ class PhaseOneWorkflow:
                     self.store.write_json_artifact(
                         run_id,
                         f"requirement_clarification_analysis_v1_r{refinement.model.revision}.json",
-                        coverage.analysis,
+                        coverage_analysis,
                     )
                 ),
                 "requirement_quality_checklist": self.store.relative(
@@ -533,12 +593,36 @@ class PhaseOneWorkflow:
             state["summary_for_user"] = self._v2_summary(state, last_sync)
             self.store.write_state(state)
             return self._status_response(state, created_new_run=not resume)
+        except MarkdownQuestionsPending as pending:
+            state = self.store.read_state(run_id)
+            latest_artifacts = {**self._normalized_artifacts(state), **pending.artifacts}
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "requirement_clarification",
+                    "status": "waiting_requirement_clarification",
+                    "last_error": None,
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": {
+                        "checkpoint": "requirement_markdown_questions",
+                        "questions": pending.questions,
+                    },
+                    "allowed_next_actions": list(ALLOWED_MARKDOWN_QUESTION_ACTIONS),
+                    "summary_for_user": (
+                        f"Requirement có {len(pending.questions)} câu hỏi cần anh trả lời một lượt "
+                        "(answer_markdown_questions); câu bỏ trống lấy phương án đề xuất."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=not resume)
         except HarnessError as exc:
             if exc.error_code == "requirement_session_not_resumable" and resume:
                 raise
             latest_artifacts = self._normalized_artifacts(state)
             for key, filename in (
                 ("requirement_loop_session", SESSION_FILENAME),
+                ("requirement_markdown_flow", FLOW_RECORD),
                 ("requirement_source_manifest", "requirement_source_manifest_v1.json"),
                 ("requirement_source_journal", "requirement_source_journal_v1.json"),
                 ("requirement_gap_report", "requirement_gap_report_v1.json"),
@@ -548,7 +632,8 @@ class PhaseOneWorkflow:
                 if path.exists():
                     latest_artifacts[key] = self.store.relative(path)
             if isinstance(exc, LlmStepReviewRequired):
-                requirement_execution = self._requirement_execution_summary(run_id)
+                # The OpenCode flow keeps no source-loop session, so the summary may be empty.
+                requirement_execution = self._requirement_execution_summary(run_id) or {}
                 requirement_execution["step_review"] = exc.progress
                 state.update(
                     {
@@ -568,7 +653,12 @@ class PhaseOneWorkflow:
                 )
                 self.store.write_state(state)
                 return self._status_response(state, created_new_run=not resume)
-            if exc.error_code == "llm_transport_failed":
+            if exc.error_code in {
+                "llm_transport_failed",
+                "workspace_fetch_failed",
+                "workspace_creation_failed",
+                "target_repo_codegraph_failed",
+            }:
                 state.update(
                     {
                         "updated_at": utc_now_iso(),
@@ -579,8 +669,8 @@ class PhaseOneWorkflow:
                         "pending_checkpoint": None,
                         "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
                         "summary_for_user": (
-                            "Requirement loop đã tạm dừng vì kết nối LLM gián đoạn; "
-                            "có thể dùng continue_run để tiếp tục đúng session cũ."
+                            f"Requirement tạm dừng: {exc.message} "
+                            "Có thể dùng continue_run để tiếp tục trên cùng run."
                         ),
                     }
                 )
@@ -619,10 +709,80 @@ class PhaseOneWorkflow:
             self.store.write_state(state)
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
 
+    def _finish_markdown_requirement(
+        self,
+        *,
+        state: dict[str, object],
+        source: UseCaseSource,
+        markdown: MarkdownRequirementResult,
+        artifacts: dict[str, str],
+        resume: bool,
+    ) -> dict[str, object]:
+        """Store the requirement trace of an OpenCode run and open its Requirement checkpoint (Markdown + trace)."""
+
+        run_id = str(state["run_id"])
+        trace = {
+            **markdown.trace,
+            "run_id": run_id,
+            "source": {
+                "source_id": source.source_id,
+                "source_ref": source.source_ref,
+                "artifact_ref": artifacts.get("requirement_source_snapshot"),
+            },
+            "markdown_artifact": markdown.markdown_artifact,
+        }
+        path = self.store.artifact_path(run_id, TRACE_ARTIFACT)
+        if path.exists():
+            if json.loads(path.read_text(encoding="utf-8")) != trace:
+                raise HarnessError(
+                    "requirement_revision_conflict", f"{TRACE_ARTIFACT} already exists with different content.", run_id=run_id,
+                )
+        else:
+            self.store.write_json_artifact(run_id, TRACE_ARTIFACT, trace)
+        latest = {**artifacts, **markdown.artifacts, "requirement_trace": self.store.relative(path)}
+        open_questions = [str(item["id"]) for item in trace["questions"] if item.get("status") == "open"]
+        state = self.store.read_state(run_id)
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "waiting_requirement_approval",
+                "status": "waiting_requirement_approval",
+                "last_error": None,
+                "latest_artifacts": latest,
+                "pending_checkpoint": {
+                    "checkpoint_id": f"checkpoint_requirement_{run_id}",
+                    "type": "requirement_approval",
+                    "artifact_ref": TRACE_ARTIFACT.removesuffix(".json"),
+                    "artifact_path": self.store.relative(path),
+                    "review_projection_ref": markdown.markdown_artifact,
+                    "counts": {
+                        key: len(trace[key])
+                        for key in ("uc_clauses", "acceptance_criteria", "implied_obligations", "questions", "decisions")
+                    },
+                    "open_questions": open_questions,
+                },
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "summary_for_user": (
+                    "Requirement (Markdown + trace) đã sẵn sàng để anh xem. Chưa có Design H-OC nên chưa duyệt được."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=not resume)
+
+    def _refuse_for_opencode(self, state: dict[str, object], *, run_id: str, action: str) -> None:
+        if self._opencode_model(state, run_id=run_id):
+            raise HarnessError(
+                "requirement_action_not_supported",
+                f"{action} works on Requirement V2; OpenCode runs keep a Markdown requirement with a trace.",
+                run_id=run_id,
+            )
+
     def revalidate_requirement(self, *, run_id: str) -> dict[str, object]:
         """Chạy lại validator tất định; không gọi LLM hoặc sinh clarification mới."""
 
         state = self.store.read_state(run_id)
+        self._refuse_for_opencode(state, run_id=run_id, action="revalidate_requirement")
         if str(state.get("requirement_contract_version") or "v2") != "v2":
             raise HarnessError(
                 "requirement_revalidation_not_supported",
@@ -743,6 +903,13 @@ class PhaseOneWorkflow:
             source_text_by_id,
             clarification_policy_version=self._clarification_policy_version(state),
         )
+        if self._opencode_model(state, run_id=run_id):
+            # shortcut: the OpenCode flow has no extra clarification round yet; add one through the Reviewer if needed.
+            raise HarnessError(
+                "requirement_clarify_more_not_supported",
+                "The OpenCode Phase 1 flow does not open extra clarification rounds.",
+                run_id=run_id,
+            )
         coverage = self.coverage_reviewer.review(
             model=current_validation.model,
             source_text_by_id=source_text_by_id,
@@ -906,6 +1073,81 @@ class PhaseOneWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def answer_markdown_questions(
+        self,
+        *,
+        run_id: str,
+        answers: dict[str, str],
+        answered_by: str,
+    ) -> dict[str, object]:
+        """Store one batch of owner answers for an OpenCode run, then let the Refiner write them into the draft.
+
+        A question left blank takes its recommended option (or the suggested answer); one without either must be
+        answered. An answer that names an option key is stored as that option's text.
+        """
+
+        state = self.store.read_state(run_id)
+        checkpoint = state.get("pending_checkpoint")
+        if (
+            state.get("status") != "waiting_requirement_clarification"
+            or not isinstance(checkpoint, dict)
+            or checkpoint.get("checkpoint") != "requirement_markdown_questions"
+        ):
+            raise HarnessError(
+                "requirement_clarification_not_ready",
+                f"Run is not waiting for the owner's answers to the Markdown questions: {run_id}",
+                run_id=run_id,
+            )
+        questions = [item for item in checkpoint.get("questions", []) if isinstance(item, dict)]
+        unknown = sorted(set(answers) - {str(item.get("id")) for item in questions})
+        if unknown:
+            raise HarnessError(
+                "requirement_answers_invalid", f"Unknown question IDs: {', '.join(unknown)}.", run_id=run_id,
+            )
+        answered_at = utc_now_iso()
+        records = []
+        for question in questions:
+            ident = str(question["id"])
+            submitted = str(answers.get(ident) or "").strip()
+            if submitted:
+                source, text = "owner", resolve_clarification_answer(question, submitted)
+            elif question.get("recommended_option"):
+                source = "recommended_option"
+                text = resolve_clarification_answer(question, str(question["recommended_option"]))
+            elif str(question.get("suggested_answer") or "").strip():
+                source, text = "suggested_answer", str(question["suggested_answer"]).strip()
+            else:
+                raise HarnessError(
+                    "requirement_answers_invalid", f"{ident} has no recommended answer, so it needs one.", run_id=run_id,
+                )
+            records.append(
+                {
+                    "question_id": ident,
+                    "answer": text,
+                    "submitted": submitted or None,
+                    "source": source,
+                    "answered_by": answered_by,
+                    "answered_at": answered_at,
+                }
+            )
+        if self.store.artifact_path(run_id, ANSWERS_RECORD).exists():
+            raise HarnessError("requirement_answers_invalid", "Answers were already stored for this run.", run_id=run_id)
+        self.store.write_json_artifact(
+            run_id, ANSWERS_RECORD, {"version": "requirement_markdown_answers_v1", "answers": records},
+        )
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "requirement_drafting",
+                "status": "requirement_drafting",
+                "pending_checkpoint": None,
+                "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
+                "summary_for_user": "Đã nhận câu trả lời; Refiner đang đưa chúng vào bản Markdown.",
+            }
+        )
+        self.store.write_state(state)
+        return self.continue_requirement_run(run_id=run_id)
+
     def answer_clarification(
         self,
         *,
@@ -917,6 +1159,12 @@ class PhaseOneWorkflow:
         """Apply one answer to the current blocking Requirement V2 question."""
 
         state = self.store.read_state(run_id)
+        if self._opencode_model(state, run_id=run_id):
+            raise HarnessError(
+                "requirement_clarification_not_supported",
+                "OpenCode Phase 1 runs take all answers at once through answer_markdown_questions.",
+                run_id=run_id,
+            )
         if str(state.get("requirement_contract_version") or "v2") != "v2":
             raise HarnessError(
                 "requirement_clarification_not_supported",
@@ -1068,6 +1316,7 @@ class PhaseOneWorkflow:
         """Thu hồi một assumption tự động rồi mở lại source question cho con người."""
 
         state = self.store.read_state(run_id)
+        self._refuse_for_opencode(state, run_id=run_id, action="challenge_assumption")
         policy_version = self._clarification_policy_version(state)
         if (
             str(state.get("requirement_contract_version") or "v2") != "v2"
@@ -1667,12 +1916,13 @@ class PhaseOneWorkflow:
             "traceability_diagnostics": state.get("traceability_diagnostics", []),
         }
         requirement_execution = self._requirement_execution_summary(str(state.get("run_id") or ""))
+        persisted_execution = state.get("requirement_execution")
+        step_review = persisted_execution.get("step_review") if isinstance(persisted_execution, dict) else None
+        if requirement_execution is None and isinstance(step_review, dict):
+            requirement_execution = {}  # The OpenCode flow has no source-loop session, only its step review.
         if requirement_execution is not None:
-            persisted_execution = state.get("requirement_execution")
-            if isinstance(persisted_execution, dict) and isinstance(
-                persisted_execution.get("step_review"), dict
-            ):
-                requirement_execution["step_review"] = dict(persisted_execution["step_review"])
+            if isinstance(step_review, dict):
+                requirement_execution["step_review"] = dict(step_review)
             response["requirement_execution"] = requirement_execution
         checkpoint = response.get("pending_checkpoint")
         last_sync = response.get("last_sync")
