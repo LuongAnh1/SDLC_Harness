@@ -27,6 +27,7 @@ from sdlc_harness.sources.fixtures import load_use_case
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.agents.requirements.trace_v1 import use_case_segments
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
+from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.profiles import build_profile_snapshot, get_language_profile, get_project_profile
 from sdlc_harness.repo_context import CodeGraphContextProvider
 from sdlc_harness.storage.runtime import RuntimeStore
@@ -503,9 +504,15 @@ class WorkspaceGitTests(unittest.TestCase):
         self.assertEqual([q["status"] for q in stored["questions"]], ["resolved", "agent_decided"])
         self.assertEqual((stored["decisions"][1]["question_id"], stored["decisions"][1]["source"]), ("Q-2", "agent_decided"))
         self.assertEqual(stored["markdown_artifact"], artifacts["requirement_markdown_draft"])
-        with self.assertRaises(HarnessError) as refused:
+        # Approving the Markdown requirement freezes it and starts the Markdown design (its flow is tested on its own).
+        with patch.object(PhaseTwoWorkflow, "_run_hoc_design", return_value={"status": "design_investigating"}) as design:
             CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=run_id)
-        self.assertEqual(refused.exception.error_code, "requirement_hoc_design_unavailable")
+        design.assert_called_once_with(run_id=run_id)
+        started = self.store.read_state(run_id)
+        self.assertEqual(started["design_opencode_flow"], "design_markdown_v1")
+        self.assertEqual(started["approved_artifacts"]["requirement_trace"], artifacts["requirement_trace"])
+        self.assertEqual(started["approved_artifacts"]["requirement_markdown"], artifacts["requirement_markdown_draft"])
+        self.assertEqual(started["design_opencode_reviewer_model"], settings.phase1_opencode_reviewer_model)
         status = [line for line in _git(worktree, "status", "--porcelain").splitlines() if ".codegraph" not in line]
         self.assertEqual(status, [])
 

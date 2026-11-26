@@ -761,9 +761,9 @@ class PhaseOneWorkflow:
                     },
                     "open_questions": open_questions,
                 },
-                "allowed_next_actions": ["get_status", "cancel_run"],
+                "allowed_next_actions": ["approve_checkpoint", "get_status", "cancel_run"],
                 "summary_for_user": (
-                    "Requirement (Markdown + trace) đã sẵn sàng để anh xem. Chưa có Design H-OC nên chưa duyệt được."
+                    "Requirement (Markdown + trace) đã sẵn sàng để anh xem; duyệt thì Design Markdown (H-OC) bắt đầu."
                 ),
             }
         )

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import threading
 from uuid import uuid4
 
 from ..core.config import Settings
@@ -27,7 +28,19 @@ _SESSION_ARTIFACTS = {
     "refiner": "requirement_opencode_refiner_session_v1.json",
     "reviewer": "requirement_opencode_reviewer_session_v1.json",
 }
+# Other roles (Design: designer, reviewer-g<n>, reviewer-global, reviewer-final) keep one session each under this name.
+_ROLE = re.compile(r"[a-z][a-z0-9-]{0,40}")
 _MODEL_PATTERN = r"[\w.-]+/[\w./:-]+(?:#[\w.-]+)?"
+# The workspace lock does not wait (a second holder fails at once), so threads of one process take it one at a time.
+_ROOT_GUARD = threading.Lock()
+
+
+def session_artifact(role: str) -> str:
+    if role in _SESSION_ARTIFACTS:
+        return _SESSION_ARTIFACTS[role]
+    if not _ROLE.fullmatch(role):
+        raise ValueError(f"invalid OpenCode role {role!r}")
+    return f"opencode_{role.replace('-', '_')}_session_v1.json"
 
 
 def _worker_config(editable_refs: tuple[str, ...]) -> str:
@@ -40,6 +53,10 @@ def _worker_config(editable_refs: tuple[str, ...]) -> str:
         ),
     ]
     permissions.extend({"action": "edit", "resource": ref, "effect": "allow"} for ref in editable_refs)
+    # Nothing outside the run worktree: OpenCode checks `external_directory` before `read`/`edit` and the last matching
+    # rule wins, so this explicit deny holds whatever base policy OpenCode loads first. Glob/grep paths are not covered
+    # by this action; the Design flow audits them after each turn (`paths_outside_worktree`).
+    permissions.append({"action": "external_directory", "resource": "*", "effect": "deny"})
     return json.dumps({
         "snapshots": False,
         "formatter": False,
@@ -85,8 +102,13 @@ class OpenCodeWorker:
         output_ref: str | None = None,
         editable_refs: tuple[str, ...] = (),
         allow_ok: bool = False,
+        exclusive: bool = True,
     ) -> tuple[LlmCompletion, str]:
-        """Run one turn. With `output_ref` the answer must be that path (or OK when allowed) and the file must exist."""
+        """Run one turn. With `output_ref` the answer must be that path (or OK when allowed) and the file must exist.
+
+        An exclusive turn holds the workspace lock while OpenCode runs (it may edit shared files). A turn that edits only
+        its own output file (a reviewer) passes `exclusive=False`: it takes the lock only to resolve the worktree, so
+        several such turns run in parallel threads."""
 
         executable = _find_opencode()
         if executable is None:
@@ -98,70 +120,116 @@ class OpenCodeWorker:
         ]
         if expected_session:
             command.extend(["--session", expected_session])
-        with self._root() as root:
-            try:
-                result = subprocess.run(
-                    command,
-                    cwd=str(root),
-                    input=task,
-                    capture_output=True,
-                    encoding="utf-8",
-                    env={
-                        **os.environ,
-                        "PWD": str(root),
-                        "OPENCODE_CONFIG_CONTENT": _worker_config(editable_refs),
-                    },
-                    timeout=timeout,
-                    check=False,
+        if exclusive:
+            with self._root() as root:
+                completion, session_id = self._run(
+                    root, command, task, timeout, role, expected_session, output_ref, editable_refs, allow_ok,
                 )
-            except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
-                if role and isinstance(exc, subprocess.TimeoutExpired):
-                    self._remember_session(role, exc.stdout, expected_session)
-                raise HarnessError(
-                    "llm_transport_failed",
-                    f"Phase 1 OpenCode process could not complete ({type(exc).__name__}).",
-                    run_id=self.run_id,
-                ) from exc
-            if role:
-                expected_session = self._remember_session(role, result.stdout, expected_session)
-            if result.returncode and not result.stdout.strip():
-                raise HarnessError(
-                    "llm_transport_failed", f"Phase 1 OpenCode exited with status {result.returncode}.", run_id=self.run_id,
-                )
-            completion, session_id = _read_completion(result.stdout, run_id=self.run_id)
-            if role and session_id != expected_session:
-                raise HarnessError(
-                    "llm_transport_failed", f"OpenCode did not confirm the saved {role} session.", run_id=self.run_id,
-                )
-            if result.returncode:
-                raise HarnessError(
-                    "llm_transport_failed", f"Phase 1 OpenCode exited with status {result.returncode}.", run_id=self.run_id,
-                )
-            if output_ref is not None and completion.finish_reason == "stop":
-                answer = final_answer(completion.content)
-                if allow_ok and answer == "OK":
-                    if (root / output_ref).exists():
-                        raise HarnessError(
-                            "llm_transport_failed", "OpenCode returned OK alongside an output file.", run_id=self.run_id,
-                        )
-                    completion = replace(completion, content="OK")
-                else:
-                    if answer != output_ref:
-                        raise HarnessError(
-                            "llm_transport_failed", f"Expected OpenCode to return {output_ref}.", run_id=self.run_id,
-                        )
-                    if not self._read(root, output_ref).strip():
-                        raise HarnessError(
-                            "llm_transport_failed", f"OpenCode output {output_ref} is empty.", run_id=self.run_id,
-                        )
-                    completion = replace(completion, content=output_ref)
+        else:
+            with self._root() as root:
+                pass
+            completion, session_id = self._run(
+                root, command, task, timeout, role, expected_session, output_ref, editable_refs, allow_ok,
+            )
         emit_current(
             category="llm",
             event_type="requirement_opencode_completed",
-            message="Phase 1 OpenCode call completed.",
+            message="OpenCode call completed.",
             data={"model": self.model, "role": role, "session_id": session_id, "output_file": output_ref, **(completion.usage or {})},
         )
         return completion, session_id
+
+    def _run(
+        self,
+        root: Path,
+        command: list[str],
+        task: str,
+        timeout: int,
+        role: str | None,
+        expected_session: str | None,
+        output_ref: str | None,
+        editable_refs: tuple[str, ...],
+        allow_ok: bool,
+    ) -> tuple[LlmCompletion, str]:
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(root),
+                input=task,
+                capture_output=True,
+                encoding="utf-8",
+                env={
+                    **os.environ,
+                    "PWD": str(root),
+                    "OPENCODE_CONFIG_CONTENT": _worker_config(editable_refs),
+                },
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+            if role and isinstance(exc, subprocess.TimeoutExpired):
+                self._remember_session(role, exc.stdout, expected_session)
+            raise HarnessError(
+                "llm_transport_failed",
+                f"Phase 1 OpenCode process could not complete ({type(exc).__name__}).",
+                run_id=self.run_id,
+            ) from exc
+        if role:
+            expected_session = self._remember_session(role, result.stdout, expected_session)
+        if result.returncode and not result.stdout.strip():
+            raise HarnessError(
+                "llm_transport_failed", f"Phase 1 OpenCode exited with status {result.returncode}.", run_id=self.run_id,
+            )
+        completion, session_id = _read_completion(result.stdout, run_id=self.run_id)
+        if role and session_id != expected_session:
+            raise HarnessError(
+                "llm_transport_failed", f"OpenCode did not confirm the saved {role} session.", run_id=self.run_id,
+            )
+        if result.returncode:
+            raise HarnessError(
+                "llm_transport_failed", f"Phase 1 OpenCode exited with status {result.returncode}.", run_id=self.run_id,
+            )
+        if output_ref is not None and completion.finish_reason == "stop":
+            answer = final_answer(completion.content)
+            if allow_ok and answer == "OK":
+                if (root / output_ref).exists():
+                    raise HarnessError(
+                        "llm_transport_failed", "OpenCode returned OK alongside an output file.", run_id=self.run_id,
+                    )
+                completion = replace(completion, content="OK")
+            else:
+                if answer != output_ref:
+                    raise HarnessError(
+                        "llm_transport_failed", f"Expected OpenCode to return {output_ref}.", run_id=self.run_id,
+                    )
+                if not self._read(root, output_ref).strip():
+                    raise HarnessError(
+                        "llm_transport_failed", f"OpenCode output {output_ref} is empty.", run_id=self.run_id,
+                    )
+                completion = replace(completion, content=output_ref)
+        return completion, session_id
+
+    def paths_outside_worktree(self, session_id: str) -> list[str] | None:
+        """Paths the last turn of `session_id` passed to its file tools (read, glob, grep, list, edit, write) that lie
+        outside the run worktree, read from `opencode session export` (no LLM call). None when the export is not
+        available; the caller records that the audit could not run."""
+
+        executable = _find_opencode()
+        if executable is None or not _valid_session_id(session_id):
+            return None
+        with self._root() as root:
+            pass
+        try:
+            result = subprocess.run(
+                [executable, "session", "export", session_id], cwd=str(root), capture_output=True, encoding="utf-8",
+                timeout=120, check=False,
+            )
+            data = json.loads(result.stdout) if result.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+            return None
+        return outside_paths(data["messages"], root)
 
     def reserve(self, prefix: str, suffix: str) -> str:
         """A fresh, Git-ignored output path that does not exist yet."""
@@ -209,6 +277,12 @@ class OpenCodeWorker:
         with self._root() as root:
             self._checked_path(root, ref).unlink(missing_ok=True)
 
+    def worktree(self) -> Path:
+        """The run worktree (resolved under the workspace lock, which is released again)."""
+
+        with self._root() as root:
+            return root
+
     def repo_file_checker(self) -> Callable[[str], bool]:
         """A read-only test for repository files or directories cited as evidence (a directory such as a migrations
         folder is valid evidence); the worktree root itself and a path that leaves the worktree never count."""
@@ -224,7 +298,7 @@ class OpenCodeWorker:
 
     @contextmanager
     def _root(self) -> Iterator[Path]:
-        with self.workspaces.locked_workspace(self.run_id) as workspace:
+        with _ROOT_GUARD, self.workspaces.locked_workspace(self.run_id) as workspace:
             yield Path(workspace.worktree_path).resolve()
 
     def _checked_path(self, root: Path, ref: str) -> Path:
@@ -267,7 +341,7 @@ class OpenCodeWorker:
         return ref
 
     def _read_session(self, role: str) -> str | None:
-        path = self.store.artifact_path(self.run_id, _SESSION_ARTIFACTS[role])
+        path = self.store.artifact_path(self.run_id, session_artifact(role))
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -296,9 +370,43 @@ class OpenCodeWorker:
             if expected and session_id != expected:
                 raise HarnessError("llm_transport_failed", f"OpenCode returned a different {role} session.", run_id=self.run_id)
             if expected is None:
-                self.store.write_json_artifact(self.run_id, _SESSION_ARTIFACTS[role], {"session_id": session_id})
+                self.store.write_json_artifact(self.run_id, session_artifact(role), {"session_id": session_id})
                 expected = session_id
         return expected
+
+
+_PATH_KEYS = ("path", "filePath", "file_path", "directory", "cwd")
+
+
+def outside_paths(messages: list[object], root: Path) -> list[str]:
+    """File-tool paths of the last turn (after the last user message) that resolve outside `root`. A glob pattern
+    that is itself absolute counts as a path."""
+
+    turn: list[object] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("type") == "user":
+            turn = []
+        elif isinstance(message, dict) and message.get("type") == "assistant":
+            turn.append(message)
+    root = root.resolve()
+    found: list[str] = []
+    for message in turn:
+        for part in message.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") != "tool":
+                continue
+            given = part.get("input") or (part.get("state") or {}).get("input") or {}
+            if not isinstance(given, dict):
+                continue
+            candidates = [str(given[key]) for key in _PATH_KEYS if isinstance(given.get(key), str) and given[key].strip()]
+            pattern = given.get("pattern")
+            if isinstance(pattern, str) and (Path(pattern).is_absolute() or pattern.startswith(("~", ".."))):
+                candidates.append(pattern)
+            for raw in candidates:
+                path = Path(raw).expanduser()
+                resolved = (path if path.is_absolute() else root / path).resolve()
+                if resolved != root and not resolved.is_relative_to(root) and raw not in found:
+                    found.append(raw)
+    return found
 
 
 def final_answer(text: str) -> str:
