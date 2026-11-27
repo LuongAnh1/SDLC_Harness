@@ -1407,7 +1407,7 @@ class PhaseTwoWorkflow:
             self.store.write_json_artifact(run_id, HOC_DESIGN_TRACE, trace)
         latest = {**_dict_value(state.get("latest_artifacts")), **result.artifacts, "design_trace": self.store.relative(path)}
         unreviewed = result.unreviewed_revision
-        summary = "Design (Markdown + trace + sơ đồ) đã sẵn sàng để anh xem. Chưa có Phase 3 H-OC nên chưa duyệt được."
+        summary = "Design (Markdown + trace + sơ đồ) đã sẵn sàng để anh xem; duyệt sẽ bắt đầu Plan H-OC (đồ thị task)."
         if unreviewed:
             summary += (
                 f" Lần sửa {unreviewed['revision']} ({', '.join(unreviewed['findings'])}) là lần cuối và không được "

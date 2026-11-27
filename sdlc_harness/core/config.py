@@ -110,6 +110,7 @@ class Settings:
     api_shutdown_timeout_seconds: int
     phase1_opencode_model: str = "deepseek/deepseek-flash#high"
     phase1_opencode_reviewer_model: str = "deepseek/deepseek-v4-pro#high"
+    hoc_parallel_agents: int = 3
 
 
 @dataclass(frozen=True)
@@ -473,6 +474,7 @@ def load_settings(
         phase1_opencode_reviewer_model=(
             merged["SDLC_PHASE1_OPENCODE_REVIEWER_MODEL"].strip() or Settings.phase1_opencode_reviewer_model
         ),
+        hoc_parallel_agents=_int_value(merged.get("SDLC_HOC_PARALLEL_AGENTS"), default=3, minimum=1, maximum=8),
         llm_thinking_mode=llm_thinking_mode,
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),

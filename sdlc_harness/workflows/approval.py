@@ -28,12 +28,13 @@ class CheckpointApprovalWorkflow:
         if status in APPROVAL_REFUSALS:
             error_code, message = APPROVAL_REFUSALS[status]
             raise HarnessError(error_code, message, run_id=run_id)
-        # An OpenCode run's Markdown requirement starts the Markdown design (PhaseTwoWorkflow.approve_checkpoint); its
-        # Markdown design has no OpenCode plan phase yet.
-        if status == "waiting_design_approval" and state.get("design_opencode_flow"):
+        # An OpenCode run's Markdown requirement starts the Markdown design (PhaseTwoWorkflow.approve_checkpoint) and
+        # its design starts the plan graph (PhaseThreeWorkflow.approve_design_checkpoint); its plan has no OpenCode
+        # execution phase yet.
+        if status == "waiting_implementation_plan_review" and state.get("plan_opencode_flow"):
             raise HarnessError(
-                "design_hoc_plan_unavailable",
-                "This OpenCode run has a Markdown design with a trace; its Plan phase is not built yet.",
+                "plan_hoc_execution_unavailable",
+                "This OpenCode run has a plan graph; its execution phase (Phase 4 H-OC) is not built yet.",
                 run_id=run_id,
             )
         approval = approval_for(status)

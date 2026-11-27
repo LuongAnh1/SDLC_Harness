@@ -385,6 +385,15 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Model của Reviewer chấm bản Requirement Markdown, dạng provider/model#variant.",
             ),
             _field(
+                "SDLC_HOC_PARALLEL_AGENTS",
+                "H-OC parallel agents (k)",
+                "integer",
+                3,
+                "Số agent chạy song song mà Plan H-OC (Phase 3) lập lịch cho chế độ B; chế độ A dùng cùng nền và nhóm với k = 1.",
+                minimum=1,
+                maximum=8,
+            ),
+            _field(
                 "SDLC_LLM_THINKING_MODE",
                 "Thinking mode",
                 "enum",
