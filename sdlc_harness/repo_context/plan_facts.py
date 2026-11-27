@@ -21,7 +21,7 @@ import re
 import shlex
 
 from .landscape import after_mount_middleware
-from .providers import _IMPORT, _REEXPORT, _resolve_specifier, _workspace_packages
+from .providers import _IMPORT, _REEXPORT, _defining_file, _imported_names, _resolve_specifier, _workspace_packages
 from .runtime_config import _workspaces
 
 PLAN_FACTS_SCHEMA_VERSION = "plan_repo_facts_v1"
@@ -50,6 +50,9 @@ class RepoFacts:
     protected_paths: tuple[str, ...] = ()
     gate_stage_ids: tuple[str, ...] = GATE_STAGE_IDS
     reliance_candidates: tuple[dict[str, object], ...] = field(default_factory=tuple)
+    tests: tuple[dict[str, object], ...] = field(default_factory=tuple)
+    test_suffixes: tuple[str, ...] = ()
+    check_roots: tuple[str, ...] = ()
 
     def package_of(self, path: str) -> str:
         return package_of(path, self.package_dirs)
@@ -73,6 +76,9 @@ class RepoFacts:
                 if "gate_stage_ids" in data else GATE_STAGE_IDS
             ),
             reliance_candidates=tuple(dict(item) for item in data.get("reliance_candidates") or ()),
+            tests=tuple(dict(item) for item in data.get("tests") or ()),
+            test_suffixes=tuple(str(item) for item in data.get("test_suffixes") or ()),
+            check_roots=tuple(str(item) for item in data.get("check_roots") or ()),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -88,6 +94,9 @@ class RepoFacts:
             "protected_paths": list(self.protected_paths),
             "gate_stage_ids": list(self.gate_stage_ids),
             "reliance_candidates": list(self.reliance_candidates),
+            "tests": list(self.tests),
+            "test_suffixes": list(self.test_suffixes),
+            "check_roots": list(self.check_roots),
         }
 
 
@@ -117,6 +126,7 @@ def build_repo_facts(
     generate_triggers: Iterable[str] = (),
     gate_stage_ids: Sequence[str] = GATE_STAGE_IDS,
     check_component_ids: Sequence[str] = CHECK_COMPONENT_IDS,
+    test_suffixes: Sequence[str] = (),
 ) -> RepoFacts:
     """Facts for the units' files. `stage_argvs` are ``(argv, cwd)`` pairs of the pinned verification stages."""
 
@@ -163,6 +173,9 @@ def build_repo_facts(
         protected_paths=tuple(protected_paths),
         gate_stage_ids=tuple(gate_stage_ids),
         reliance_candidates=tuple(reliance_candidates(root, files_by_unit, dirs)),
+        tests=tuple(existing_tests(root, files_by_unit, dirs, check_roots, entries, tuple(test_suffixes))),
+        test_suffixes=tuple(test_suffixes),
+        check_roots=tuple(check_roots),
     )
 
 
@@ -172,7 +185,7 @@ def repo_facts_for_profile(
     """`build_repo_facts` fed from the pinned project profile and its verification registry."""
 
     from ..profiles import build_verification_stage_policy
-    from ..profiles.registry import get_project_profile
+    from ..profiles.registry import get_language_profile, get_project_profile
     from ..verification.registry import resolve_verification_preparation_specs, resolve_verification_stage_specs
 
     project = get_project_profile(project_profile_id)
@@ -191,6 +204,7 @@ def repo_facts_for_profile(
         stage_argvs=argvs,
         generate_triggers=[item.trigger_path for item in preparations if item.preparation_id == GENERATED_SOURCE_PREPARATION],
         gate_stage_ids=tuple(stage_id for stage_id in GATE_STAGE_IDS if stage_id in {stage.stage_id for stage in stages}),
+        test_suffixes=get_language_profile(project.language_profile_id).test_suffixes,
     )
 
 
@@ -348,6 +362,67 @@ def reliance_candidates(
                     if evidence not in row["evidence"]:
                         row["evidence"].append(evidence)
     return [result[key] for key in sorted(result, key=lambda item: (_unit_number(item[0]), _unit_number(item[1])))]
+
+
+_MOCK = re.compile(r"""\b(?:vi|jest)\.mock\(\s*["']([^"']+)["']""")
+
+
+def existing_tests(
+    root: Path,
+    files_by_unit: Mapping[str, Sequence[str]],
+    dirs: Sequence[str],
+    check_roots: Sequence[str],
+    stage_entries: Iterable[str],
+    test_suffixes: Sequence[str],
+) -> list[dict[str, object]]:
+    """Every existing test file that touches a Design unit, with the units it touches.
+
+    A test touches unit U when it imports a name whose defining file belongs to U (barrels are followed to the
+    defining file, because a barrel is written by many units), or when it mocks a module that belongs to U. Test files
+    that are themselves Design unit files are left out: their unit already owns them. `check` marks whole-system
+    checks (inside an e2e component or run directly by a stage).
+    """
+
+    if not test_suffixes:
+        return []
+    owners: dict[str, list[str]] = {}
+    for unit, paths in files_by_unit.items():
+        for path in paths:
+            file = root / path
+            if file.is_file() and is_barrel(file.read_text(encoding="utf-8", errors="replace")):
+                continue
+            owners.setdefault(path, []).append(unit)
+    unit_files = {path for paths in files_by_unit.values() for path in paths}
+    entries = set(stage_entries)
+    packages = _workspace_packages(root)
+    candidates: set[str] = set()
+    for directory in [*[d for d in dirs if d], *check_roots]:
+        base = root / directory
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*"):
+            relative = path.relative_to(root).as_posix()
+            if path.is_file() and path.name.endswith(tuple(test_suffixes)) and not set(relative.split("/")) & _SKIPPED_PARTS:
+                candidates.add(relative)
+    result: list[dict[str, object]] = []
+    for test in sorted(candidates - unit_files):
+        text = (root / test).read_text(encoding="utf-8", errors="replace")
+        touched: set[str] = set()
+        for clause, specifier in _IMPORT.findall(text):
+            module = _resolve_specifier(root, test, specifier, packages)
+            if not module:
+                continue
+            for name in _imported_names(clause):
+                touched.add(_defining_file(root, module, name, depth=0) or module)
+        for specifier in _MOCK.findall(text):
+            module = _resolve_specifier(root, test, specifier, packages)
+            if module:
+                touched.add(module)
+        units = sorted({unit for path in touched for unit in owners.get(path, [])}, key=_unit_number)
+        if units:
+            check = test in entries or any(test.startswith(item.rstrip("/") + "/") for item in check_roots)
+            result.append({"path": test, "units": units, "check": check})
+    return result
 
 
 def _unit_number(unit: str) -> int:

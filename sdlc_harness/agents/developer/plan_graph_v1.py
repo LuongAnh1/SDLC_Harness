@@ -36,6 +36,8 @@ DEFAULT_C0 = 2.0
 DEFAULT_THRESHOLD = 0.15
 DEFAULT_TURN_BUDGET = 25
 STUB_COST = 0.5
+TEST_WEIGHT = 0.5  # an existing test a task may edit (many need a small change or none; owner 2026-11-27)
+NEW_TEST_WEIGHT = 1.0  # a new test file from the Planner's intents
 MAX_BASE_CANDIDATES = 12
 MAX_STUB_CANDIDATES = 8
 RUNTIME_CHECKS = ("G8", "G9", "G10")
@@ -181,9 +183,51 @@ class _Graph:
         for unit in self.units:
             for path in self.files[unit]:
                 self.writers.setdefault(path, []).append(unit)
+        # Existing tests that touch Design units (plan 11.1) and new test files from the Planner's intents (11.3).
+        self.tests = [
+            {"path": str(item["path"]), "units": [u for u in item.get("units") or [] if u in self.files],
+             "check": bool(item.get("check"))}
+            for item in facts.tests
+            if str(item.get("path") or "") not in self.writers
+        ]
+        self.tests = [item for item in self.tests if item["units"]]
+        self.new_tests: list[dict[str, str]] = []
 
     def weight(self, units: Iterable[str]) -> int:
         return sum(len(self.files.get(unit, ())) for unit in units)
+
+    def attach(self, base: set[str], groups: Sequence[Sequence[str]]) -> dict[object, dict[str, list[str]]]:
+        """Which task edits each test: key "base", "integration" or a group tuple -> existing and new test paths."""
+
+        group_of = {unit: tuple(group) for group in groups for unit in group}
+        result: dict[object, dict[str, list[str]]] = {}
+
+        def add(key: object, kind: str, path: str) -> None:
+            paths = result.setdefault(key, {"tests": [], "new_tests": []})[kind]
+            if path not in paths:  # several test intents may share one new file; it weighs once
+                paths.append(path)
+
+        for item in self.tests:
+            middle = [unit for unit in item["units"] if unit in group_of]
+            if item["check"]:
+                add("integration", "tests", item["path"])
+            elif middle:  # the base is done before branching, so "base + one group" belongs to that group
+                add(group_of[middle[0]], "tests", item["path"])
+            elif any(unit in base for unit in item["units"]):
+                add("base", "tests", item["path"])
+            else:
+                add("integration", "tests", item["path"])
+        for item in self.new_tests:
+            anchor = item["anchor"]
+            key = "integration" if anchor == "integration" or anchor in self.late else (
+                "base" if anchor in base else group_of.get(anchor, "integration"))
+            add(key, "new_tests", item["path"])
+        return result
+
+    @staticmethod
+    def extra(attached: Mapping[object, Mapping[str, list[str]]], key: object) -> float:
+        item = attached.get(key) or {}
+        return TEST_WEIGHT * len(item.get("tests") or []) + NEW_TEST_WEIGHT * len(item.get("new_tests") or [])
 
     def stub_cut(self, source: str, target: str, stubs: Iterable[str]) -> bool:
         """A typed stub of `target` replaces only an `import`: build, verify and reliance edges stay hard."""
@@ -208,6 +252,10 @@ class _Graph:
             inside = [unit for unit in writers if unit in parent]
             if path in self.facts.barrels:
                 continue
+            for unit in inside[1:]:
+                parent[find(unit)] = find(inside[0])
+        for item in self.tests:  # a test touching units of two groups is a file both may edit: one group
+            inside = [unit for unit in item["units"] if unit in parent] if not item["check"] else []
             for unit in inside[1:]:
                 parent[find(unit)] = find(inside[0])
         components: dict[str, list[str]] = {}
@@ -278,19 +326,26 @@ def score(graph: _Graph, base: set[str], stubs: set[str], *, k: int, c0: float, 
     """One base choice: its groups, LPT agents, merged turns and estimated makespan T."""
 
     groups = graph.groups(base, stubs)
-    _, agents = lpt(groups, k, c0, graph.weight)
+    attached = graph.attach(base, groups)
 
-    def cut(group: Sequence[str]) -> list[list[str]]:
+    def task_weight(group: Sequence[str]) -> float:
+        return graph.weight(group) + graph.extra(attached, tuple(group))
+
+    _, agents = lpt(groups, k, c0, task_weight)
+
+    def cut(group: Sequence[str]) -> list[list[str]]:  # the turn budget counts Design files only (plan 11.7 (3))
         return slices(graph, group, turn_budget) if graph.weight(group) > turn_budget else [list(group)]
 
     makespan = 0.0
     for agent in agents:
         agent["turns"] = turns(agent["groups"], graph.weight, turn_budget, cut)
-        agent["load"] = float(graph.weight(u for g in agent["groups"] for u in g) + c0 * len(agent["turns"]))
+        agent["load"] = float(sum(task_weight(g) for g in agent["groups"]) + c0 * len(agent["turns"]))
         makespan = max(makespan, float(agent["load"]))
+    integration_open = bool(graph.late or attached.get("integration"))
     total = (
-        graph.weight(base) + (c0 if base else 0.0) + STUB_COST * len(stubs)
-        + makespan + graph.weight(graph.late) + (c0 if graph.late else 0.0)
+        graph.weight(base) + graph.extra(attached, "base") + (c0 if base else 0.0) + STUB_COST * len(stubs)
+        + makespan
+        + graph.weight(graph.late) + graph.extra(attached, "integration") + (c0 if integration_open else 0.0)
     )
     return {
         "base": _sorted(base),
@@ -299,6 +354,7 @@ def score(graph: _Graph, base: set[str], stubs: set[str], *, k: int, c0: float, 
         "T": round(total, 2),
         "groups": groups,
         "agents": agents,
+        "attached": attached,
     }
 
 
@@ -475,16 +531,23 @@ def build_plan_graph(
     fixed_base: Sequence[str] | None = None,
     fixed_stubs: Sequence[str] = (),
     stubs_enabled: bool = True,
+    test_intents: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """The `plan_graph_v1` document: typed edges, base, groups, integration task, schedule and check results.
+    """The `plan_graph_v1` document: typed edges, base, groups, integration task, tests, schedule and checks.
 
     `reliance` holds the edges the Planner kept. `base_choice` picks one of the `search.top` options; `fixed_base` and
     `fixed_stubs` instead fix the option the Planner confirmed on the plan built with every candidate kept (that option
     stays valid for any subset of kept edges: fewer hard edges only split groups). Default: the threshold rule's choice.
+    `test_intents` are the Planner's checked intents; a new test file weighs on the task of its `anchor` unit.
     """
 
     edges = classify_edges(trace, facts, reliance)
     graph = _Graph(trace, facts, edges)
+    graph.new_tests = [
+        {"path": str(item["path"]), "anchor": str(item.get("anchor") or "integration")}
+        for item in test_intents
+        if item.get("new")
+    ]
     search = search_base(graph, k=k, c0=c0, threshold=threshold, turn_budget=turn_budget, stubs_enabled=stubs_enabled)
     if fixed_base is not None:
         base0 = set(search["base0"])
@@ -512,10 +575,31 @@ def build_plan_graph(
             labels.append(row)
         return labels
 
-    def cut(group: Sequence[str]) -> list[list[str]]:
+    attached = option["attached"]
+
+    def task_weight(group: Sequence[str]) -> float:
+        return graph.weight(group) + graph.extra(attached, tuple(group))
+
+    def cut(group: Sequence[str]) -> list[list[str]]:  # the turn budget counts Design files only (plan 11.7 (3))
         return slices(graph, group, turn_budget) if graph.weight(group) > turn_budget else [list(group)]
 
+    def task_label(key: object) -> str:
+        return key if isinstance(key, str) else group_ids[key]
+
+    def tests_of(key: object) -> dict[str, list[str]]:
+        item = attached.get(key) or {}
+        return {"tests": list(item.get("tests") or []), "new_tests": list(item.get("new_tests") or [])}
+
+    test_task = {path: task_label(key) for key, item in attached.items() for path in item.get("tests") or []}
+    new_task = {path: task_label(key) for key, item in attached.items() for path in item.get("new_tests") or []}
     mode_a_turns = turns(groups, graph.weight, turn_budget, cut)
+
+    def intent_task(item: Mapping[str, object]) -> str:
+        path = str(item.get("path"))
+        anchor = item.get("anchor")
+        # an existing check file (e2e spec, stage script) belongs to no attached test: its anchor names the task
+        return new_task.get(path) or test_task.get(path) or (
+            "integration" if anchor == "integration" or anchor in graph.late else "")
     sccs = [component for component in strongly_connected(graph.units, graph.hard) if len(component) > 1]
     conflicts = []
     for path, writers in sorted(graph.writers.items()):
@@ -539,7 +623,10 @@ def build_plan_graph(
         "schema_version": PLAN_GRAPH_SCHEMA_VERSION,
         "k": k,
         "settings": {"c0": c0, "threshold": threshold, "turn_budget": turn_budget, "stub_cost": STUB_COST,
-                     "weight": "files declared in the Design"},
+                     "weight": f"Design files + {TEST_WEIGHT} per existing test + {NEW_TEST_WEIGHT:g} per new test; "
+                               "the turn budget counts Design files only",
+                     "test_weight": TEST_WEIGHT,
+                     "new_test_weight": NEW_TEST_WEIGHT},
         "units": [
             {"id": unit, "files": graph.files[unit], "weight": len(graph.files[unit]),
              "task": "base" if unit in base else "integration" if unit in graph.late else
@@ -553,25 +640,32 @@ def build_plan_graph(
         "base": {
             "units": _sorted(base),
             "files": [path for unit in _sorted(base) for path in graph.files[unit]],
-            "weight": graph.weight(base),
+            **tests_of("base"),
+            "weight": graph.weight(base) + graph.extra(attached, "base"),
             "forced": search["forced"],
             "checkpoint": {"gate_stage_ids": list(facts.gate_stage_ids), "reviewer": True},
         },
         "integration": {
             "units": _sorted(graph.late),
             "files": [path for unit in _sorted(graph.late) for path in graph.files[unit]],
-            "weight": graph.weight(graph.late),
+            **tests_of("integration"),
+            "weight": graph.weight(graph.late) + graph.extra(attached, "integration"),
         },
         "groups": [
             {
                 "group_id": group_ids[tuple(group)],
                 "units": group,
                 "files": [path for unit in group for path in graph.files[unit]],
-                "weight": graph.weight(group),
-                "slices": slices(graph, group, turn_budget) if graph.weight(group) > turn_budget else [group],
+                **tests_of(tuple(group)),
+                "weight": task_weight(group),
+                "slices": cut(group),
             }
             for group in groups
         ],
+        "tests": [{**item, "task": test_task.get(item["path"], "")} for item in graph.tests],
+        "test_rules": {"test_suffixes": list(facts.test_suffixes), "e2e_roots": list(facts.check_roots),
+                       "ui_callers": _sorted({str(e["from"]) for e in edges if e["type"] == "http"})},
+        "test_intents": [{**dict(item), "task": intent_task(item)} for item in test_intents],
         "stubs": option["stubs"],
         "search": {
             **{key: value for key, value in search.items() if key not in {"chosen", "top"}},
@@ -579,7 +673,8 @@ def build_plan_graph(
             "fixed": {"base": list(fixed_base), "stubs": list(fixed_stubs)} if fixed_base is not None else None,
             "top": [
                 {"base": o["base"], "stubs": o["stubs"], "T": o["T"], "complexity": o["complexity"],
-                 "needs_planner": o["needs_planner"], "group_weights": [graph.weight(g) for g in o["groups"]]}
+                 "needs_planner": o["needs_planner"],
+                 "group_weights": [graph.weight(g) + graph.extra(o["attached"], tuple(g)) for g in o["groups"]]}
                 for o in search["top"]
             ],
         },
@@ -589,7 +684,7 @@ def build_plan_graph(
                 "agent_id": "agent-1",
                 "groups": [group_ids[tuple(g)] for g in groups],
                 "turns": turn_ids(mode_a_turns),
-                "load": float(graph.weight(u for g in groups for u in g) + c0 * len(mode_a_turns)),
+                "load": float(sum(task_weight(g) for g in groups) + c0 * len(mode_a_turns)),
             }]},
         },
         "reliance_candidates": list(facts.reliance_candidates),
@@ -629,7 +724,11 @@ def plan_markdown(plan: Mapping[str, object], *, title: str = "Plan graph") -> s
     kept = [e for e in plan["edges"] if e["type"] == "reliance"]
     lines.append(f"\nKept reliance edges: {len(kept)}")
     base = plan["base"]
-    lines += ["", "## Base", "", f"Units: {', '.join(base['units'])} ({base['weight']} files)",
+
+    def test_count(task: Mapping[str, object]) -> str:
+        return f"{len(task.get('tests') or [])} existing + {len(task.get('new_tests') or [])} new"
+
+    lines += ["", "## Base", "", f"Units: {', '.join(base['units'])} (weight {base['weight']}; tests {test_count(base)})",
               f"Forced: build sources {base['forced']['build_sources']}, contract units {base['forced']['contract_units']}",
               "", "| # | Base | Stubs | T | Group weights |", "| --- | --- | --- | --- | --- |"]
     for index, option in enumerate(plan["search"]["top"]):
@@ -641,12 +740,28 @@ def plan_markdown(plan: Mapping[str, object], *, title: str = "Plan graph") -> s
         fixed = plan["search"]["fixed"]
         lines.append(f"Fixed by the Planner: base {fixed['base']}, stubs {fixed['stubs'] or '-'}.")
     lines.append("")
-    lines += ["## Groups", "", "| Group | Units | Files | Slices |", "| --- | --- | --- | --- |"]
+    lines += ["## Groups", "",
+              f"Weight = Design files + {plan['settings']['test_weight']} per existing test + "
+              f"{plan['settings']['new_test_weight']} per new test.", "",
+              "| Group | Units | Weight | Tests | Slices |", "| --- | --- | --- | --- | --- |"]
     for group in plan["groups"]:
-        cut = " | ".join(",".join(s) for s in group["slices"]) if len(group["slices"]) > 1 else "-"
-        lines.append(f"| {group['group_id']} | {', '.join(group['units'])} | {group['weight']} | {cut} |")
+        cut = " / ".join(",".join(s) for s in group["slices"]) if len(group["slices"]) > 1 else "-"
+        lines.append(f"| {group['group_id']} | {', '.join(group['units'])} | {group['weight']} | {test_count(group)} | {cut} |")
     integration = plan["integration"]
-    lines += ["", f"Integration task: {', '.join(integration['units']) or '-'} ({integration['weight']} files)", ""]
+    lines += ["", f"Integration task: {', '.join(integration['units']) or '-'} (weight {integration['weight']}; "
+              f"tests {test_count(integration)})", ""]
+    if plan.get("test_intents"):
+        lines += ["## Test intents", "", "| Proves | Level | Drives | Test file | Task | What it checks |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for intent in plan["test_intents"]:
+            marker = " (new)" if intent.get("new") else ""
+            lines.append(f"| {', '.join(intent.get('proves') or [])} | {intent.get('level')} | "
+                         f"{', '.join(intent.get('drives') or []) or '-'} | {intent.get('path')}{marker} | "
+                         f"{intent.get('task')} | {intent.get('intent')} |")
+        lines.append("")
+    lines += ["## Existing tests a task may edit", ""]
+    lines += [f"- {item['task']}: {item['path']} ({', '.join(item['units'])})" for item in plan.get("tests") or []] or ["none"]
+    lines.append("")
     def turn_text(agent: Mapping[str, object]) -> str:
         return " ".join("[" + ", ".join(turn) + "]" for turn in agent["turns"]) or "-"
 
@@ -657,8 +772,11 @@ def plan_markdown(plan: Mapping[str, object], *, title: str = "Plan graph") -> s
     mode_a = plan["schedule"]["mode_a"]["agents"][0]
     lines.append(f"\nMode A (k = 1, same base and groups): {turn_text(mode_a)} (load {mode_a['load']})")
     http = [f"{e['from']}->{e['to']}" for e in plan["edges"] if e["type"] == "http"]
-    lines += ["", "## Accepted risk: cut http edges (checked only by e2e in the integration task)", "",
-              " ".join(http) or "none", "", "## Shared files", ""]
+    callers = (plan.get("test_rules") or {}).get("ui_callers") or []
+    lines += ["", "## Accepted risk: cut http edges (checked only by ui test intents in the integration task)", "",
+              " ".join(http) or "none", "",
+              f"Callers of a cut edge (each driven by >= 1 ui test intent): {', '.join(callers) or 'none'}", "",
+              "## Shared files", ""]
     for conflict in plan["conflicts"]:
         lines.append(f"- {conflict['file']}: {', '.join(conflict['units'])} -> {conflict['resolution']}")
     issues = plan["checks"]["issues"]

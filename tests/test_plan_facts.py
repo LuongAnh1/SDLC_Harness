@@ -50,6 +50,11 @@ FILES = {
     ),
     "apps/api/src/middleware/errorHandler.ts": "export default function errorHandler(err, _req, res) {}\n",
     "tests/e2e/things.spec.ts": "test('x', async () => {});\n",
+    # Existing tests: one imports a name, one only mocks a module, one e2e spec, one touches no unit.
+    "apps/api/src/controllers/getThing.test.ts": 'import { getThing } from "./getThing";\ntest("x", () => getThing());\n',
+    "apps/api/src/controllers/handler.test.ts": 'vi.mock("../middleware/errorHandler");\ntest("y", () => {});\n',
+    "tests/e2e/extra.spec.ts": 'import type { Thing } from "@t/contracts";\ntest("z", async () => {});\n',
+    "apps/web/src/lonely.test.ts": 'test("w", () => {});\n',
 }
 UNITS = {
     "U-1": ["packages/db/prisma/schema.prisma"],
@@ -81,6 +86,7 @@ class PlanFactsTests(unittest.TestCase):
             protected_paths=["package.json"],
             stage_argvs=[(("npm", "run", "db:smoke"), "."), (("npm", "run", "test:e2e"), ".")],
             generate_triggers=["packages/db/prisma/schema.prisma"],
+            test_suffixes=(".test.ts", ".test.tsx", ".spec.ts"),
         )
 
     def tearDown(self) -> None:
@@ -113,6 +119,17 @@ class PlanFactsTests(unittest.TestCase):
         self.assertEqual(evidence["registered_by"], "apps/api/src/app.ts")
         self.assertEqual(evidence["middleware"], "errorHandler")
         self.assertEqual(evidence["mounted_file"], "apps/api/src/routes/things.ts")
+
+    def test_existing_tests_are_attached_to_the_units_they_import_or_mock(self) -> None:
+        self.assertEqual(
+            list(self.facts.tests),
+            [
+                {"path": "apps/api/src/controllers/getThing.test.ts", "units": ["U-4"], "check": False},
+                {"path": "apps/api/src/controllers/handler.test.ts", "units": ["U-5"], "check": False},
+                {"path": "tests/e2e/extra.spec.ts", "units": ["U-2"], "check": True},
+            ],
+        )  # unit files (things.spec.ts, smoke.ts) and tests touching no unit are left out
+        self.assertEqual(self.facts.check_roots, ("tests/e2e",))
 
     def test_round_trip(self) -> None:
         self.assertEqual(RepoFacts.from_dict(self.facts.to_dict()).to_dict(), self.facts.to_dict())

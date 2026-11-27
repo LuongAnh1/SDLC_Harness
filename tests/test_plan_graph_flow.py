@@ -19,12 +19,14 @@ from sdlc_harness.workflows import plan_graph_flow as flow
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from sdlc_harness.workspaces.manager import RunWorkspaceManager
+from tests.test_plan_planner_v1 import with_tests
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hoc_plan_r4"
 RUN_ID = "run_20261127_120000_abcdef12"
 TRACE = json.loads((FIXTURES / "design_units.json").read_text(encoding="utf-8"))
 FACTS = RepoFacts.from_dict(json.loads((FIXTURES / "repo_facts.json").read_text(encoding="utf-8")))
-GOOD = (FIXTURES / "planner_output.md").read_text(encoding="utf-8")
+REQUIREMENT = json.loads((FIXTURES / "requirement_trace.json").read_text(encoding="utf-8"))
+GOOD = with_tests((FIXTURES / "planner_output.md").read_text(encoding="utf-8"))
 MISSING_ONE = GOOD.replace("| U-25 -> U-26 | drop | U-25 promises 200 `{ tags: string[] }` computed from U-15 (DD-1); "
                            "read-only, no error response. |\n", "")
 
@@ -100,7 +102,8 @@ class PlanFlowTests(FlowCase):
     def run_flow(self, review: dict[str, object]):
         return flow.run_plan_graph(
             settings=None, store=self.store, run_id=RUN_ID, model="deepseek/deepseek-flash#high", design_trace=TRACE,
-            design_markdown="# Design\n", project_profile_id="typescript_fullstack_v1", k=3, step_review=review,
+            design_markdown="# Design\n", requirement_trace=REQUIREMENT, project_profile_id="typescript_fullstack_v1",
+            k=3, step_review=review,
         )
 
     def test_planner_turn_format_fix_and_final_plan_with_step_review(self) -> None:
@@ -148,8 +151,8 @@ class PlanFlowTests(FlowCase):
         with self.assertRaises(HarnessError) as error:
             flow.run_plan_graph(
                 settings=None, store=self.store, run_id=RUN_ID, model="m/x", design_trace=trace,
-                design_markdown="# Design\n", project_profile_id="typescript_fullstack_v1", k=3,
-                step_review={"enabled": False},
+                design_markdown="# Design\n", requirement_trace=REQUIREMENT,
+                project_profile_id="typescript_fullstack_v1", k=3, step_review={"enabled": False},
             )
         self.assertEqual(error.exception.error_code, "plan_graph_invalid")
         self.assertEqual(FakeWorker.calls, [])
@@ -164,6 +167,7 @@ class PlanWiringTests(FlowCase):
         artifacts.mkdir(parents=True, exist_ok=True)
         (artifacts / "design_trace_v1_r1.json").write_text(json.dumps(TRACE), encoding="utf-8")
         (artifacts / "design_markdown_rev2_a1.md").write_text("# Design\n", encoding="utf-8")
+        (artifacts / "requirement_trace_v1_r1.json").write_text(json.dumps(REQUIREMENT), encoding="utf-8")
         self.store.write_state(
             {
                 "run_id": RUN_ID,
@@ -172,7 +176,7 @@ class PlanWiringTests(FlowCase):
                 "design_opencode_flow": "design_markdown_v1",
                 "design_opencode_model": "deepseek/deepseek-flash#high",
                 "profile_snapshot": {"project_profile_id": "typescript_fullstack_v1"},
-                "approved_artifacts": {"requirement_trace": "x.json"},
+                "approved_artifacts": {"requirement_trace": f"runtime/runs/{RUN_ID}/artifacts/requirement_trace_v1_r1.json"},
                 "latest_artifacts": {
                     "design_trace": f"runtime/runs/{RUN_ID}/artifacts/design_trace_v1_r1.json",
                     "design_markdown": f"runtime/runs/{RUN_ID}/artifacts/design_markdown_rev2_a1.md",
@@ -193,7 +197,11 @@ class PlanWiringTests(FlowCase):
         state = self.store.read_state(RUN_ID)
         self.assertEqual(state["plan_opencode_flow"], "plan_graph_v1")
         self.assertEqual(state["plan_parallel_agents"], 3)
-        self.assertEqual(state["approved_artifacts"]["requirement_trace"], "x.json")
+        self.assertTrue(state["approved_artifacts"]["requirement_trace"].endswith("requirement_trace_v1_r1.json"))
+        self.assertEqual(state["pending_checkpoint"]["counts"]["groups"], 8)
+        plan = json.loads((self.base / state["latest_artifacts"]["plan_graph"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(plan["test_intents"]), 4)
+        self.assertEqual(plan["planner"]["new_test_files"], 2)
         self.assertTrue(state["approved_artifacts"]["design_trace"].endswith("design_trace_v1_r1.json"))
         checkpoint = state["pending_checkpoint"]
         self.assertEqual((checkpoint["type"], checkpoint["k"]), ("implementation_plan_review", 3))
@@ -224,6 +232,30 @@ class PlanWiringTests(FlowCase):
         self.assertIn("continue_run", response["allowed_next_actions"])
         response = PhaseThreeWorkflow(self.settings).continue_implementation_plan_step_review(run_id=RUN_ID)
         self.assertEqual(response["status"], "waiting_implementation_plan_review")
+
+    def test_restart_plan_moves_the_old_plan_to_audit_and_plans_again(self) -> None:
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=RUN_ID)
+        with self.assertRaises(HarnessError) as error:
+            PhaseThreeWorkflow(self.settings).restart_plan(run_id=RUN_ID, reason="  ")
+        self.assertEqual(error.exception.error_code, "plan_restart_reason_required")
+        FakeWorker.answers = [GOOD]
+        response = PhaseThreeWorkflow(self.settings).restart_plan(run_id=RUN_ID, reason="add the test part")
+        self.assertEqual(response["status"], "waiting_implementation_plan_review")
+        self.assertEqual([kind for kind, _ in FakeWorker.calls], ["first", "fix", "first"])  # a new Planner turn
+        state = self.store.read_state(RUN_ID)
+        recovery = state["recoveries"][-1]
+        self.assertEqual((recovery["code"], recovery["from_status"], recovery["reason"]),
+                         ("restart_plan", "waiting_implementation_plan_review", "add the test part"))
+        audit = self.base / recovery["audit_dir"]
+        for name in ("plan_graph_v1.json", "plan_planner_a1.md", "plan_planner_a2.md", "plan_execution", "state.json"):
+            self.assertTrue((audit / name).exists(), name)
+        new_plan = json.loads((self.base / state["latest_artifacts"]["plan_graph"]).read_text(encoding="utf-8"))
+        self.assertEqual(new_plan["planner"]["attempts"], 1)
+
+    def test_restart_plan_only_for_an_opencode_plan(self) -> None:
+        with self.assertRaises(HarnessError) as error:
+            PhaseThreeWorkflow(self.settings).restart_plan(run_id=RUN_ID, reason="too early")
+        self.assertEqual(error.exception.error_code, "plan_restart_not_allowed")  # still at the Design checkpoint
 
 
 if __name__ == "__main__":

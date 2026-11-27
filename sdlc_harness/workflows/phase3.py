@@ -221,6 +221,7 @@ class PhaseThreeWorkflow:
         root = self.store.repo_root
         trace = json.loads((root / str(approved["design_trace"])).read_text(encoding="utf-8"))
         markdown = (root / str(approved["design_markdown"])).read_bytes().decode("utf-8")
+        requirement = json.loads((root / str(approved["requirement_trace"])).read_text(encoding="utf-8"))
         profile_id = str(_dict_value(state.get("profile_snapshot")).get("project_profile_id") or "")
         if state.get("status") != "implementation_planning":
             state.update({"updated_at": utc_now_iso(), "status": "implementation_planning",
@@ -234,6 +235,7 @@ class PhaseThreeWorkflow:
                 model=str(state["plan_opencode_model"]),
                 design_trace=trace,
                 design_markdown=markdown,
+                requirement_trace=requirement,
                 project_profile_id=profile_id,
                 k=int(state["plan_parallel_agents"]),
                 step_review=self.plan_step_review,
@@ -261,6 +263,72 @@ class PhaseThreeWorkflow:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
         return self._finish_hoc_plan(run_id=run_id, result=result)
+
+    def restart_plan(self, *, run_id: str, reason: str) -> dict[str, object]:
+        """Owner action: rebuild an OpenCode run's plan graph from the frozen Design (plan section 11.4).
+
+        The previous plan artifacts, the Planner session and the step-review exchanges move into
+        `audit/plan_restart_<time>/` so nothing is replayed; the run plans again with a new Planner turn.
+        """
+
+        if not str(reason or "").strip():
+            raise HarnessError("plan_restart_reason_required", "A plan restart needs the owner's reason.", run_id=run_id)
+        state = self.store.read_state(run_id)
+        status = str(state.get("status") or "")
+        allowed = {"waiting_implementation_plan_review", "implementation_plan_step_review_required",
+                   "implementation_planning", "blocked"}
+        if not state.get("plan_opencode_flow") or status not in allowed or (
+            status == "blocked" and state.get("current_phase") != "implementation_planning"
+        ):
+            raise HarnessError(
+                "plan_restart_not_allowed",
+                f"Only an OpenCode run's plan can restart (plan checkpoint, plan step review or blocked plan), "
+                f"not status {status!r}.",
+                run_id=run_id,
+            )
+        run_dir = self.store.run_dir(run_id)
+        stamp = utc_now_iso().replace(":", "").replace("-", "")
+        audit = run_dir / "audit" / f"plan_restart_{stamp}"
+        audit.mkdir(parents=True, exist_ok=False)
+        (audit / "state.json").write_bytes(self.store.state_path(run_id).read_bytes())
+        moved: list[str] = []
+        artifacts = run_dir / "artifacts"
+        for path in sorted(artifacts.glob("plan_*")) + sorted(artifacts.glob("opencode_planner_session_v1.json")):
+            path.rename(audit / path.name)
+            moved.append(path.name)
+        if (run_dir / "plan_execution").is_dir():
+            (run_dir / "plan_execution").rename(audit / "plan_execution")
+            moved.append("plan_execution/")
+        state = self.store.read_state(run_id)
+        latest = {key: value for key, value in _dict_value(state.get("latest_artifacts")).items()
+                  if not key.startswith("plan_")}
+        state.setdefault("recoveries", []).append(
+            {
+                "code": "restart_plan",
+                "from_status": status,
+                "reason": reason,
+                "moved": moved,
+                "audit_dir": self.store.relative(audit),
+                "recovered_at": utc_now_iso(),
+            }
+        )
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "implementation_planning",
+                "current_phase": "implementation_planning",
+                "latest_artifacts": latest,
+                "pending_checkpoint": None,
+                "pending_step_review": None,
+                "implementation_plan_step_review": None,
+                "plan_parallel_agents": self.settings.hoc_parallel_agents,
+                "last_error": None,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "summary_for_user": "Plan H-OC đang được dựng lại theo yêu cầu của anh.",
+            }
+        )
+        self.store.write_state(state)
+        return self._run_hoc_plan(run_id=run_id)
 
     def _finish_hoc_plan(self, *, run_id: str, result: object) -> dict[str, object]:
         """Open the Plan checkpoint: plan graph JSON, report, task diagram and the Planner's notes."""

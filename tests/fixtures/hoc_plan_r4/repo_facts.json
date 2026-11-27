@@ -160,5 +160,153 @@
    "from": "U-25",
    "to": "U-26"
   }
+ ],
+ "tests": [
+  {
+   "path": "apps/api/src/controllers/articlesController/articlesFeed.test.ts",
+   "units": [
+    "U-4",
+    "U-11",
+    "U-17"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/controllers/articlesController/articlesList.test.ts",
+   "units": [
+    "U-4",
+    "U-11",
+    "U-16"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/controllers/commentsController/createComment.test.ts",
+   "units": [
+    "U-13",
+    "U-22"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/middleware/articlesValidator/articlesCreateValidator.test.ts",
+   "units": [
+    "U-19"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.test.ts",
+   "units": [
+    "U-20"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/view/articleViewer.test.ts",
+   "units": [
+    "U-4"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/App/App.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/ArticleEditor/ArticleEditor.test.tsx",
+   "units": [
+    "U-31"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/ArticlePreview/ArticlePreview.test.tsx",
+   "units": [
+    "U-34"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.test.tsx",
+   "units": [
+    "U-30",
+    "U-35"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx",
+   "units": [
+    "U-30",
+    "U-31",
+    "U-32"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Home/Home.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Login/Login.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/NewArticle/NewArticle.test.tsx",
+   "units": [
+    "U-30",
+    "U-31",
+    "U-32"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/ProfilePage/ProfilePage.test.tsx",
+   "units": [
+    "U-30",
+    "U-33"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Register/Register.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Settings/Settings.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/services/conduit.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  }
+ ],
+ "test_suffixes": [
+  ".test.ts",
+  ".test.tsx",
+  ".spec.ts",
+  ".spec.tsx"
+ ],
+ "check_roots": [
+  "tests/e2e"
  ]
 }

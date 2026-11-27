@@ -133,7 +133,7 @@ class OpenCodeWorker:
             )
         emit_current(
             category="llm",
-            event_type="requirement_opencode_completed",
+            event_type="opencode_call_completed",  # shared by every phase; the event's `phase` says which
             message="OpenCode call completed.",
             data={"model": self.model, "role": role, "session_id": session_id, "output_file": output_ref, **(completion.usage or {})},
         )

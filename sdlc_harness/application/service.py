@@ -92,6 +92,7 @@ class ApplicationService:
             "revalidate-implementation-plan",
             "revalidate-design",
             "restart-design",
+            "restart-plan",
             "revalidate-requirement",
             "clarify-more",
             "challenge-assumption",
@@ -320,6 +321,11 @@ class ApplicationService:
         if name == "restart-design":
             return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "restart-plan":
+            return PhaseThreeWorkflow(settings).restart_plan(
+                run_id=self._required_text(command, "run_id"),
+                reason=self._required_text(command, "reason"),
             )
         if name == "run-until-checkpoint":
             raw_steps = self._optional_text(command, "max_steps")

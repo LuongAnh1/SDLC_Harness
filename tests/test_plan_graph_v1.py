@@ -194,6 +194,61 @@ class SearchTests(unittest.TestCase):
         group = pg.build_plan_graph(t, facts(), k=1, turn_budget=8)["groups"][0]
         self.assertEqual(group["slices"], [["U-1", "U-2"], ["U-3"]])
 
+    def test_the_turn_budget_counts_design_files_only(self) -> None:
+        t = trace(
+            ("U-1", [f"apps/api/src/a{i}.ts" for i in range(4)], []),
+            ("U-2", [f"apps/api/src/b{i}.ts" for i in range(4)], []),
+        )
+        tests = tuple({"path": f"apps/api/src/a{i}.test.ts", "units": ["U-1"], "check": False} for i in range(4))
+        plan = pg.build_plan_graph(t, facts(tests=tests), k=1, turn_budget=8)
+        self.assertEqual([g["weight"] for g in plan["groups"]], [4 + 4 * pg.TEST_WEIGHT, 4])  # tests weigh on the load
+        # ... but the two groups' 8 Design files fit one turn of budget 8 (with test weights they would need two)
+        self.assertEqual(plan["schedule"]["mode_b"]["agents"][0]["turns"], [["G-1", "G-2"]])
+        self.assertEqual(plan["schedule"]["mode_a"]["agents"][0]["turns"], [["G-1", "G-2"]])
+        self.assertIn("the turn budget counts Design files only", pg.plan_markdown(plan))
+
+
+class TestAttachmentTests(unittest.TestCase):
+    """Existing tests go to the task of the units they import; new test files weigh on their anchor's task."""
+
+    def plan(self, **kwargs):
+        t = trace(
+            SCHEMA,
+            ("U-2", ["apps/api/src/x.ts"], []),
+            ("U-3", ["apps/api/src/y.ts"], []),
+            ("U-4", ["apps/api/src/z.ts"], ["U-1"]),  # build edge: U-1 starts in the base
+        )
+        tests = (
+            {"path": "apps/api/src/x.test.ts", "units": ["U-2"], "check": False},
+            {"path": "apps/api/src/xy.test.ts", "units": ["U-2", "U-3"], "check": False},  # glues U-2 and U-3
+            {"path": "tests/e2e/a.spec.ts", "units": ["U-2"], "check": True},
+            {"path": "packages/db/src/schema.test.ts", "units": ["U-1"], "check": False},
+            {"path": "apps/api/src/z.test.ts", "units": ["U-1", "U-4"], "check": False},  # base + one group
+        )
+        return pg.build_plan_graph(t, facts(tests=tests, check_roots=("tests/e2e",)), k=2, **kwargs)
+
+    def test_existing_tests_are_attached_glued_and_weighed(self) -> None:
+        plan = self.plan()
+        groups = {tuple(g["units"]): g for g in plan["groups"]}
+        self.assertEqual(sorted(groups), [("U-2", "U-3"), ("U-4",)])
+        self.assertEqual(groups[("U-2", "U-3")]["tests"], ["apps/api/src/x.test.ts", "apps/api/src/xy.test.ts"])
+        self.assertEqual(groups[("U-2", "U-3")]["weight"], 2 + 2 * pg.TEST_WEIGHT)
+        self.assertEqual(groups[("U-4",)]["tests"], ["apps/api/src/z.test.ts"])
+        self.assertEqual(plan["base"]["tests"], ["packages/db/src/schema.test.ts"])
+        self.assertEqual(plan["base"]["weight"], 1 + pg.TEST_WEIGHT)
+        self.assertEqual(plan["integration"]["tests"], ["tests/e2e/a.spec.ts"])
+        self.assertEqual(plan["checks"]["issues"], [])
+
+    def test_a_new_test_file_weighs_on_the_task_of_its_anchor(self) -> None:
+        intent = {"proves": ["AC-1"], "level": "unit", "path": "apps/api/src/z.spec2.test.ts", "new": True,
+                  "anchor": "U-4", "intent": "x"}
+        plan = self.plan(test_intents=[intent, {**intent, "proves": ["AC-2"]}])  # two intents, one new file
+        group = next(g for g in plan["groups"] if g["units"] == ["U-4"])
+        self.assertEqual(group["new_tests"], ["apps/api/src/z.spec2.test.ts"])
+        self.assertEqual(group["weight"], 1 + pg.TEST_WEIGHT + pg.NEW_TEST_WEIGHT)
+        self.assertEqual(plan["test_intents"][0]["task"], group["group_id"])
+        self.assertIn("## Test intents", pg.plan_markdown(plan))
+
 
 class R4FixtureTests(unittest.TestCase):
     """Design r4 (UC4 SaveArticleAsDraft) with the Conduit facts read on 2026-11-27."""
@@ -219,6 +274,15 @@ class R4FixtureTests(unittest.TestCase):
         self.assertEqual(plan["groups"][0]["slices"], [plan["groups"][0]["units"]])  # 21 files fit one turn
         self.assertEqual(plan["checks"]["issues"], [])
 
+    def test_r4_existing_tests_are_attached_without_changing_the_groups(self) -> None:
+        plan = pg.build_plan_graph(self.trace, self.facts, k=3)
+        groups = {g["group_id"]: g for g in plan["groups"]}
+        web = next(g for g in plan["groups"] if "U-30" in g["units"])
+        self.assertEqual(len(web["tests"]), 12)
+        self.assertEqual(plan["base"]["tests"], ["apps/api/src/view/articleViewer.test.ts"])
+        self.assertEqual(len(plan["tests"]), 18)
+        self.assertEqual(len(groups), 9)
+
     def test_kept_reliance_on_the_error_handler_moves_it_into_the_base(self) -> None:
         kept = [{**c, "reason": "fixture"} for c in self.facts.reliance_candidates]
         plan = pg.build_plan_graph(self.trace, self.facts, k=3, reliance=kept)
@@ -233,6 +297,8 @@ class R4FixtureTests(unittest.TestCase):
         self.assertIn("U-26 <- U-4, U-6", report)
         self.assertIn("G0-G7 pass", report)
         self.assertTrue(pg.plan_mermaid(plan).startswith("flowchart LR"))
+        self.assertEqual(plan["test_rules"]["ui_callers"], ["U-32", "U-33", "U-35"])
+        self.assertIn("Callers of a cut edge (each driven by >= 1 ui test intent): U-32, U-33, U-35", report)
 
 
 if __name__ == "__main__":

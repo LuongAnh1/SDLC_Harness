@@ -53,13 +53,15 @@ def run_plan_graph(
     model: str,
     design_trace: dict[str, object],
     design_markdown: str,
+    requirement_trace: dict[str, object],
     project_profile_id: str,
     k: int,
     step_review: dict[str, object],
 ) -> PlanGraphResult:
     return _PlanFlow(
         settings=settings, store=store, run_id=run_id, model=model, design_trace=design_trace,
-        design_markdown=design_markdown, project_profile_id=project_profile_id, k=k, step_review=step_review,
+        design_markdown=design_markdown, requirement_trace=requirement_trace, project_profile_id=project_profile_id,
+        k=k, step_review=step_review,
     ).run()
 
 
@@ -73,6 +75,7 @@ class _PlanFlow:
         model: str,
         design_trace: dict[str, object],
         design_markdown: str,
+        requirement_trace: dict[str, object],
         project_profile_id: str,
         k: int,
         step_review: dict[str, object],
@@ -82,6 +85,8 @@ class _PlanFlow:
         self.review_mode = step_review if step_review.get("enabled") else {"review_input": False, "review_output": False}
         self.trace = design_trace
         self.design_markdown = design_markdown
+        self.requirement_trace = requirement_trace
+        self.requirement = pp.requirement_items(requirement_trace)
         self.project_profile_id = project_profile_id
         self.k = k
         self.record_path = store.artifact_path(run_id, FLOW_RECORD)
@@ -99,7 +104,8 @@ class _PlanFlow:
 
         attempts: list[dict[str, object]] = self.record.setdefault("planner", [])
         if not attempts:
-            prompt = pp.planner_prompt(design_ref=design_ref, report_ref=report_ref, output_ref=output_ref, plan_all=plan_all)
+            prompt = pp.planner_prompt(design_ref=design_ref, report_ref=report_ref, output_ref=output_ref,
+                                       plan_all=plan_all, requirement=self.requirement)
             self._turn("plan-planner", "Planner", prompt, output_ref, fresh=True)
             self._add_attempt(attempts, output_ref, plan_all)
         while attempts[-1]["issues"]:
@@ -114,7 +120,7 @@ class _PlanFlow:
                 f"The Harness checked your answer at {output_ref} mechanically and found these issues:\n"
                 + "\n".join(f"- {issue}" for issue in attempts[-1]["issues"])
                 + "\n\nFix only these and keep every other row and decision as it is. Keep the layout of the first "
-                "instruction (## Reliance, ## Base, ## Stubs, ## Notes).\n\n"
+                "instruction (## Reliance, ## Base, ## Stubs, ## Tests, ## Notes).\n\n"
                 f"When you are done, reply with only this relative path: {output_ref}"
             )
             self._turn(f"plan-planner-fix-r{len(attempts) + 1}", "Planner format fix", prompt, output_ref, fresh=False)
@@ -123,8 +129,9 @@ class _PlanFlow:
         parsed = attempts[-1]["parsed"]
         option = pp.chosen_option(parsed, plan_all)
         kept = pp.kept_reliance(parsed, plan_all)
+        intents = pp.test_intents(parsed, plan_all)
         plan = pg.build_plan_graph(self.trace, facts, k=self.k, reliance=kept, fixed_base=option["base"],
-                                   fixed_stubs=option["stubs"])
+                                   fixed_stubs=option["stubs"], test_intents=intents)
         rows = parsed["rows"]
         plan["planner"] = {
             "output_artifact": attempts[-1]["artifact"],
@@ -134,11 +141,14 @@ class _PlanFlow:
             "kept": sum(1 for row in rows if row["decision"] == "keep"),
             "dropped": sum(1 for row in rows if row["decision"] == "drop"),
             "added": sum(1 for row in rows if row["decision"] == "add"),
+            "test_intents": len(intents),
+            "new_test_files": len({item["path"] for item in intents if item["new"]}),
             "notes": parsed["notes"],
         }
         plan["inputs"] = {
             "design_trace_sha256": _sha(json.dumps(self.trace, sort_keys=True)),
             "design_markdown_sha256": _sha(self.design_markdown),
+            "requirement_trace_sha256": _sha(json.dumps(self.requirement_trace, sort_keys=True)),
             "facts_artifact": self.record["facts_artifact"],
             "candidates_artifact": candidates_artifact,
         }
@@ -185,7 +195,7 @@ class _PlanFlow:
         parsed = pp.parse_planner(text)
         artifact = self._archive(f"plan_planner_a{len(attempts) + 1}.md", text)
         attempts.append({"artifact": artifact, "sha256": _sha(text), "parsed": parsed,
-                         "issues": pp.planner_issues(parsed, plan_all)})
+                         "issues": pp.planner_issues(parsed, plan_all, self.requirement)})
         self._write_record()
 
     def _turn(self, prefix: str, label: str, prompt: str, output_ref: str, *, fresh: bool) -> None:
@@ -285,6 +295,7 @@ def _notes(plan: dict[str, object]) -> str:
         "\n## Planner\n\n"
         f"Kept {planner.get('kept')}, dropped {planner.get('dropped')}, added {planner.get('added')} reliance edges; "
         f"base option {planner.get('option')}: {planner.get('option_reason')}\n\n"
+        f"Test intents: {planner.get('test_intents')} ({planner.get('new_test_files')} new test files)\n\n"
         f"Notes: {planner.get('notes') or 'none'}\n"
     )
 
