@@ -24,6 +24,7 @@ PLANNING_PATH_POLICY_VERSION = "planning_path_policy_v1"
 STYLESHEET_ROOTS = {"apps/web/src": (".css",)}
 # Every unit with a data surface may edit the schema and add migrations under this root (component_plan).
 DATABASE_SCHEMA_ROOT = "packages/db/prisma"
+DATABASE_SCHEMA_SUFFIXES = (".prisma", ".sql")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[a-zA-Z]:")
 
 
@@ -80,7 +81,7 @@ class PlanningPathPolicy:
             "special_roots": {
                 "database_schema_and_migrations": {
                     "root": DATABASE_SCHEMA_ROOT,
-                    "suffixes": [".prisma", ".sql"],
+                    "suffixes": list(DATABASE_SCHEMA_SUFFIXES),
                 },
                 "browser_e2e": {
                     "root": "tests/e2e",

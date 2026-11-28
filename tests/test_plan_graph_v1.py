@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import unittest
@@ -97,6 +98,27 @@ class GraphTests(unittest.TestCase):
         groups = [g["units"] for g in plan["groups"]]
         self.assertIn(["U-5"], groups)  # the http edge to U-4 is cut
         self.assertEqual(plan["checks"]["issues"], [])
+
+    def test_a_schema_and_its_migration_share_one_task(self) -> None:
+        migration = ("U-6", ["packages/db/prisma/migrations/20261128000100_add/migration.sql (new)"], ["U-1"])
+        seed = ("U-7", ["packages/db/prisma/seed.ts"], ["U-3"])  # under the root but not a schema file
+        t = trace(SCHEMA, ("U-3", ["packages/db/src/read.ts"], ["U-1"]), migration, ("U-4", ["apps/api/src/get.ts"], ["U-3"]),
+                  seed)
+        apart = pg.build_plan_graph(t, facts(), k=2)
+        self.assertNotIn("U-6", apart["base"]["units"])  # without the fact the migration waits for a later group
+        plan = pg.build_plan_graph(t, facts(schema_roots=("packages/db/prisma",), schema_suffixes=(".prisma", ".sql")), k=2)
+        self.assertTrue({"U-1", "U-6"} <= set(plan["base"]["units"]))
+        self.assertNotIn("U-7", plan["base"]["units"])
+        self.assertIn(["U-1", "U-6"], plan["sccs"])
+        self.assertEqual({(e["from"], e["to"]) for e in plan["edges"] if e["type"] == "schema"},
+                         {("U-1", "U-6"), ("U-6", "U-1")})
+        self.assertEqual(plan["checks"]["issues"], [])
+        # with no code generator involved the writers still land in one group
+        loose = trace(("U-1", ["packages/db/prisma/schema.prisma"], []), migration[:2] + ([],))
+        no_generator = facts(generate_inputs=frozenset())
+        self.assertEqual(len(pg.build_plan_graph(loose, no_generator, k=2)["groups"]), 2)
+        joined = pg.build_plan_graph(loose, facts(generate_inputs=frozenset(), schema_roots=("packages/db/prisma",)), k=2)
+        self.assertEqual([g["units"] for g in joined["groups"]], [["U-1", "U-6"]])
 
     def test_barrel_does_not_glue_groups_but_another_shared_file_does(self) -> None:
         t = trace(
@@ -260,9 +282,16 @@ class R4FixtureTests(unittest.TestCase):
     def test_edge_counts_and_no_cycle(self) -> None:
         plan = pg.build_plan_graph(self.trace, self.facts, k=3)
         counts = {kind: sum(1 for e in plan["edges"] if e["type"] == kind) for kind in pg.EDGE_TYPES}
-        self.assertEqual(counts, {"build": 14, "import": 33, "http": 12, "verify": 7, "reliance": 0})
+        self.assertEqual(counts, {"build": 14, "import": 33, "http": 12, "verify": 7, "reliance": 0, "schema": 0})
         self.assertEqual(plan["sccs"], [])
         self.assertEqual(plan["integration"]["units"], ["U-28", "U-29"])
+
+    def test_r4_migration_joins_the_schema_in_the_base(self) -> None:
+        facts = replace(self.facts, schema_roots=("packages/db/prisma",))
+        plan = pg.build_plan_graph(self.trace, facts, k=3)
+        self.assertEqual(plan["base"]["units"], ["U-1", "U-2", "U-3", "U-4"])
+        self.assertNotIn("U-2", [unit for group in plan["groups"] for unit in group["units"]])
+        self.assertEqual(plan["checks"]["issues"], [])
 
     def test_k3_keeps_the_article_core_group_whole(self) -> None:
         plan = pg.build_plan_graph(self.trace, self.facts, k=3)

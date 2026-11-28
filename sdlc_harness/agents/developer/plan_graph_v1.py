@@ -8,7 +8,9 @@ Nodes are the Design's units (`U-n`). An edge `u -> v` means u uses v; its type 
 - `http`: u's package cannot import v's package; the two meet at runtime through the shared contract (cut, owner
   decision 2026-11-27; the contract units start in the base);
 - `verify`: u only writes whole-system check files (e2e specs, stage scripts); u runs after every merge;
-- `reliance`: u relies on v's behaviour without using it (the Planner keeps it from a Harness candidate, with a reason).
+- `reliance`: u relies on v's behaviour without using it (the Planner keeps it from a Harness candidate, with a reason);
+- `schema`: u and v both write under one schema root of the profile (a database schema and its migrations), which
+  changes as one piece: the edge runs both ways, so the writers form one atomic component (not cuttable).
 
 Strongly connected components are atomic. The base is a down-set (build sources, contract units and the hub units the
 search adds), the integration task an up-set (check units), and the groups are the weakly connected components of the
@@ -29,8 +31,8 @@ import re
 from ...repo_context.plan_facts import RepoFacts, clean_path
 
 PLAN_GRAPH_SCHEMA_VERSION = "plan_graph_v1"
-EDGE_TYPES = ("build", "import", "http", "verify", "reliance")
-HARD_EDGES = frozenset({"build", "import", "verify", "reliance"})
+EDGE_TYPES = ("build", "import", "http", "verify", "reliance", "schema")
+HARD_EDGES = frozenset({"build", "import", "verify", "reliance", "schema"})
 DEFAULT_K = 3
 DEFAULT_C0 = 2.0
 DEFAULT_THRESHOLD = 0.15
@@ -65,7 +67,8 @@ def unit_files(trace: Mapping[str, object]) -> dict[str, list[str]]:
 def classify_edges(
     trace: Mapping[str, object], facts: RepoFacts, reliance: Sequence[Mapping[str, object]] = ()
 ) -> list[dict[str, object]]:
-    """Every `Uses` edge with its type, then the kept `reliance` edges (each with its reason and evidence)."""
+    """Every `Uses` edge with its type, the kept `reliance` edges (each with its reason and evidence), then the
+    `schema` edges between the writers of each schema root."""
 
     files = unit_files(trace)
     packages = {unit: {facts.package_of(path) for path in paths} for unit, paths in files.items()}
@@ -95,6 +98,17 @@ def classify_edges(
                 "evidence": list(item.get("evidence") or []),
             }
         )
+    for root in facts.schema_roots:
+        writers = _sorted(
+            unit for unit, paths in files.items()
+            if unit not in checks and any(
+                path.startswith(root + "/") and (not facts.schema_suffixes or path.endswith(facts.schema_suffixes))
+                for path in paths
+            )
+        )
+        for first, second in zip(writers, writers[1:]):  # a chain both ways joins every writer into one component
+            edges.append({"from": first, "to": second, "type": "schema", "origin": "schema_root", "root": root})
+            edges.append({"from": second, "to": first, "type": "schema", "origin": "schema_root", "root": root})
     return edges
 
 

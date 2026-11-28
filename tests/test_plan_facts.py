@@ -87,6 +87,7 @@ class PlanFactsTests(unittest.TestCase):
             stage_argvs=[(("npm", "run", "db:smoke"), "."), (("npm", "run", "test:e2e"), ".")],
             generate_triggers=["packages/db/prisma/schema.prisma"],
             test_suffixes=(".test.ts", ".test.tsx", ".spec.ts"),
+            schema_roots=["packages/db/prisma/"],
         )
 
     def tearDown(self) -> None:
@@ -132,6 +133,7 @@ class PlanFactsTests(unittest.TestCase):
         self.assertEqual(self.facts.check_roots, ("tests/e2e",))
 
     def test_round_trip(self) -> None:
+        self.assertEqual(self.facts.schema_roots, ("packages/db/prisma",))
         self.assertEqual(RepoFacts.from_dict(self.facts.to_dict()).to_dict(), self.facts.to_dict())
 
 

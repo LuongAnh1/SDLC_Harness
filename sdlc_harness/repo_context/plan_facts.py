@@ -53,6 +53,10 @@ class RepoFacts:
     tests: tuple[dict[str, object], ...] = field(default_factory=tuple)
     test_suffixes: tuple[str, ...] = ()
     check_roots: tuple[str, ...] = ()
+    # Directories whose files change together (a database schema and its migrations): the writers of their files with
+    # one of `schema_suffixes` (any suffix when empty) share one task.
+    schema_roots: tuple[str, ...] = ()
+    schema_suffixes: tuple[str, ...] = ()
 
     def package_of(self, path: str) -> str:
         return package_of(path, self.package_dirs)
@@ -79,6 +83,8 @@ class RepoFacts:
             tests=tuple(dict(item) for item in data.get("tests") or ()),
             test_suffixes=tuple(str(item) for item in data.get("test_suffixes") or ()),
             check_roots=tuple(str(item) for item in data.get("check_roots") or ()),
+            schema_roots=tuple(str(item) for item in data.get("schema_roots") or ()),
+            schema_suffixes=tuple(str(item) for item in data.get("schema_suffixes") or ()),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -97,6 +103,8 @@ class RepoFacts:
             "tests": list(self.tests),
             "test_suffixes": list(self.test_suffixes),
             "check_roots": list(self.check_roots),
+            "schema_roots": list(self.schema_roots),
+            "schema_suffixes": list(self.schema_suffixes),
         }
 
 
@@ -127,6 +135,8 @@ def build_repo_facts(
     gate_stage_ids: Sequence[str] = GATE_STAGE_IDS,
     check_component_ids: Sequence[str] = CHECK_COMPONENT_IDS,
     test_suffixes: Sequence[str] = (),
+    schema_roots: Sequence[str] = (),
+    schema_suffixes: Sequence[str] = (),
 ) -> RepoFacts:
     """Facts for the units' files. `stage_argvs` are ``(argv, cwd)`` pairs of the pinned verification stages."""
 
@@ -176,6 +186,8 @@ def build_repo_facts(
         tests=tuple(existing_tests(root, files_by_unit, dirs, check_roots, entries, tuple(test_suffixes))),
         test_suffixes=tuple(test_suffixes),
         check_roots=tuple(check_roots),
+        schema_roots=tuple(clean_path(item).rstrip("/") for item in schema_roots),
+        schema_suffixes=tuple(schema_suffixes),
     )
 
 
@@ -185,6 +197,7 @@ def repo_facts_for_profile(
     """`build_repo_facts` fed from the pinned project profile and its verification registry."""
 
     from ..profiles import build_verification_stage_policy
+    from ..profiles.planning import DATABASE_SCHEMA_ROOT, DATABASE_SCHEMA_SUFFIXES
     from ..profiles.registry import get_language_profile, get_project_profile
     from ..verification.registry import resolve_verification_preparation_specs, resolve_verification_stage_specs
 
@@ -205,6 +218,8 @@ def repo_facts_for_profile(
         generate_triggers=[item.trigger_path for item in preparations if item.preparation_id == GENERATED_SOURCE_PREPARATION],
         gate_stage_ids=tuple(stage_id for stage_id in GATE_STAGE_IDS if stage_id in {stage.stage_id for stage in stages}),
         test_suffixes=get_language_profile(project.language_profile_id).test_suffixes,
+        schema_roots=(DATABASE_SCHEMA_ROOT,),
+        schema_suffixes=DATABASE_SCHEMA_SUFFIXES,
     )
 
 
