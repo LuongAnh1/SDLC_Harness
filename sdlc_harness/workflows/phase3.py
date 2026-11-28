@@ -363,11 +363,11 @@ class PhaseThreeWorkflow:
                     "estimated_t": plan["schedule"]["mode_b"]["T"],
                     "planner_notes": planner.get("notes"),
                 },
-                "allowed_next_actions": ["get_status", "cancel_run"],
+                "allowed_next_actions": ["approve_checkpoint", "get_status", "cancel_run"],
                 "last_error": None,
                 "summary_for_user": (
                     "Plan H-OC (đồ thị task, báo cáo, sơ đồ) đã sẵn sàng để anh xem. "
-                    "Chưa có Phase 4 H-OC nên chưa duyệt được."
+                    "Duyệt checkpoint Plan để bắt đầu thực thi H-OC."
                 ),
             }
         )

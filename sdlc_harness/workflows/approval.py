@@ -8,7 +8,8 @@ from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..storage.artifact_index import artifact_scope
 from ..storage.runtime import RuntimeStore
-from .graph import APPROVAL_REFUSALS, PHASE_FOUR, PHASE_THREE, PHASE_TWO, approval_for
+from .graph import APPROVAL_REFUSALS, PHASE_FOUR, PHASE_HOC, PHASE_THREE, PHASE_TWO, approval_for
+from .hoc_execution import HocExecutionWorkflow
 from .phase2 import PhaseTwoWorkflow
 from .phase3 import PhaseThreeWorkflow
 from .phase4 import PhaseFourWorkflow
@@ -28,15 +29,8 @@ class CheckpointApprovalWorkflow:
         if status in APPROVAL_REFUSALS:
             error_code, message = APPROVAL_REFUSALS[status]
             raise HarnessError(error_code, message, run_id=run_id)
-        # An OpenCode run's Markdown requirement starts the Markdown design (PhaseTwoWorkflow.approve_checkpoint) and
-        # its design starts the plan graph (PhaseThreeWorkflow.approve_design_checkpoint); its plan has no OpenCode
-        # execution phase yet.
         if status == "waiting_implementation_plan_review" and state.get("plan_opencode_flow"):
-            raise HarnessError(
-                "plan_hoc_execution_unavailable",
-                "This OpenCode run has a plan graph; its execution phase (Phase 4 H-OC) is not built yet.",
-                run_id=run_id,
-            )
+            return HocExecutionWorkflow(self.settings).approve_plan_checkpoint(run_id=run_id, checkpoint_id=checkpoint_id)
         approval = approval_for(status)
         if approval is None:
             raise HarnessError(
@@ -44,7 +38,10 @@ class CheckpointApprovalWorkflow:
                 f"Run does not have an approvable checkpoint: {run_id}",
                 run_id=run_id,
             )
-        workflows = {PHASE_TWO: PhaseTwoWorkflow, PHASE_THREE: PhaseThreeWorkflow, PHASE_FOUR: PhaseFourWorkflow}
+        workflows = {
+            PHASE_TWO: PhaseTwoWorkflow, PHASE_THREE: PhaseThreeWorkflow, PHASE_FOUR: PhaseFourWorkflow,
+            PHASE_HOC: HocExecutionWorkflow,
+        }
         workflow = workflows[approval.workflow](self.settings)
         # Only Phase 4 reads go through the recorded helpers; elsewhere `inputs` stays null (not tracked).
         scope = (

@@ -77,6 +77,7 @@ _RUN_SCOPED_STAGE_IDS = {
     "browser_capture",
     "cleanup",
 }
+HARNESS_LANE_STAGES = frozenset({"runtime_probe", "browser_capture", "repository_e2e"})
 
 
 @dataclass(frozen=True)
@@ -335,6 +336,55 @@ class VerificationRunner:
         )
         return result
 
+    def run_harness_stages(
+        self,
+        *,
+        target_path: Path,
+        run_id: str,
+        verification_policy: VerificationStagePolicy,
+        stage_ids: tuple[str, ...],
+    ) -> VerificationResult:
+        """Run a nonempty, ordered selection of pinned stages with no lane-only inputs."""
+
+        selected = set(stage_ids)
+        if (not selected or selected & HARNESS_LANE_STAGES
+                or tuple(stage for stage in verification_policy.stage_ids if stage in selected) != stage_ids):
+            raise HarnessError(
+                "verification_stage_policy_invalid", "Invalid Harness stage selection for the run policy.", run_id=run_id,
+            )
+        return self._run_profiled_stages(
+            target_path=target_path,
+            work_packet=None,
+            required_test_files=None,
+            verification_policy=verification_policy,
+            selected_stage_ids=stage_ids,
+            run_id=run_id,
+        )
+
+    def prepare_worktree(
+        self,
+        *,
+        target_path: Path,
+        run_id: str,
+        verification_policy: VerificationStagePolicy,
+        preparation_ids: tuple[str, ...] | None = None,
+    ) -> tuple[VerificationStageResult, ...]:
+        """Run the pinned fingerprinted preparations, optionally selecting a subset."""
+
+        target_root = target_path.resolve()
+        if not target_root.is_dir():
+            raise HarnessError("verification_preparation_failed", "Preparation target is not a directory.", run_id=run_id)
+        resolve_verification_stage_specs(verification_policy, run_id=run_id)
+        specs = resolve_verification_preparation_specs(verification_policy, run_id=run_id)
+        if preparation_ids is not None:
+            requested = set(preparation_ids)
+            specs = tuple(spec for spec in specs if spec.preparation_id in requested)
+            if len(specs) != len(preparation_ids):
+                raise HarnessError(
+                    "verification_stage_policy_invalid", "Invalid worktree preparation selection.", run_id=run_id,
+                )
+        return tuple(_run_preparations(target_root, specs))
+
     def _run_internal(
         self,
         *,
@@ -366,7 +416,7 @@ class VerificationRunner:
         self,
         *,
         target_path: Path,
-        work_packet: dict[str, object],
+        work_packet: dict[str, object] | None,
         required_test_files: list[str] | None,
         verification_policy: VerificationStagePolicy,
         selected_stage_ids: tuple[str, ...] | None = None,
@@ -374,12 +424,14 @@ class VerificationRunner:
         runtime_probe: RuntimeProbeRun | None = None,
         browser_capture: BrowserCaptureRun | None = None,
         demo_flag_stage: tuple[str, str] | None = None,
+        run_id: str | None = None,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
-        run_id = str(work_packet.get("run_id") or "") or None
+        if work_packet is not None:
+            run_id = str(work_packet.get("run_id") or "") or None
         specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
-        planned = {spec.stage_id for spec in specs}
+        planned = set(selected_stage_ids or ()) if work_packet is None else {spec.stage_id for spec in specs}
         # Harness-owned env reaches exactly one stage each; no other stage sees these keys.
         stage_extra_env = {
             "runtime_probe": (
@@ -405,13 +457,14 @@ class VerificationRunner:
                     run_id=run_id,
                 )
         preparation_specs = resolve_verification_preparation_specs(verification_policy, run_id=run_id)
-        _validate_profiled_work_packet(
-            work_packet,
-            verification_policy=verification_policy,
-            run_id=run_id,
-            developer_unit_scope=developer_unit_scope,
-            selected_stage_ids=selected_stage_ids,
-        )
+        if work_packet is not None:
+            _validate_profiled_work_packet(
+                work_packet,
+                verification_policy=verification_policy,
+                run_id=run_id,
+                developer_unit_scope=developer_unit_scope,
+                selected_stage_ids=selected_stage_ids,
+            )
         planned_stage_ids = tuple(spec.stage_id for spec in specs)
         target_root = target_path.resolve()
         if not target_root.is_dir():
@@ -423,7 +476,7 @@ class VerificationRunner:
         selected_test_files = _profiled_required_test_files(
             target_root=target_root,
             required_test_files=required_test_files or [],
-            work_packet=work_packet,
+            work_packet=work_packet or {},
             verification_policy=verification_policy,
             run_id=run_id,
             developer_unit_scope=developer_unit_scope,
@@ -438,24 +491,16 @@ class VerificationRunner:
                 failure_kind="policy",
             )
 
-        preparation_results: list[VerificationStageResult] = []
-        for preparation_spec in preparation_specs:
-            preparation_result = _run_profiled_preparation(
-                target_root=target_root,
-                spec=preparation_spec,
+        preparation_results = _run_preparations(target_root, preparation_specs)
+        if preparation_results and preparation_results[-1].status != "passed":
+            return _profiled_result(
+                target_path=target_root,
+                planned_stage_ids=planned_stage_ids,
+                stage_results=[],
+                preparation_results=preparation_results,
+                terminal=preparation_results[-1],
+                selected_test_files=selected_test_files,
             )
-            if preparation_result is None:
-                continue
-            preparation_results.append(preparation_result)
-            if preparation_result.status != "passed":
-                return _profiled_result(
-                    target_path=target_root,
-                    planned_stage_ids=planned_stage_ids,
-                    stage_results=[],
-                    preparation_results=preparation_results,
-                    terminal=preparation_result,
-                    selected_test_files=selected_test_files,
-                )
 
         prepared: list[tuple[VerificationStageSpec, Path, str, dict[str, str]]] = []
         for spec in specs:
@@ -1704,6 +1749,19 @@ def _profiled_result(
             for path in item.verified_test_files
         ),
     )
+
+
+def _run_preparations(
+    target_root: Path, specs: tuple[VerificationPreparationSpec, ...]
+) -> list[VerificationStageResult]:
+    results = []
+    for spec in specs:
+        result = _run_profiled_preparation(target_root=target_root, spec=spec)
+        if result is not None:
+            results.append(result)
+            if result.status != "passed":
+                break
+    return results
 
 
 def _run_profiled_preparation(

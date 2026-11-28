@@ -129,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
     restart_plan.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     restart_plan.add_argument("--runtime-root", default=None)
 
+    restart_execution = subparsers.add_parser("restart-execution")
+    restart_execution.add_argument("--run-id", required=True)
+    restart_execution.add_argument("--reason", required=True)
+    restart_execution.add_argument("--runtime-root", default=None)
+
     revalidate_requirement = subparsers.add_parser("revalidate-requirement")
     revalidate_requirement.add_argument("--run-id", required=True)
     revalidate_requirement.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
@@ -202,6 +207,7 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "revalidate-design": ("run_id",),
     "restart-design": ("run_id",),
     "restart-plan": ("run_id", "reason"),
+    "restart-execution": ("run_id", "reason"),
     "rewind-run": ("run_id", "node", "reason"),
     "adjust-budget": ("run_id", "budget_id", "limit", "reason"),
     "run-until-checkpoint": ("run_id", "max_steps"),

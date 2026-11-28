@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..profiles import list_project_profile_ids
 from .errors import HarnessError
@@ -431,6 +430,13 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED", "Pause implementation-plan LLM steps", "boolean", False, "Dừng Phase 3 tại từng input/output LLM để người vận hành kiểm tra."),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED", "Review implementation-plan LLM input", "boolean", True, "Dừng trước khi gửi từng input LLM của Phase 3."),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED", "Review implementation-plan LLM output", "boolean", True, "Dừng sau khi nhận từng output LLM của Phase 3."),
+            _field("SDLC_HOC_WORKER", "H-OC worker", "enum", "codex", "Worker thực thi H-OC.", options=("codex", "opencode")),
+            _field("SDLC_HOC_CODEX_MODEL", "H-OC Codex model", "string", "gpt-6-luna", "Model dùng cho lượt H-OC có quyền ghi."),
+            _field("SDLC_HOC_CODEX_EFFORT", "H-OC Codex effort", "string", "max", "Mức reasoning dùng cho lượt H-OC có quyền ghi."),
+            _field("SDLC_HOC_CODEX_REVIEWER_MODEL", "H-OC Codex reviewer model", "string", "gpt-6-luna", "Model dùng cho lượt review H-OC chỉ đọc."),
+            _field("SDLC_HOC_CODEX_REVIEWER_EFFORT", "H-OC Codex reviewer effort", "string", "high", "Mức reasoning dùng cho lượt review H-OC chỉ đọc."),
+            _field("SDLC_HOC_EXECUTION_MODE", "H-OC execution mode", "enum", "b", "Mode a dùng một agent, mode b dùng lịch song song.", options=("a", "b")),
+            _field("SDLC_HOC_BASE_REVIEW_PAUSE", "Pause after H-OC base review", "boolean", True, "Dừng để owner duyệt base trước khi chạy agent."),
             _field("SDLC_IMPLEMENTATION_REPAIR_LIMIT", "Implementation repair limit", "integer", 2, "Số vòng Developer, Verification và Validator.", minimum=0),
             _field("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET", "Implementation call budget", "integer", 0, "Ngân sách call cho Code Validator; 0 = tự tính 2 x số task review.", minimum=0),
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED", "Pause Code Validator LLM steps", "boolean", False, "Dừng Phase 4 tại từng input/output Code Validator để người vận hành kiểm tra."),

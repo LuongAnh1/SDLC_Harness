@@ -56,6 +56,21 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(overridden.llm_model, "invocation-model")
         self.assertEqual(settings.runtime_config_path, self.config_path.resolve())
 
+    def test_hoc_codex_role_defaults_and_environment_overrides(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = load_settings(root=self.root, runtime_root=self.runtime_root)
+        self.assertEqual((settings.hoc_codex_model, settings.hoc_codex_effort), ("gpt-6-luna", "max"))
+        self.assertEqual((settings.hoc_codex_reviewer_model, settings.hoc_codex_reviewer_effort), ("gpt-6-luna", "high"))
+        with patch.dict(os.environ, {
+            "SDLC_HOC_CODEX_MODEL": "work-model",
+            "SDLC_HOC_CODEX_EFFORT": "medium",
+            "SDLC_HOC_CODEX_REVIEWER_MODEL": "review-model",
+            "SDLC_HOC_CODEX_REVIEWER_EFFORT": "low",
+        }, clear=True):
+            settings = load_settings(root=self.root, runtime_root=self.runtime_root)
+        self.assertEqual((settings.hoc_codex_model, settings.hoc_codex_effort), ("work-model", "medium"))
+        self.assertEqual((settings.hoc_codex_reviewer_model, settings.hoc_codex_reviewer_effort), ("review-model", "low"))
+
     def test_project_profile_defaults_to_typescript_and_uses_normal_config_precedence(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             default = load_settings(root=self.root, runtime_root=self.runtime_root)

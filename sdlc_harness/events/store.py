@@ -43,12 +43,16 @@ _EVENT_MESSAGES = {
     "llm_call_started": "LLM call started.",
     "llm_call_completed": "LLM call completed.",
     "llm_call_failed": "LLM call failed.",
+    "codex_call_completed": "Codex call completed.",
     "repair_iteration_started": "Repair iteration started.",
     "repair_iteration_completed": "Repair iteration completed.",
     "verification_completed": "Verification completed.",
     "validator_completed": "Validator completed.",
     "qa_completed": "QA completed.",
     "sync_completed": "Synchronization completed.",
+    "hoc_turn_checked": "H-OC turn checked.",
+    "hoc_merge_finished": "H-OC merge checked.",
+    "hoc_execution_stopped": "H-OC execution stopped.",
 }
 _DATA_ALLOWLIST: dict[str, frozenset[str]] = {
     "operation_queued": frozenset({"operation_command", "sync_mode"}),
@@ -63,12 +67,16 @@ _DATA_ALLOWLIST: dict[str, frozenset[str]] = {
     "llm_call_started": frozenset({"mode", "model", "json_mode"}),
     "llm_call_completed": frozenset({"mode", "model", "json_mode", "finish_reason", "duration_seconds", "prompt_tokens", "completion_tokens", "total_tokens"}),
     "llm_call_failed": frozenset({"mode", "model", "json_mode", "duration_seconds", "error_code"}),
+    "codex_call_completed": frozenset({"model", "effort", "role"}),
     "repair_iteration_started": frozenset({"repair_phase", "iteration", "limit"}),
     "repair_iteration_completed": frozenset({"repair_phase", "iteration", "result"}),
     "verification_completed": frozenset({"status", "exit_code", "timed_out", "duration_seconds", "discovered_tests", "executed_tests"}),
     "validator_completed": frozenset({"validator", "status", "blockers", "warnings", "repair_iterations"}),
     "qa_completed": frozenset({"status", "scenario_count", "passed_count", "failed_count", "repair_iterations"}),
     "sync_completed": frozenset({"sync_phase", "mode", "status", "targets"}),
+    "hoc_turn_checked": frozenset({"agent_id", "result", "sha"}),
+    "hoc_merge_finished": frozenset({"agent_id", "result", "sha"}),
+    "hoc_execution_stopped": frozenset({"agent_id"}),
 }
 
 

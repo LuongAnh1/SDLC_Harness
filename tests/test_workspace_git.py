@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import replace as dataclass_replace
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -822,6 +823,19 @@ class WorkspaceGitTests(unittest.TestCase):
         codegraph = Path(record.worktree_path) / ".codegraph"
         codegraph.mkdir()
         (codegraph / "index.json").write_text("{}\n", encoding="utf-8")
+        # Installed dependencies: npm links a workspace package into node_modules (a junction on Windows), which
+        # `git worktree remove` would follow and empty before failing.
+        with (Path(self.canonical) / ".git/info/exclude").open("a", encoding="utf-8") as handle:
+            handle.write("node_modules/\n")
+        outside = Path(self.temp_dir.name) / "outside package"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+        link = Path(record.worktree_path) / "node_modules/@t/outside"
+        link.parent.mkdir(parents=True)
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+        else:
+            os.symlink(outside, link, target_is_directory=True)
 
         cleaned, changed = self.manager.cleanup_run(
             self.run_id,
@@ -833,6 +847,7 @@ class WorkspaceGitTests(unittest.TestCase):
         self.assertEqual(cleaned.cleanup_reason, "run_cancelled")
         self.assertTrue(cleaned.local_branch_deleted)
         self.assertFalse(Path(record.worktree_path).exists())
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep\n")
         self.assertEqual(_git(self.canonical, "branch", "--list", record.branch), "")
         self.assertEqual(_git(self.canonical, "ls-remote", "--heads", "origin", record.branch).split()[0], record.head_sha)
         self.assertEqual(self.store.read_state(self.run_id)["status"], "cancelled")

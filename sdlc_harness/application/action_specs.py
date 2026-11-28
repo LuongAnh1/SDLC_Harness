@@ -78,6 +78,13 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": set(),
         "confirmation": "confirm",
     },
+    "restart_execution": {
+        "command": "restart-execution",
+        "required": {"reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "revalidate_requirement": {
         "command": "revalidate-requirement",
         "required": set(),

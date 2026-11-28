@@ -21,7 +21,8 @@ from ..sources.jira import jira_source_ref_for
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..workspaces.manager import RunWorkspaceManager
 from ..workflows.approval import CheckpointApprovalWorkflow
-from ..workflows.graph import PHASE_FOUR, PHASE_ONE, PHASE_THREE, PHASE_TWO, node_for
+from ..workflows.graph import PHASE_FOUR, PHASE_HOC, PHASE_ONE, PHASE_THREE, PHASE_TWO, node_for
+from ..workflows.hoc_execution import HocExecutionWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
 from ..workflows.phase2 import PhaseTwoWorkflow
 from ..workflows.phase3 import PhaseThreeWorkflow
@@ -93,6 +94,7 @@ class ApplicationService:
             "revalidate-design",
             "restart-design",
             "restart-plan",
+            "restart-execution",
             "revalidate-requirement",
             "clarify-more",
             "challenge-assumption",
@@ -260,6 +262,7 @@ class ApplicationService:
                 PHASE_TWO: PhaseTwoWorkflow,
                 PHASE_THREE: PhaseThreeWorkflow,
                 PHASE_FOUR: PhaseFourWorkflow,
+                PHASE_HOC: HocExecutionWorkflow,
             }
             developer_review: dict[str, object] = {}
             review_all = bool(command.arguments.get("step_review"))
@@ -285,7 +288,7 @@ class ApplicationService:
                     }
                 return getattr(workflows[pause.workflow](settings, **step_reviews), pause.method)(run_id=run_id)
             if node is not None and node.workflow != PHASE_FOUR and node.continue_routes:
-                if node.kind == "running":
+                if node.kind == "running" and (node.workflow != PHASE_HOC or state.get("hoc_call_active")):
                     # We hold the run lock, so the command that set this in-progress status is gone.
                     state.setdefault("recoveries", []).append(
                         {
@@ -298,6 +301,8 @@ class ApplicationService:
                     phase_one.store.write_state(state)
                 workflow = phase_one if node.workflow == PHASE_ONE else workflows[node.workflow](settings)
                 return getattr(workflow, node.continue_routes[0].handler)(run_id=run_id)
+            if state.get("current_phase") == "hoc_execution":
+                return HocExecutionWorkflow(settings).continue_execution(run_id=run_id)
             return PhaseFourWorkflow(
                 settings,
                 developer_step_review=developer_review or None,
@@ -327,6 +332,11 @@ class ApplicationService:
                 run_id=self._required_text(command, "run_id"),
                 reason=self._required_text(command, "reason"),
             )
+        if name == "restart-execution":
+            return HocExecutionWorkflow(settings).restart_execution(
+                run_id=self._required_text(command, "run_id"),
+                reason=self._required_text(command, "reason"),
+            )
         if name == "run-until-checkpoint":
             raw_steps = self._optional_text(command, "max_steps")
             if raw_steps is not None and not raw_steps.strip().isdigit():
@@ -348,9 +358,12 @@ class ApplicationService:
             raw_limit = self._required_text(command, "limit")
             if not raw_limit.strip().isdigit():
                 raise HarnessError("budget_limit_invalid", "limit must be a whole number of repair rounds.")
-            return PhaseFourWorkflow(settings).adjust_budget(
+            budget_id = self._required_text(command, "budget_id")
+            # H-OC execution budgets (hoc_*) live in the H-OC journal, not in graph.REPAIR_BUDGETS.
+            workflow = HocExecutionWorkflow(settings) if budget_id.startswith("hoc_") else PhaseFourWorkflow(settings)
+            return workflow.adjust_budget(
                 run_id=self._required_text(command, "run_id"),
-                budget_id=self._required_text(command, "budget_id"),
+                budget_id=budget_id,
                 limit=int(raw_limit),
                 reason=self._required_text(command, "reason"),
             )

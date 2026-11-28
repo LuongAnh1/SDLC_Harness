@@ -191,7 +191,7 @@ class PlanWiringTests(FlowCase):
         self.workspace.stop()
         super().tearDown()
 
-    def test_design_approval_starts_the_plan_and_opens_a_plan_checkpoint_that_cannot_be_approved_yet(self) -> None:
+    def test_design_approval_starts_the_plan_and_opens_a_plan_checkpoint(self) -> None:
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=RUN_ID)
         self.assertEqual(response["status"], "waiting_implementation_plan_review")
         state = self.store.read_state(RUN_ID)
@@ -207,9 +207,7 @@ class PlanWiringTests(FlowCase):
         self.assertEqual((checkpoint["type"], checkpoint["k"]), ("implementation_plan_review", 3))
         self.assertEqual(checkpoint["counts"]["groups"], 8)
         self.assertTrue(state["latest_artifacts"]["plan_graph"].endswith("plan_graph_v1.json"))
-        with self.assertRaises(HarnessError) as error:
-            CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=RUN_ID)
-        self.assertEqual(error.exception.error_code, "plan_hoc_execution_unavailable")
+        self.assertIn("approve_checkpoint", state["allowed_next_actions"])
 
     def test_step_review_pauses_and_continue_resumes_the_plan(self) -> None:
         review = {"enabled": True, "review_input": False, "review_output": True}
