@@ -22,6 +22,7 @@ from sdlc_harness.core.config import Settings, load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.workflows import graph
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
+from sdlc_harness.workflows.hoc_execution import HocExecutionWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
@@ -33,6 +34,7 @@ WORKFLOW_CLASSES = {
     graph.PHASE_TWO: PhaseTwoWorkflow,
     graph.PHASE_THREE: PhaseThreeWorkflow,
     graph.PHASE_FOUR: PhaseFourWorkflow,
+    graph.PHASE_HOC: HocExecutionWorkflow,
 }
 # Predicates the Phase 4 dispatcher reads directly; the graph's named predicates are built from these.
 INSTANCE_LEAVES = (

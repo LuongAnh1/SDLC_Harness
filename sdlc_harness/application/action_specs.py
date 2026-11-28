@@ -71,6 +71,20 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": {"design_repair_limit", "design_llm_call_budget"},
         "confirmation": "confirm",
     },
+    "restart_plan": {
+        "command": "restart-plan",
+        "required": {"reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
+    "restart_execution": {
+        "command": "restart-execution",
+        "required": {"reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "revalidate_requirement": {
         "command": "revalidate-requirement",
         "required": set(),

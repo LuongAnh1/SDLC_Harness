@@ -27,6 +27,25 @@ from .model import RunWorkspaceRecord, branch_name_for_run, run_suffix
 
 WORKSPACE_ARTIFACT = "run_workspace_v1.json"
 LEGACY_GITHUB_ARTIFACT = "github_code_review_v1.json"
+
+
+def unlink_directory_links(root: Path) -> None:
+    """Remove directory junctions and symlinks under `root` without following them.
+
+    `git worktree remove` on Windows descends into the junctions npm creates for workspace packages
+    (`node_modules/@scope/pkg`), deletes the files of their targets, even outside the worktree, then fails with
+    "Directory not empty". Call this before removing a worktree that may hold installed dependencies.
+    """
+
+    for current, dirs, _files in os.walk(root):
+        kept = []
+        for name in dirs:
+            path = os.path.join(current, name)
+            if os.path.islink(path) or os.path.isjunction(path):
+                os.rmdir(path) if os.name == "nt" else os.unlink(path)  # removes the link, never its target
+            else:
+                kept.append(name)
+        dirs[:] = kept
 PullRequestReader = Callable[[str, int, Path], dict[str, object]]
 CleanupPullRequestReader = Callable[[RunWorkspaceRecord], dict[str, object]]
 
@@ -139,6 +158,10 @@ class RunWorkspaceManager:
         run_suffix(run_id)
         return WorkspaceFileLock(self.locks_dir / f"workspace-{run_id}.lock", run_id=run_id)
 
+    def hoc_execution_lock(self, run_id: str) -> WorkspaceFileLock:
+        run_suffix(run_id)
+        return WorkspaceFileLock(self.locks_dir / f"hoc-{run_id}.lock", run_id=run_id)
+
     def create_for_run(self, run_id: str) -> RunWorkspaceRecord:
         """Tạo worktree mới từ remote base hoặc trả workspace hợp lệ đã có."""
 
@@ -197,8 +220,10 @@ class RunWorkspaceManager:
     ) -> tuple[RunWorkspaceRecord, bool]:
         """Dọn worktree/local branch sau merge hoặc cancel, có thể retry an toàn."""
 
+        from .agent_worktrees import AgentWorktrees
+
         run_suffix(run_id)
-        with self.registry_lock():
+        with self.hoc_execution_lock(run_id), self.registry_lock():
             with self.run_lock(run_id):
                 state = self.store.read_state(run_id)
                 record = self._read_unlocked(run_id)
@@ -233,6 +258,8 @@ class RunWorkspaceManager:
                     raise self._cleanup_error(run_id, f"Unsupported cleanup lifecycle: {record.lifecycle}")
                 else:
                     self._ensure_cleanup_recovery(record, cleanup_reason=record.cleanup_reason)
+                if Path(record.worktree_path).exists():
+                    AgentWorktrees(self.settings, run_id=run_id).remove_all_locked()
                 self._remove_workspace_and_branch(record)
                 cleaned = replace(
                     record,
@@ -838,6 +865,7 @@ class RunWorkspaceManager:
         if worktree_path in registry:
             self._require_clean_worktree(record)
             self._remove_generated_codegraph(worktree_path, run_id=record.run_id)
+            unlink_directory_links(worktree_path)
             self._git(
                 canonical_repo,
                 "worktree",

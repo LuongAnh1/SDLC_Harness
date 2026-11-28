@@ -1,0 +1,219 @@
+{
+ "source": "run_20261126_040632_ef2c129c requirement_trace_v1_r1.json (AC and IMP only)",
+ "acceptance_criteria": [
+  {
+   "id": "AC-1",
+   "title": "Saving a new article as a draft",
+   "api": "authenticated `draft: true` create is accepted with 201 and `{ article }` carrying `draft: true`; a missing or empty title is refused; description and body may be empty; unauthenticated save is 401 and stores nothing.",
+   "web": "editor offers save as draft, permits empty description and body for a draft, and shows the saved draft with a visible draft marker and not as published."
+  },
+  {
+   "id": "AC-2",
+   "title": "Draft-save validation",
+   "api": "a missing or empty title gives 400 with field errors and no stored change; a title with empty description or body is accepted as a draft.",
+   "web": "title errors are shown; empty description and body do not block a draft save."
+  },
+  {
+   "id": "AC-3",
+   "title": "A draft is private to its Author",
+   "api": "404 for every non-Author read, with no draft data; the stored draft is unchanged.",
+   "web": "no draft content is shown; the viewer is redirected or shown a not-found state."
+  },
+  {
+   "id": "AC-4",
+   "title": "Other users cannot mutate a draft",
+   "api": "404 for every Other User mutation; 401 for an unauthenticated Visitor write; no stored change and no related record created.",
+   "web": "no draft page or draft action is available to the Other User or Visitor."
+  },
+  {
+   "id": "AC-5",
+   "title": "Profile shows published articles and a separate drafts list",
+   "api": "own drafts list returns only the Author's drafts with `draft: true`, most recently edited or saved first, 10 per page with the Author's drafts count; public author list returns only published articles; non-Author drafts-list requests answer 404.",
+   "web": "own profile has a separate, visibly marked drafts list with the decided order and pagination; other profiles and the public list show no drafts."
+  },
+  {
+   "id": "AC-6",
+   "title": "Reopening and saving a draft",
+   "api": "author `draft: true` update succeeds with 200 and `{ article }` carrying `draft: true`; content is changed; no published article is created; title coexistence is accepted and the private draft address is kept.",
+   "web": "draft reopens with stored content; changes are visible after save; the draft marker remains."
+  },
+  {
+   "id": "AC-7",
+   "title": "Publishing a draft",
+   "api": "the `draft: false` update publishes once with 200 and `{ article }` where `draft` is `false`; only a non-empty title is required, and empty description and body survive into the published article; the address is title-derived with a numeric suffix when taken; the creation date is the publishing moment and the article appears in newest-first lists.",
+   "web": "article is shown as published, leaves the drafts list and appears in the published/global lists."
+  },
+  {
+   "id": "AC-8",
+   "title": "Publishing a draft whose title is already published is refused",
+   "api": "422 with `{ errors: { title: [...] } }` containing a title-taken message; no new publication; draft and existing article unchanged apart from previously saved draft changes.",
+   "web": "error is shown; the draft remains a marked draft with its content."
+  },
+  {
+   "id": "AC-9",
+   "title": "A published article never becomes a draft",
+   "api": "422 with `{ errors: { published: [...] } }`; published article remains published and unchanged; no draft is created.",
+   "web": "no unpublish control appears for a published article."
+  },
+  {
+   "id": "AC-10",
+   "title": "A draft save racing a publish keeps the article published",
+   "api": "final state is published; first publishing date is kept; the concurrent draft save receives 422 with `{ errors: { published: [...] } }`; no duplicate publication or address.",
+   "web": "the published article is displayed without a draft marker and no draft remains."
+  },
+  {
+   "id": "AC-11",
+   "title": "Publishing the same draft twice publishes once",
+   "api": "one published article with the first publishing date; the second request returns 200 with the already published article.",
+   "web": "the publish action is unavailable while the first request is in progress; no duplicate entry appears."
+  },
+  {
+   "id": "AC-12",
+   "title": "Deleting a draft removes it without publishing it",
+   "api": "the delete removes the draft and returns 200 with the deleted article body; later reads answer 404; no published article or public list entry ever exists for it.",
+   "web": "the draft disappears from the Author's drafts list."
+  },
+  {
+   "id": "AC-13",
+   "title": "Lists, counts and pages ignore drafts",
+   "api": "every article list and every article count excludes drafts; only the drafts list includes them.",
+   "web": "global, feed, tag, author-published and favorites lists show no drafts; pagination reflects the published-only counts."
+  },
+  {
+   "id": "AC-14",
+   "title": "Popular tags ignore draft-only tags",
+   "api": "tag list excludes tags whose only articles are drafts; tag appears after a published article uses it.",
+   "web": "the popular-tags sidebar shows the same filtered set."
+  },
+  {
+   "id": "AC-15",
+   "title": "Favorites and comments on a draft are refused",
+   "api": "404 for any signed-in user including the Author, 401 for an unauthenticated Visitor write; no favorite, comment or count change.",
+   "web": "the Author's draft page offers neither favorite nor comment actions."
+  },
+  {
+   "id": "AC-16",
+   "title": "Drafts and published articles may share titles",
+   "api": "creating a published article with a draft's title succeeds and gives it a title-derived address with a suffix when taken; drafts with equal titles are accepted, stay unchanged and keep their private draft addresses; saving a draft with a published title succeeds.",
+   "web": "both the draft and the published article are shown in their proper places, with the draft marked as a draft."
+  },
+  {
+   "id": "AC-17",
+   "title": "Existing articles remain published and in place",
+   "api": "existing articles answer as published with unchanged creation dates and ordering; no existing row becomes a draft.",
+   "web": "existing article pages and lists are unchanged."
+  },
+  {
+   "id": "AC-18",
+   "title": "The server enforces every rule",
+   "api": "every rule is observable through direct requests, including 404 hiding, list/counter exclusion, refused favorites/comments, refused unpublishing, single publication and publish-time dates.",
+   "web": "not required to be the enforcement point; the page may add presentation only."
+  },
+  {
+   "id": "AC-19",
+   "title": "Save and publish actions cannot be triggered twice from the web",
+   "api": "duplicate requests that still arrive are handled by the server rules (AC-10, AC-11).",
+   "web": "the in-progress save or publish control cannot start a second request."
+  },
+  {
+   "id": "AC-20",
+   "title": "Demo data contains exactly one alice draft",
+   "api": "after repeated seeding, one seeded alice draft with the decided content exists, other alice drafts are untouched, and the draft is absent from public lists/counts/tags and present in alice's drafts list.",
+   "web": "alice's profile shows the seeded draft in her drafts list; other pages do not show it."
+  }
+ ],
+ "implied_obligations": [
+  {
+   "id": "IMP-1",
+   "text": "Single-article reads must hide drafts from non-Authors and answer 404 without draft data."
+  },
+  {
+   "id": "IMP-2",
+   "text": "The global article list, author filter, tag filter, favorites filter and their counts must exclude drafts for every caller."
+  },
+  {
+   "id": "IMP-3",
+   "text": "The personal feed list and its count must exclude drafts."
+  },
+  {
+   "id": "IMP-4",
+   "text": "Reading comments for a draft must not reveal the draft."
+  },
+  {
+   "id": "IMP-5",
+   "text": "Creating a comment on a draft must be refused before any comment row is created."
+  },
+  {
+   "id": "IMP-6",
+   "text": "Favoriting and unfavoriting a draft must be refused before the favorite relation is changed."
+  },
+  {
+   "id": "IMP-7",
+   "text": "Updating or deleting a draft must require the requesting user to be its Author and answer 404 otherwise, without changing or removing the draft."
+  },
+  {
+   "id": "IMP-8",
+   "text": "Popular-tag reads must exclude tags that have no published article."
+  },
+  {
+   "id": "IMP-9",
+   "text": "The current article model has no draft/published state, makes `title` globally unique and uses `slug` as the primary key; it must be reconciled so a draft can have a private address and publication assigns a title-derived address with a numeric suffix if taken (decided by Q-12), while still refusing publication on a published title."
+  },
+  {
+   "id": "IMP-10",
+   "text": "Article responses, shared contracts and the web decoder need a `draft: boolean` in every article response so the web can mark drafts and separate the drafts list (decided by Q-2)."
+  },
+  {
+   "id": "IMP-11",
+   "text": "Publishing must derive the address from the current title, adding a numeric suffix when that address is already taken (decided by Q-12), and set the creation date at publish time; the existing list order is by creation date newest first."
+  },
+  {
+   "id": "IMP-12",
+   "text": "Draft updates currently rewrite the slug from the old slug rather than the new title, and article creation derives the slug from the title; draft saves must keep the private draft address and publication must assign the title-derived address with a numeric suffix if taken (decided by Q-12)."
+  },
+  {
+   "id": "IMP-13",
+   "text": "Article validation must cover draft saves and publication, not only the current publish-shaped create/update requests; a draft save requires a non-empty title while description and body may be empty (decided by Q-4), publication follows the same rule (decided by Q-15, agent decision), and the create validator currently requires all three."
+  },
+  {
+   "id": "IMP-14",
+   "text": "The web profile needs a drafts list next to the published list, visible only on the Author's own profile, ordered most recently edited or saved first (decided by Q-10) and paginated at 10 per page with the Author's drafts count (decided by Q-11); it currently has only \"My Articles\" and \"Favorited Articles\" and asks for all articles by the author."
+  },
+  {
+   "id": "IMP-15",
+   "text": "The web editor needs a save-as-draft action that requires only a title and allows empty description and body for a draft (decided by Q-4), and must prevent a second save/publish while one is in progress; it currently offers only \"Publish Article\", and `GenericForm`'s submit button is not disabled even when the form is submitting."
+  },
+  {
+   "id": "IMP-16",
+   "text": "The article page must mark a draft and expose publication to its Author, while offering no favorite/comment actions on a draft; it currently has only owner Edit/Delete and non-owner favorite/follow/comment controls."
+  },
+  {
+   "id": "IMP-17",
+   "text": "Web services and error decoding must support `draft: boolean` (decided by Q-2), the drafts list, publication, and the 422 title/published field errors (decided by Q-5); the current error decoder expects `{errors: Record<string, string[]>}`."
+  },
+  {
+   "id": "IMP-18",
+   "text": "The seed must upsert exactly one seeded alice draft with the decided content (decided by Q-13) and leave other alice drafts untouched (decided by Q-14), without disturbing the existing published articles, users, tags, comments, follow and favorite records."
+  },
+  {
+   "id": "IMP-19",
+   "text": "Existing rows and the migration must treat every pre-feature article as published with its current creation date and list position."
+  },
+  {
+   "id": "IMP-20",
+   "text": "A publication title conflict must reach the Author as a 422 title field error (decided by Q-5); the current Prisma error handler answers `{errors: string[]}`, which the web's `GenericErrorBody` decoder does not accept."
+  },
+  {
+   "id": "IMP-21",
+   "text": "The existing end-to-end expectation that the global feed shows exactly the three seeded published articles and the `typescript` tag must keep holding with the seeded draft present."
+  },
+  {
+   "id": "IMP-22",
+   "text": "Reading a drafts list is available to any caller but returns 404 to non-Authors (decided by Q-3), while draft writing and publication require a signed-in user and anonymous writes must stay 401."
+  },
+  {
+   "id": "IMP-23",
+   "text": "The article update and delete controllers do not compare the current user with the article author today; draft protection must add that comparison for drafts without changing unrelated published-article behavior."
+  }
+ ]
+}

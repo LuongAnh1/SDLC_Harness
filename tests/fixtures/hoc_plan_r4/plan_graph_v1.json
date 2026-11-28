@@ -1,0 +1,2750 @@
+{
+  "schema_version": "plan_graph_v1",
+  "k": 3,
+  "settings": {
+    "c0": 2.0,
+    "threshold": 0.15,
+    "turn_budget": 25,
+    "stub_cost": 0.5,
+    "weight": "Design files + 0.5 per existing test + 1 per new test; the turn budget counts Design files only",
+    "test_weight": 0.5,
+    "new_test_weight": 1.0
+  },
+  "units": [
+    {
+      "id": "U-1",
+      "files": [
+        "packages/db/prisma/schema.prisma"
+      ],
+      "weight": 1,
+      "task": "base"
+    },
+    {
+      "id": "U-2",
+      "files": [
+        "packages/db/prisma/migrations/20261126000100_add_article_drafts/migration.sql"
+      ],
+      "weight": 1,
+      "task": "G-8"
+    },
+    {
+      "id": "U-3",
+      "files": [
+        "packages/contracts/src/realworld.ts",
+        "apps/web/src/types/article.ts",
+        "apps/web/src/types/error.ts"
+      ],
+      "weight": 3,
+      "task": "base"
+    },
+    {
+      "id": "U-4",
+      "files": [
+        "apps/api/src/view/articleViewer.ts"
+      ],
+      "weight": 1,
+      "task": "base"
+    },
+    {
+      "id": "U-5",
+      "files": [
+        "packages/db/src/slugfy.ts",
+        "packages/db/src/article/articleSlug.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-6",
+      "files": [
+        "packages/db/src/article/articleCreatePrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-7",
+      "files": [
+        "packages/db/src/article/articleUpdatePrisma.ts",
+        "packages/db/src/article/articleSaveDraftPrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 3,
+      "task": "G-1"
+    },
+    {
+      "id": "U-8",
+      "files": [
+        "packages/db/src/article/articlePublishPrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-9",
+      "files": [
+        "packages/db/src/article/articleDeletePrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-10",
+      "files": [
+        "packages/db/src/article/articleGetVisiblePrisma.ts",
+        "packages/db/src/article/articleResolvePrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 3,
+      "task": "G-1"
+    },
+    {
+      "id": "U-11",
+      "files": [
+        "packages/db/src/article/articleListPrisma.ts",
+        "packages/db/src/article/articleFeedPrisma.ts"
+      ],
+      "weight": 2,
+      "task": "G-5"
+    },
+    {
+      "id": "U-12",
+      "files": [
+        "packages/db/src/article/articleDraftsPrisma.ts",
+        "packages/db/src/index.ts"
+      ],
+      "weight": 2,
+      "task": "G-3"
+    },
+    {
+      "id": "U-13",
+      "files": [
+        "packages/db/src/comment/commentsGetPrisma.ts",
+        "packages/db/src/comment/commentCreatePrisma.ts",
+        "packages/db/src/comment/commentDeletePrisma.ts"
+      ],
+      "weight": 3,
+      "task": "G-4"
+    },
+    {
+      "id": "U-14",
+      "files": [
+        "packages/db/src/article/articleFavoritePrisma.ts",
+        "packages/db/src/article/articleUnFavoritePrisma.ts"
+      ],
+      "weight": 2,
+      "task": "G-6"
+    },
+    {
+      "id": "U-15",
+      "files": [
+        "packages/db/src/tag/tagsGetPrisma.ts"
+      ],
+      "weight": 1,
+      "task": "G-7"
+    },
+    {
+      "id": "U-16",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesList.ts"
+      ],
+      "weight": 1,
+      "task": "G-5"
+    },
+    {
+      "id": "U-17",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesFeed.ts"
+      ],
+      "weight": 1,
+      "task": "G-5"
+    },
+    {
+      "id": "U-18",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesGet.ts"
+      ],
+      "weight": 1,
+      "task": "G-1"
+    },
+    {
+      "id": "U-19",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesCreate.ts",
+        "apps/api/src/middleware/articlesValidator/articlesCreateValidator.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-20",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesUpdate.ts",
+        "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.ts"
+      ],
+      "weight": 2,
+      "task": "G-1"
+    },
+    {
+      "id": "U-21",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesDelete.ts"
+      ],
+      "weight": 1,
+      "task": "G-1"
+    },
+    {
+      "id": "U-22",
+      "files": [
+        "apps/api/src/controllers/commentsController/getComments.ts",
+        "apps/api/src/controllers/commentsController/createComment.ts",
+        "apps/api/src/controllers/commentsController/deleteComment.ts"
+      ],
+      "weight": 3,
+      "task": "G-4"
+    },
+    {
+      "id": "U-23",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesFavorite.ts",
+        "apps/api/src/controllers/articlesController/articlesUnFavorite.ts"
+      ],
+      "weight": 2,
+      "task": "G-6"
+    },
+    {
+      "id": "U-24",
+      "files": [
+        "apps/api/src/controllers/articlesController/articlesDrafts.ts",
+        "apps/api/src/middleware/articlesValidator/articlesDraftsValidator.ts",
+        "apps/api/src/controllers/articlesController/index.ts",
+        "apps/api/src/routes/api/articles.ts"
+      ],
+      "weight": 4,
+      "task": "G-3"
+    },
+    {
+      "id": "U-25",
+      "files": [
+        "apps/api/src/controllers/tagsController/getTags.ts"
+      ],
+      "weight": 1,
+      "task": "G-7"
+    },
+    {
+      "id": "U-26",
+      "files": [
+        "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+      ],
+      "weight": 1,
+      "task": "base"
+    },
+    {
+      "id": "U-27",
+      "files": [
+        "packages/db/src/seed.ts"
+      ],
+      "weight": 1,
+      "task": "G-1"
+    },
+    {
+      "id": "U-28",
+      "files": [
+        "packages/db/src/smoke.ts"
+      ],
+      "weight": 1,
+      "task": "integration"
+    },
+    {
+      "id": "U-29",
+      "files": [
+        "tests/e2e/conduit.spec.ts"
+      ],
+      "weight": 1,
+      "task": "integration"
+    },
+    {
+      "id": "U-30",
+      "files": [
+        "apps/web/src/services/conduit.ts",
+        "apps/web/src/types/error.ts"
+      ],
+      "weight": 2,
+      "task": "G-2"
+    },
+    {
+      "id": "U-31",
+      "files": [
+        "apps/web/src/components/ArticleEditor/ArticleEditor.tsx",
+        "apps/web/src/components/GenericForm/GenericForm.tsx",
+        "apps/web/src/components/ArticleEditor/ArticleEditor.slice.tsx"
+      ],
+      "weight": 3,
+      "task": "G-2"
+    },
+    {
+      "id": "U-32",
+      "files": [
+        "apps/web/src/components/Pages/NewArticle/NewArticle.tsx",
+        "apps/web/src/components/Pages/EditArticle/EditArticle.tsx"
+      ],
+      "weight": 2,
+      "task": "G-2"
+    },
+    {
+      "id": "U-33",
+      "files": [
+        "apps/web/src/components/Pages/ProfilePage/ProfilePage.tsx",
+        "apps/web/src/components/ArticlesViewer/ArticlesViewer.tsx"
+      ],
+      "weight": 2,
+      "task": "G-2"
+    },
+    {
+      "id": "U-34",
+      "files": [
+        "apps/web/src/components/ArticlePreview/ArticlePreview.tsx"
+      ],
+      "weight": 1,
+      "task": "G-2"
+    },
+    {
+      "id": "U-35",
+      "files": [
+        "apps/web/src/components/Pages/ArticlePage/ArticlePage.tsx",
+        "apps/web/src/components/Pages/ArticlePage/ArticlePage.slice.ts"
+      ],
+      "weight": 2,
+      "task": "G-2"
+    }
+  ],
+  "edges": [
+    {
+      "from": "U-2",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-4",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-4",
+      "to": "U-3",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-5",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-6",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-6",
+      "to": "U-5",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-7",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-7",
+      "to": "U-5",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-8",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-8",
+      "to": "U-5",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-9",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-10",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-11",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-12",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-13",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-14",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-15",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-16",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-16",
+      "to": "U-11",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-17",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-17",
+      "to": "U-11",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-18",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-18",
+      "to": "U-10",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-19",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-19",
+      "to": "U-6",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-20",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-20",
+      "to": "U-5",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-20",
+      "to": "U-7",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-20",
+      "to": "U-8",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-20",
+      "to": "U-10",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-21",
+      "to": "U-9",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-21",
+      "to": "U-10",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-22",
+      "to": "U-13",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-23",
+      "to": "U-14",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-24",
+      "to": "U-4",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-24",
+      "to": "U-12",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-25",
+      "to": "U-15",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-27",
+      "to": "U-1",
+      "type": "build",
+      "origin": "uses"
+    },
+    {
+      "from": "U-27",
+      "to": "U-5",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-28",
+      "to": "U-6",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-28",
+      "to": "U-15",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-28",
+      "to": "U-27",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-29",
+      "to": "U-16",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-29",
+      "to": "U-24",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-29",
+      "to": "U-25",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-29",
+      "to": "U-27",
+      "type": "verify",
+      "origin": "uses"
+    },
+    {
+      "from": "U-30",
+      "to": "U-3",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-31",
+      "to": "U-30",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-16",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-18",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-19",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-20",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-30",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-32",
+      "to": "U-31",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-33",
+      "to": "U-16",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-33",
+      "to": "U-24",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-33",
+      "to": "U-30",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-33",
+      "to": "U-34",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-34",
+      "to": "U-3",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-4",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-18",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-20",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-21",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-22",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-23",
+      "type": "http",
+      "origin": "uses"
+    },
+    {
+      "from": "U-35",
+      "to": "U-30",
+      "type": "import",
+      "origin": "uses"
+    },
+    {
+      "from": "U-6",
+      "to": "U-26",
+      "type": "reliance",
+      "origin": "reliance",
+      "reason": "U-6 states that \"a `publishedTitle` conflict is re-thrown for U-26 to map to a 422 title error (AC-16)\".",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-7",
+      "to": "U-26",
+      "type": "reliance",
+      "origin": "reliance",
+      "reason": "U-7 states that it \"lets a `publishedTitle` conflict surface as P2002 for U-26\".",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-19",
+      "to": "U-26",
+      "type": "reliance",
+      "origin": "reliance",
+      "reason": "U-19 states that a title \"already used by another published article: 422 `{ errors: { title: [...] } }` through U-26 (AC-16)\".",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesCreate.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-20",
+      "to": "U-26",
+      "type": "reliance",
+      "origin": "reliance",
+      "reason": "U-20's published-update branch promises 422 `{ errors: { title: [...] } }` for a changed title that is already published (U-20, SC-9); only U-26 produces that body from U-7's P2002.",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesUpdate.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    }
+  ],
+  "sccs": [],
+  "conflicts": [
+    {
+      "file": "apps/web/src/types/error.ts",
+      "units": [
+        "U-3",
+        "U-30"
+      ],
+      "tasks": [
+        "G-2",
+        "base"
+      ],
+      "resolution": "sequential"
+    },
+    {
+      "file": "packages/db/src/index.ts",
+      "units": [
+        "U-6",
+        "U-7",
+        "U-8",
+        "U-9",
+        "U-10",
+        "U-12"
+      ],
+      "tasks": [
+        "G-1",
+        "G-3"
+      ],
+      "resolution": "barrel_union"
+    }
+  ],
+  "check_units": [
+    "U-28",
+    "U-29"
+  ],
+  "base": {
+    "units": [
+      "U-1",
+      "U-3",
+      "U-4",
+      "U-26"
+    ],
+    "files": [
+      "packages/db/prisma/schema.prisma",
+      "packages/contracts/src/realworld.ts",
+      "apps/web/src/types/article.ts",
+      "apps/web/src/types/error.ts",
+      "apps/api/src/view/articleViewer.ts",
+      "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+    ],
+    "tests": [
+      "apps/api/src/view/articleViewer.test.ts"
+    ],
+    "new_tests": [],
+    "weight": 6.5,
+    "forced": {
+      "build_sources": [
+        "U-1"
+      ],
+      "contract_units": [
+        "U-3"
+      ],
+      "contract_packages": [
+        "packages/contracts"
+      ]
+    },
+    "checkpoint": {
+      "gate_stage_ids": [
+        "typecheck",
+        "unit"
+      ],
+      "reviewer": true
+    }
+  },
+  "integration": {
+    "units": [
+      "U-28",
+      "U-29"
+    ],
+    "files": [
+      "packages/db/src/smoke.ts",
+      "tests/e2e/conduit.spec.ts"
+    ],
+    "tests": [],
+    "new_tests": [
+      "tests/e2e/article-draft-write-api.spec.ts",
+      "tests/e2e/article-draft-visibility-api.spec.ts",
+      "tests/e2e/article-draft-refusal-api.spec.ts",
+      "tests/e2e/article-draft-author-ui.spec.ts",
+      "tests/e2e/article-draft-privacy-ui.spec.ts",
+      "tests/e2e/article-draft-publish-ui.spec.ts",
+      "tests/e2e/article-draft-list-ui.spec.ts"
+    ],
+    "weight": 9.0
+  },
+  "groups": [
+    {
+      "group_id": "G-1",
+      "units": [
+        "U-5",
+        "U-6",
+        "U-7",
+        "U-8",
+        "U-9",
+        "U-10",
+        "U-18",
+        "U-19",
+        "U-20",
+        "U-21",
+        "U-27"
+      ],
+      "files": [
+        "packages/db/src/slugfy.ts",
+        "packages/db/src/article/articleSlug.ts",
+        "packages/db/src/article/articleCreatePrisma.ts",
+        "packages/db/src/index.ts",
+        "packages/db/src/article/articleUpdatePrisma.ts",
+        "packages/db/src/article/articleSaveDraftPrisma.ts",
+        "packages/db/src/index.ts",
+        "packages/db/src/article/articlePublishPrisma.ts",
+        "packages/db/src/index.ts",
+        "packages/db/src/article/articleDeletePrisma.ts",
+        "packages/db/src/index.ts",
+        "packages/db/src/article/articleGetVisiblePrisma.ts",
+        "packages/db/src/article/articleResolvePrisma.ts",
+        "packages/db/src/index.ts",
+        "apps/api/src/controllers/articlesController/articlesGet.ts",
+        "apps/api/src/controllers/articlesController/articlesCreate.ts",
+        "apps/api/src/middleware/articlesValidator/articlesCreateValidator.ts",
+        "apps/api/src/controllers/articlesController/articlesUpdate.ts",
+        "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.ts",
+        "apps/api/src/controllers/articlesController/articlesDelete.ts",
+        "packages/db/src/seed.ts"
+      ],
+      "tests": [
+        "apps/api/src/middleware/articlesValidator/articlesCreateValidator.test.ts",
+        "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.test.ts"
+      ],
+      "new_tests": [
+        "packages/db/src/article/articleSlug.test.ts"
+      ],
+      "weight": 23.0,
+      "slices": [
+        [
+          "U-5",
+          "U-6",
+          "U-7",
+          "U-8",
+          "U-9",
+          "U-10",
+          "U-18",
+          "U-19",
+          "U-20",
+          "U-21",
+          "U-27"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-2",
+      "units": [
+        "U-30",
+        "U-31",
+        "U-32",
+        "U-33",
+        "U-34",
+        "U-35"
+      ],
+      "files": [
+        "apps/web/src/services/conduit.ts",
+        "apps/web/src/types/error.ts",
+        "apps/web/src/components/ArticleEditor/ArticleEditor.tsx",
+        "apps/web/src/components/GenericForm/GenericForm.tsx",
+        "apps/web/src/components/ArticleEditor/ArticleEditor.slice.tsx",
+        "apps/web/src/components/Pages/NewArticle/NewArticle.tsx",
+        "apps/web/src/components/Pages/EditArticle/EditArticle.tsx",
+        "apps/web/src/components/Pages/ProfilePage/ProfilePage.tsx",
+        "apps/web/src/components/ArticlesViewer/ArticlesViewer.tsx",
+        "apps/web/src/components/ArticlePreview/ArticlePreview.tsx",
+        "apps/web/src/components/Pages/ArticlePage/ArticlePage.tsx",
+        "apps/web/src/components/Pages/ArticlePage/ArticlePage.slice.ts"
+      ],
+      "tests": [
+        "apps/web/src/components/App/App.test.tsx",
+        "apps/web/src/components/ArticleEditor/ArticleEditor.test.tsx",
+        "apps/web/src/components/ArticlePreview/ArticlePreview.test.tsx",
+        "apps/web/src/components/Pages/ArticlePage/ArticlePage.test.tsx",
+        "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx",
+        "apps/web/src/components/Pages/Home/Home.test.tsx",
+        "apps/web/src/components/Pages/Login/Login.test.tsx",
+        "apps/web/src/components/Pages/NewArticle/NewArticle.test.tsx",
+        "apps/web/src/components/Pages/ProfilePage/ProfilePage.test.tsx",
+        "apps/web/src/components/Pages/Register/Register.test.tsx",
+        "apps/web/src/components/Pages/Settings/Settings.test.tsx",
+        "apps/web/src/services/conduit.test.tsx"
+      ],
+      "new_tests": [],
+      "weight": 18.0,
+      "slices": [
+        [
+          "U-30",
+          "U-31",
+          "U-32",
+          "U-33",
+          "U-34",
+          "U-35"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-3",
+      "units": [
+        "U-12",
+        "U-24"
+      ],
+      "files": [
+        "packages/db/src/article/articleDraftsPrisma.ts",
+        "packages/db/src/index.ts",
+        "apps/api/src/controllers/articlesController/articlesDrafts.ts",
+        "apps/api/src/middleware/articlesValidator/articlesDraftsValidator.ts",
+        "apps/api/src/controllers/articlesController/index.ts",
+        "apps/api/src/routes/api/articles.ts"
+      ],
+      "tests": [],
+      "new_tests": [],
+      "weight": 6.0,
+      "slices": [
+        [
+          "U-12",
+          "U-24"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-4",
+      "units": [
+        "U-13",
+        "U-22"
+      ],
+      "files": [
+        "packages/db/src/comment/commentsGetPrisma.ts",
+        "packages/db/src/comment/commentCreatePrisma.ts",
+        "packages/db/src/comment/commentDeletePrisma.ts",
+        "apps/api/src/controllers/commentsController/getComments.ts",
+        "apps/api/src/controllers/commentsController/createComment.ts",
+        "apps/api/src/controllers/commentsController/deleteComment.ts"
+      ],
+      "tests": [
+        "apps/api/src/controllers/commentsController/createComment.test.ts"
+      ],
+      "new_tests": [],
+      "weight": 6.5,
+      "slices": [
+        [
+          "U-13",
+          "U-22"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-5",
+      "units": [
+        "U-11",
+        "U-16",
+        "U-17"
+      ],
+      "files": [
+        "packages/db/src/article/articleListPrisma.ts",
+        "packages/db/src/article/articleFeedPrisma.ts",
+        "apps/api/src/controllers/articlesController/articlesList.ts",
+        "apps/api/src/controllers/articlesController/articlesFeed.ts"
+      ],
+      "tests": [
+        "apps/api/src/controllers/articlesController/articlesFeed.test.ts",
+        "apps/api/src/controllers/articlesController/articlesList.test.ts"
+      ],
+      "new_tests": [],
+      "weight": 5.0,
+      "slices": [
+        [
+          "U-11",
+          "U-16",
+          "U-17"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-6",
+      "units": [
+        "U-14",
+        "U-23"
+      ],
+      "files": [
+        "packages/db/src/article/articleFavoritePrisma.ts",
+        "packages/db/src/article/articleUnFavoritePrisma.ts",
+        "apps/api/src/controllers/articlesController/articlesFavorite.ts",
+        "apps/api/src/controllers/articlesController/articlesUnFavorite.ts"
+      ],
+      "tests": [],
+      "new_tests": [],
+      "weight": 4.0,
+      "slices": [
+        [
+          "U-14",
+          "U-23"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-7",
+      "units": [
+        "U-15",
+        "U-25"
+      ],
+      "files": [
+        "packages/db/src/tag/tagsGetPrisma.ts",
+        "apps/api/src/controllers/tagsController/getTags.ts"
+      ],
+      "tests": [],
+      "new_tests": [],
+      "weight": 2.0,
+      "slices": [
+        [
+          "U-15",
+          "U-25"
+        ]
+      ]
+    },
+    {
+      "group_id": "G-8",
+      "units": [
+        "U-2"
+      ],
+      "files": [
+        "packages/db/prisma/migrations/20261126000100_add_article_drafts/migration.sql"
+      ],
+      "tests": [],
+      "new_tests": [],
+      "weight": 1.0,
+      "slices": [
+        [
+          "U-2"
+        ]
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "path": "apps/api/src/controllers/articlesController/articlesFeed.test.ts",
+      "units": [
+        "U-4",
+        "U-11",
+        "U-17"
+      ],
+      "check": false,
+      "task": "G-5"
+    },
+    {
+      "path": "apps/api/src/controllers/articlesController/articlesList.test.ts",
+      "units": [
+        "U-4",
+        "U-11",
+        "U-16"
+      ],
+      "check": false,
+      "task": "G-5"
+    },
+    {
+      "path": "apps/api/src/controllers/commentsController/createComment.test.ts",
+      "units": [
+        "U-13",
+        "U-22"
+      ],
+      "check": false,
+      "task": "G-4"
+    },
+    {
+      "path": "apps/api/src/middleware/articlesValidator/articlesCreateValidator.test.ts",
+      "units": [
+        "U-19"
+      ],
+      "check": false,
+      "task": "G-1"
+    },
+    {
+      "path": "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.test.ts",
+      "units": [
+        "U-20"
+      ],
+      "check": false,
+      "task": "G-1"
+    },
+    {
+      "path": "apps/api/src/view/articleViewer.test.ts",
+      "units": [
+        "U-4"
+      ],
+      "check": false,
+      "task": "base"
+    },
+    {
+      "path": "apps/web/src/components/App/App.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/ArticleEditor/ArticleEditor.test.tsx",
+      "units": [
+        "U-31"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/ArticlePreview/ArticlePreview.test.tsx",
+      "units": [
+        "U-34"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.test.tsx",
+      "units": [
+        "U-30",
+        "U-35"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx",
+      "units": [
+        "U-30",
+        "U-31",
+        "U-32"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/Home/Home.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/Login/Login.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/NewArticle/NewArticle.test.tsx",
+      "units": [
+        "U-30",
+        "U-31",
+        "U-32"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/ProfilePage/ProfilePage.test.tsx",
+      "units": [
+        "U-30",
+        "U-33"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/Register/Register.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/components/Pages/Settings/Settings.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    },
+    {
+      "path": "apps/web/src/services/conduit.test.tsx",
+      "units": [
+        "U-30"
+      ],
+      "check": false,
+      "task": "G-2"
+    }
+  ],
+  "test_rules": {
+    "test_suffixes": [
+      ".test.ts",
+      ".test.tsx",
+      ".spec.ts",
+      ".spec.tsx"
+    ],
+    "e2e_roots": [
+      "tests/e2e"
+    ],
+    "ui_callers": [
+      "U-32",
+      "U-33",
+      "U-35"
+    ]
+  },
+  "test_intents": [
+    {
+      "proves": [
+        "IMP-10"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/api/src/view/articleViewer.test.ts",
+      "new": false,
+      "anchor": null,
+      "intent": "a published row renders `draft: false` and a draft row `draft: true`, with every other field and its order unchanged.",
+      "task": "base"
+    },
+    {
+      "proves": [
+        "AC-1",
+        "AC-2",
+        "IMP-13"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/api/src/middleware/articlesValidator/articlesCreateValidator.test.ts",
+      "new": false,
+      "anchor": null,
+      "intent": "`draft: true` with a title and empty or absent description/body is accepted; missing or empty title gives the 400 body error; a non-boolean `draft` and non-string fields are 400; a published create still requires title, description and body.",
+      "task": "G-1"
+    },
+    {
+      "proves": [
+        "IMP-13"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.test.ts",
+      "new": false,
+      "anchor": null,
+      "intent": "optional title/description/body/tagList plus an optional boolean `draft` pass, while syntax errors answer 400 body errors; the draft-state title rule is left to the endpoint (U-20).",
+      "task": "G-1"
+    },
+    {
+      "proves": [
+        "AC-16",
+        "IMP-11",
+        "IMP-12"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "packages/db/src/article/articleSlug.test.ts",
+      "new": true,
+      "anchor": "U-5",
+      "intent": "the private address is title-independent and stable; the title-derived address appends `-2`, `-3`, ... until unused in both the slug space and the retained private-address space; a collision is retried.",
+      "task": "G-1"
+    },
+    {
+      "proves": [
+        "AC-1",
+        "AC-2",
+        "AC-19",
+        "IMP-15"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/ArticleEditor/ArticleEditor.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "the editor shows `Save as draft` and `Publish Article`; a draft save needs only a title (empty description/body allowed) and does not submit the published form; both actions and the fields are disabled while a request is pending, so a second save/publish cannot start.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-5",
+        "AC-20",
+        "IMP-14"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/ArticlePreview/ArticlePreview.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "a draft preview shows a visible `Draft` badge and no favorite control; a published preview renders exactly as today.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-5",
+        "AC-13",
+        "IMP-14"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/Pages/ProfilePage/ProfilePage.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "the signed-in author's own profile shows a separate Drafts tab that requests that author's drafts at 10 per page with the page offset and marks entries; another profile renders no Drafts tab and makes no drafts request; a drafts 404 leaves the drafts view; changing tabs resets to page 1.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-3",
+        "AC-7",
+        "AC-8",
+        "AC-9",
+        "AC-11",
+        "AC-15",
+        "AC-19",
+        "IMP-16"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "an author's draft shows `Draft`/`Not published`, Edit/Delete/Publish, no favorite/follow/comment controls and no comment request; publish sends only `draft: false`, is disabled while pending, and a 422 title error leaves the marked draft with its content; a published article shows no draft marker and no unpublish control; a 404 from publish redirects home without content.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-1",
+        "AC-2"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/Pages/NewArticle/NewArticle.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "Save as draft calls create with `draft: true` and opens the returned private address; a 400/422 body error is shown and the editor content is kept; empty description/body do not block the draft save.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-6",
+        "AC-7",
+        "AC-8",
+        "AC-9"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "a draft offers both actions: save stays on the private address with content changed, publish navigates to the returned title-derived address; a published article offers only the published update and no draft action; 422 title/published errors keep the draft view and are shown.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "IMP-17",
+        "IMP-20"
+      ],
+      "level": "unit",
+      "drives": [],
+      "path": "apps/web/src/services/conduit.test.tsx",
+      "new": false,
+      "anchor": null,
+      "intent": "create/update send the editor's `draft` flag, the drafts request carries author/limit/offset and decodes `draft`, publish sends only `{ article: { draft: false } }`, and 422 field-keyed `title` or `published` errors plus 400 `{ errors: { body: [...] } }` decode as field errors.",
+      "task": "G-2"
+    },
+    {
+      "proves": [
+        "AC-1",
+        "AC-2",
+        "IMP-13"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "an authenticated title-only `draft: true` create answers 201 with `{ article }` carrying `draft: true` and empty description/body; a missing or empty title answers 400 with field errors and stores nothing; an unauthenticated save answers 401 and stores nothing; a published create still needs description and body.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-2",
+        "AC-6",
+        "IMP-12"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "the author reopens the private address and sees the stored draft; a `draft: true` update with changed title/description/body/tags answers 200 with `draft: true` and the same private address, while a title-less draft save answers 400 with no stored change.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-7",
+        "IMP-9",
+        "IMP-11"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "publishing a title-only draft answers 200 with `draft: false`, a title-derived address carrying `-2` when that address is taken, the publishing moment as `createdAt`, and the stored description/body; the article is then first in newest-first lists.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-8",
+        "IMP-20"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "publishing a draft whose title is already published answers 422 with `{ errors: { title: [...] } }` carrying a title-taken message, creates no publication, and leaves the draft and the existing article unchanged.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-9"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a `draft: true` update of a published article answers 422 with `{ errors: { published: [...] } }` and changes nothing; `draft: false` and omitted updates keep it published and apply the published update without creating a draft.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-16",
+        "IMP-9"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a published create using a draft's title succeeds with a title-derived address that takes a suffix when needed; two drafts with the same title coexist with distinct private addresses; saving a draft with a published title succeeds.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-11",
+        "AC-19"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "publishing the same draft twice, the second time through its old private address, answers 200 with the already published article, one row, the first slug and `createdAt`, and no duplicate address or entry.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-10"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-write-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a draft save overlapping the publish marker or locked transaction answers 422 with `{ errors: { published: [...] } }`; whichever ordering occurs, the final row is published with its first publishing date and one address, with no duplicate publication.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-3",
+        "AC-18",
+        "IMP-1",
+        "IMP-22"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-visibility-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a Visitor and an Other User read a draft's private address as 404 with no article data and the draft unchanged; the Author reads 200 with `draft: true`; the old private address after publication is 404.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-5",
+        "AC-18",
+        "IMP-14",
+        "IMP-22"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-visibility-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "the author's drafts list (author omitted or equal to the caller) returns only that author's drafts, all `draft: true`, most recently updated first, 10 per page with the author's total drafts count; the public author list returns published only; another author's drafts request or a request with no signed-in caller answers 404; invalid paging/author answers 400 `{ errors: { query: [...] } }`.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-13",
+        "AC-18",
+        "IMP-2",
+        "IMP-3"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-visibility-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "the global, author, tag and favorites lists and their counts, plus the followed-authors feed and its count, exclude drafts for every caller and page; pagination uses the published-only total.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-14",
+        "AC-18",
+        "IMP-8"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-visibility-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a tag used only by a draft is absent from `GET /api/tags` and appears once a published article uses it.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-4",
+        "AC-18",
+        "IMP-7",
+        "IMP-23"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-refusal-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "every Other User update or delete addressed to a draft answers 404 with the draft unchanged; an unauthenticated write answers 401; no related record is created.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-15",
+        "AC-18",
+        "IMP-4",
+        "IMP-5",
+        "IMP-6"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-refusal-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "favoriting, unfavoriting and commenting on a draft answer 404 for every signed-in user including the Author and 401 anonymously, with no favorite, comment or count change; comment reads return an empty list to the Author and 404 to others.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-12",
+        "AC-18",
+        "IMP-7"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "tests/e2e/article-draft-refusal-api.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "the author's draft delete answers 200 with the deleted body and `draft: true`, later reads answer 404, and the row never appears in a published list, count or tag; deleting through a published row's retained private address answers 404 and leaves the article.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-20",
+        "IMP-18"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "packages/db/src/smoke.ts",
+      "new": false,
+      "anchor": "integration",
+      "intent": "after the seed is run a second time exactly one seed-marked alice draft with the decided title/description/body/tag exists, other alice drafts are untouched, it is absent from published lists/counts and from popular tags, and it is present in alice's drafts query; the temporary round-trip create passes `draft: false` explicitly.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-17",
+        "IMP-19"
+      ],
+      "level": "api",
+      "drives": [],
+      "path": "packages/db/src/smoke.ts",
+      "new": false,
+      "anchor": "integration",
+      "intent": "the three seeded articles stay published with their existing `createdAt`/`updatedAt` and list order, no pre-feature row becomes a draft, and the seed leaves comments, users, tags and relations intact.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-13",
+        "AC-17",
+        "AC-20",
+        "IMP-21"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-33"
+      ],
+      "path": "tests/e2e/conduit.spec.ts",
+      "new": false,
+      "anchor": "integration",
+      "intent": "the global feed still shows exactly the three seeded published articles and the `typescript` tag, with no seeded draft title and no `draft-notes` tag; alice's profile drafts list shows the seeded draft while a visitor's and bob's article lists do not.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-1",
+        "AC-6",
+        "AC-7"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-32",
+        "U-33",
+        "U-35"
+      ],
+      "path": "tests/e2e/article-draft-author-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "signed in as the author, `/editor` with a title only saves a draft and lands on the private page marked `Draft`/`Not published`; the profile's drafts tab lists it; reopening it, changing the body and saving keeps the marker and the new content; publishing shows the article as published, it leaves the drafts list and appears in the published/global list.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-2",
+        "AC-12"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-32",
+        "U-33",
+        "U-35"
+      ],
+      "path": "tests/e2e/article-draft-author-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "an empty title shows the title error and starts no draft save, while a blank description and body still save a title-only draft; deleting the draft from its page sends the author home, removes it from the drafts list and leaves no public entry.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-3",
+        "AC-4",
+        "AC-15"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-33",
+        "U-35"
+      ],
+      "path": "tests/e2e/article-draft-privacy-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "an author's draft page offers no favorite/follow/comment control; a Visitor and an Other User opening the draft address are sent home with no draft content; the Other User's profile shows no Drafts tab and opening its `/drafts` address goes home.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-8",
+        "AC-9",
+        "AC-16"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-32",
+        "U-33",
+        "U-35"
+      ],
+      "path": "tests/e2e/article-draft-publish-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "a draft whose title is already published stays a marked draft with its content after a publish attempt that shows the title-taken error; a published article's page shows no unpublish or save-as-draft control; a draft and a published article with the same title each appear in their proper place with the draft marked.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-10"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-32",
+        "U-35"
+      ],
+      "path": "tests/e2e/article-draft-publish-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "with the draft open in two tabs, a save overlapping a publish from the other tab resolves to the published article shown without a draft marker and with no draft left in the drafts list.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-5",
+        "IMP-14"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-33"
+      ],
+      "path": "tests/e2e/article-draft-list-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "on the author's own profile the Drafts tab is separate, lists only drafts most recently edited or saved first at 10 per page with the drafts count and marks every entry; the published and favorites tabs and another user's profile never list a draft, and another user's `/drafts` address goes home.",
+      "task": "integration"
+    },
+    {
+      "proves": [
+        "AC-13",
+        "AC-14"
+      ],
+      "level": "ui",
+      "drives": [
+        "U-33"
+      ],
+      "path": "tests/e2e/article-draft-list-ui.spec.ts",
+      "new": true,
+      "anchor": "integration",
+      "intent": "the home global, feed, tag, author-published and favorites lists show no drafts and their pagination follows the published-only counts; the popular-tags sidebar omits a draft-only tag and shows it after a published article uses it.",
+      "task": "integration"
+    }
+  ],
+  "stubs": [],
+  "search": {
+    "forced": {
+      "build_sources": [
+        "U-1"
+      ],
+      "contract_units": [
+        "U-3"
+      ],
+      "contract_packages": [
+        "packages/contracts"
+      ]
+    },
+    "base0": [
+      "U-1",
+      "U-3"
+    ],
+    "candidates": [
+      "U-4",
+      "U-5",
+      "U-10",
+      "U-11",
+      "U-26",
+      "U-30"
+    ],
+    "candidates_searched": [
+      "U-4",
+      "U-5",
+      "U-10",
+      "U-11",
+      "U-26",
+      "U-30"
+    ],
+    "stubs_searched": true,
+    "options_considered": 729,
+    "rule": "base promotion (T1) before stubs (T2); fewest splits first; a bigger split replaces the choice only if T drops by >= 15%; a stub option needs the Planner's confirmation",
+    "chosen_index": null,
+    "fixed": {
+      "base": [
+        "U-1",
+        "U-3",
+        "U-4",
+        "U-26"
+      ],
+      "stubs": []
+    },
+    "top": [
+      {
+        "base": [
+          "U-1",
+          "U-3",
+          "U-4"
+        ],
+        "stubs": [],
+        "T": 45.5,
+        "complexity": 1,
+        "needs_planner": false,
+        "group_weights": [
+          24.0,
+          18.0,
+          6.0,
+          6.5,
+          5.0,
+          4.0,
+          2.0,
+          1.0
+        ]
+      },
+      {
+        "base": [
+          "U-1",
+          "U-3"
+        ],
+        "stubs": [
+          "U-4",
+          "U-10"
+        ],
+        "T": 44.0,
+        "complexity": 2,
+        "needs_planner": true,
+        "group_weights": [
+          17.0,
+          18.0,
+          6.0,
+          6.5,
+          6.5,
+          4.0,
+          3.0,
+          3.0,
+          2.0,
+          1.0,
+          1.0
+        ]
+      },
+      {
+        "base": [
+          "U-1",
+          "U-3"
+        ],
+        "stubs": [
+          "U-4",
+          "U-5"
+        ],
+        "T": 44.0,
+        "complexity": 2,
+        "needs_planner": true,
+        "group_weights": [
+          20.0,
+          18.0,
+          6.0,
+          6.5,
+          6.5,
+          4.0,
+          3.0,
+          2.0,
+          1.0,
+          1.0
+        ]
+      }
+    ]
+  },
+  "schedule": {
+    "mode_b": {
+      "k": 3,
+      "agents": [
+        {
+          "agent_id": "agent-1",
+          "groups": [
+            "G-1",
+            "G-8"
+          ],
+          "turns": [
+            [
+              "G-1",
+              "G-8"
+            ]
+          ],
+          "load": 26.0
+        },
+        {
+          "agent_id": "agent-2",
+          "groups": [
+            "G-2",
+            "G-6"
+          ],
+          "turns": [
+            [
+              "G-2",
+              "G-6"
+            ]
+          ],
+          "load": 24.0
+        },
+        {
+          "agent_id": "agent-3",
+          "groups": [
+            "G-4",
+            "G-3",
+            "G-5",
+            "G-7"
+          ],
+          "turns": [
+            [
+              "G-4",
+              "G-3",
+              "G-5",
+              "G-7"
+            ]
+          ],
+          "load": 21.5
+        }
+      ],
+      "T": 45.5
+    },
+    "mode_a": {
+      "k": 1,
+      "agents": [
+        {
+          "agent_id": "agent-1",
+          "groups": [
+            "G-1",
+            "G-2",
+            "G-3",
+            "G-4",
+            "G-5",
+            "G-6",
+            "G-7",
+            "G-8"
+          ],
+          "turns": [
+            [
+              "G-1"
+            ],
+            [
+              "G-2",
+              "G-3",
+              "G-4"
+            ],
+            [
+              "G-5",
+              "G-6",
+              "G-7",
+              "G-8"
+            ]
+          ],
+          "load": 71.5
+        }
+      ]
+    }
+  },
+  "reliance_candidates": [
+    {
+      "from": "U-4",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/view/articleViewer.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-6",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleCreatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-7",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleUpdatePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-8",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-9",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleDeletePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleDeletePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleDeletePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleDeletePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleDeletePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-10",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-11",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleListPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleListPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleListPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleListPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleListPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-12",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/index.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-13",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/comment/commentsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/comment/commentsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/comment/commentsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/comment/commentsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/comment/commentsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-14",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/article/articleFavoritePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleFavoritePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleFavoritePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleFavoritePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/article/articleFavoritePrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-15",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "packages/db/src/tag/tagsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/tag/tagsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/profiles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/tag/tagsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/tag/tagsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/user.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        },
+        {
+          "unit_file": "packages/db/src/tag/tagsGetPrisma.ts",
+          "mounted_file": "apps/api/src/routes/api/users.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-16",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesList.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-17",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesFeed.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-18",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesGet.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-19",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesCreate.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-20",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesUpdate.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-21",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesDelete.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-22",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/commentsController/getComments.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-23",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/articlesController/articlesFavorite.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-24",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/routes/api/articles.ts",
+          "mounted_file": "apps/api/src/routes/api/articles.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    },
+    {
+      "from": "U-25",
+      "to": "U-26",
+      "evidence": [
+        {
+          "unit_file": "apps/api/src/controllers/tagsController/getTags.ts",
+          "mounted_file": "apps/api/src/routes/api/tags.ts",
+          "registered_by": "apps/api/src/app.ts",
+          "line": 50,
+          "middleware": "prismaErrorHandler",
+          "middleware_file": "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "issues": [],
+    "runtime": [
+      "G8",
+      "G9",
+      "G10"
+    ]
+  },
+  "planner": {
+    "output_artifact": ".runtime/conduit-uc4-hoc-r4/runs/run_20261126_040632_ef2c129c/artifacts/plan_planner_a1.md",
+    "attempts": 1,
+    "option": 0,
+    "option_reason": "Options 1 and 2 lower T only from 37.5 to 37.0 (1.3%), far below the required 15%, while each adds two stubbed units and an extra split. The no-stub base U-1, U-3, U-4, U-26 is kept.",
+    "kept": 4,
+    "dropped": 17,
+    "added": 0,
+    "test_intents": 36,
+    "new_test_files": 8,
+    "notes": "- The four kept reliance edges are exactly the 422 title-field mapping. U-8 is dropped because it detects an existing published title itself and returns `title-taken`, which U-20 maps; only the P2002 paths of U-6, U-7 and the endpoints U-19/U-20 need U-26. U-26 is already in Option 0's base, so callers do not have to wait.\n- The api and ui specs must use fresh users, titles and tags, clean up after themselves, and never edit or delete alice's seeded draft (AC-20); the AC-20 intent re-runs the seed before its assertions so idempotency is exercised.\n- The ui intents are the only tests that exercise the cut http edges for U-32, U-33 and U-35; every unit intent mocks the other side, so it proves presentation only.\n- `packages/db/src/article/articleSlug.test.ts` is the only new unit file and it sits next to a U-5 Design file; the other unit intents extend the listed existing files and add the `draft`/`published` fixtures the Design Notes call for.\n- AC-18 is proven across the api intents (it requires the server to be the enforcement point); no separate product code is added for it."
+  },
+  "inputs": {
+    "design_trace_sha256": "c6b00bbba3ca285c3a5270d662534a54eb256ce54429e3fe86900e0ff5e44ffb",
+    "design_markdown_sha256": "0bbb01115d27178483632a62154e8695d91ffb7fa564797637010343c268d91d",
+    "requirement_trace_sha256": "6169d9f08d38a54fbffb489ebdd1741b160e0710165e08cbb5534fcbfac0b11e",
+    "facts_artifact": ".runtime/conduit-uc4-hoc-r4/runs/run_20261126_040632_ef2c129c/artifacts/plan_repo_facts_v1.json",
+    "candidates_artifact": ".runtime/conduit-uc4-hoc-r4/runs/run_20261126_040632_ef2c129c/artifacts/plan_graph_candidates_v1.json"
+  }
+}

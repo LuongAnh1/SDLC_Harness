@@ -59,6 +59,12 @@ from .repo_discovery import (
     RepoDiscoveryWorkflow,
 )
 from ..core.coerce import dict_copies as _dict_items, dict_value as _dict_value
+from .design_markdown_flow import DESIGN_FLOW_VERSION, TRACE_ARTIFACT as HOC_DESIGN_TRACE, run_markdown_design
+
+# H-OC (OpenCode) runs: these statuses mean the Markdown design flow may resume from its record.
+_HOC_DESIGN_RESUMABLE = frozenset({"design_paused", "design_investigating"})
+# Transport and environment failures pause (continue_run retries the same turn); everything else blocks fail-closed.
+_HOC_DESIGN_PAUSE_CODES = frozenset({"llm_transport_failed", "run_workspace_locked"})
 
 ALLOWED_DESIGN_ACTIONS = [
     "approve_checkpoint",
@@ -155,6 +161,8 @@ class PhaseTwoWorkflow:
 
         state = self.store.read_state(run_id)
         self._require_requirement_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        if state.get("requirement_opencode_flow"):
+            return self._start_hoc_design(state=state, run_id=run_id)
         approved = read_approved_requirement_input(store=self.store, state=state, run_id=run_id)
         if str(state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY) or "") == REPO_DISCOVERY_CONTRACT_VERSION:
             state.update(
@@ -465,6 +473,14 @@ class PhaseTwoWorkflow:
 
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
+        if state.get("design_opencode_flow"):
+            if str(state.get("status") or "") not in _HOC_DESIGN_RESUMABLE:
+                raise HarnessError(
+                    "designer_session_not_resumable",
+                    f"Markdown design cannot continue from status {state.get('status')!r}.",
+                    run_id=run_id,
+                )
+            return self._run_hoc_design(run_id=run_id)
         if (
             str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") != GRAPH_VERSION
             or str(state.get("status") or "") not in {"design_paused", *_INTERRUPTED_DESIGNER_STATUSES}
@@ -1298,6 +1314,135 @@ class PhaseTwoWorkflow:
             return None
         return validate_vertical_design_graph(graph, expected_run_id=run_id)
 
+
+    # H-OC: Markdown design by OpenCode -----------------------------------------------------------------------------
+
+    def _start_hoc_design(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """The owner approved the Markdown requirement of an OpenCode run: freeze it and start the Markdown design."""
+
+        artifacts = _dict_value(state.get("latest_artifacts"))
+        for key in ("requirement_trace", "requirement_markdown_draft"):
+            if not artifacts.get(key):
+                raise HarnessError("requirement_input_missing", f"The approved requirement has no {key}.", run_id=run_id)
+        now = utc_now_iso()
+        state.update(
+            {
+                "updated_at": now,
+                "approved_artifacts": {
+                    "requirement_trace": artifacts["requirement_trace"],
+                    "requirement_markdown": artifacts["requirement_markdown_draft"],
+                    "approved_at": now,
+                },
+                "pending_checkpoint": None,
+                "design_opencode_flow": DESIGN_FLOW_VERSION,
+                "design_opencode_model": state.get("requirement_opencode_model") or self.settings.phase1_opencode_model,
+                "design_opencode_reviewer_model": (
+                    state.get("requirement_opencode_reviewer_model") or self.settings.phase1_opencode_reviewer_model
+                ),
+                "status": "design_investigating",
+                "current_phase": "design_investigating",
+                "allowed_next_actions": list(ALLOWED_DESIGN_PAUSED_ACTIONS),
+                "summary_for_user": "Requirement đã duyệt; Design Markdown (H-OC) bắt đầu.",
+            }
+        )
+        self.store.write_state(state)
+        return self._run_hoc_design(run_id=run_id)
+
+    def _run_hoc_design(self, *, run_id: str) -> dict[str, object]:
+        """Run or resume the Markdown design flow; pause on step review or transport failure, block on anything else."""
+
+        state = self.store.read_state(run_id)
+        approved = _dict_value(state.get("approved_artifacts"))
+        harness_root = self.store.repo_root
+        trace = json.loads((harness_root / str(approved["requirement_trace"])).read_text(encoding="utf-8"))
+        markdown = (harness_root / str(approved["requirement_markdown"])).read_bytes().decode("utf-8")
+        roots = _dict_value(_dict_value(state.get("profile_snapshot")).get("resolved_component_roots"))
+        if state.get("status") != "design_investigating":
+            state.update({"updated_at": utc_now_iso(), "status": "design_investigating", "current_phase": "design_investigating"})
+            self.store.write_state(state)
+        try:
+            result = run_markdown_design(
+                settings=self.settings,
+                store=self.store,
+                run_id=run_id,
+                model=str(state["design_opencode_model"]),
+                reviewer_model=str(state["design_opencode_reviewer_model"]),
+                requirement_markdown=markdown,
+                requirement_trace=trace,
+                component_roots={str(key): list(value) for key, value in roots.items()},
+                step_review=self.designer_step_review,
+            )
+        except HarnessError as exc:
+            state = self.store.read_state(run_id)
+            paused = isinstance(exc, LlmStepReviewRequired) or exc.error_code in _HOC_DESIGN_PAUSE_CODES
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "status": "design_paused" if paused else "design_blocked",
+                    "current_phase": "design_investigating",
+                    "last_error": exc.to_response(),
+                    "design_execution": {"step_review": exc.progress} if isinstance(exc, LlmStepReviewRequired) else {},
+                    "allowed_next_actions": list(ALLOWED_DESIGN_PAUSED_ACTIONS) if paused else ["get_status", "cancel_run"],
+                    "summary_for_user": (
+                        f"Design LLM {exc.progress['review_stage']} {exc.progress['call_id']} chờ anh duyệt."
+                        if isinstance(exc, LlmStepReviewRequired)
+                        else f"Design tạm dừng: {exc.message}" if paused else f"Design bị chặn: {exc.message}"
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+        return self._finish_hoc_design(run_id=run_id, result=result)
+
+    def _finish_hoc_design(self, *, run_id: str, result: object) -> dict[str, object]:
+        """Store the design trace and open the Design checkpoint (Markdown + trace + Harness-drawn flow diagram)."""
+
+        state = self.store.read_state(run_id)
+        trace = {**result.trace, "run_id": run_id, "markdown_artifact": result.markdown_artifact,
+                 "flow_diagram_artifact": result.diagram_artifact}
+        path = self.store.artifact_path(run_id, HOC_DESIGN_TRACE)
+        if path.exists() and json.loads(path.read_text(encoding="utf-8")) != trace:
+            raise HarnessError("design_revision_conflict", f"{HOC_DESIGN_TRACE} already exists with different content.", run_id=run_id)
+        if not path.exists():
+            self.store.write_json_artifact(run_id, HOC_DESIGN_TRACE, trace)
+        latest = {**_dict_value(state.get("latest_artifacts")), **result.artifacts, "design_trace": self.store.relative(path)}
+        unreviewed = result.unreviewed_revision
+        summary = "Design (Markdown + trace + sơ đồ) đã sẵn sàng để anh xem; duyệt sẽ bắt đầu Plan H-OC (đồ thị task)."
+        if unreviewed:
+            summary += (
+                f" Lần sửa {unreviewed['revision']} ({', '.join(unreviewed['findings'])}) là lần cuối và không được "
+                "review lại: xem diff và phản hồi của Designer."
+            )
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "waiting_design_approval",
+                "current_phase": "design_review",
+                "last_error": None,
+                "design_execution": {},
+                "latest_artifacts": latest,
+                "pending_checkpoint": {
+                    "checkpoint_id": f"checkpoint_design_{run_id}",
+                    "type": "design_approval",
+                    "artifact_ref": HOC_DESIGN_TRACE.removesuffix(".json"),
+                    "artifact_path": self.store.relative(path),
+                    "review_projection_ref": result.markdown_artifact,
+                    "flow_diagram_ref": result.diagram_artifact,
+                    "counts": {
+                        "units": len(trace["units"]),
+                        "design_decisions": len(trace["design_decisions"]),
+                        "scenario_paths": len(trace["scenario_paths"]),
+                        "agent_decisions": len(trace.get("design_decisions_from_questions") or []),
+                    },
+                    "open_findings": result.open_findings,
+                    "unreviewed_revision": unreviewed,
+                },
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "summary_for_user": summary,
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def _require_requirement_checkpoint(
         self,

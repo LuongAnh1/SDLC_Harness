@@ -88,7 +88,26 @@ python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
 Fixture UC2 là **Insert Cultural Heritage**, lấy từ bộ eTour của TraceDev để chạy
 một source mới độc lập với run UC1/SDLC-1 trước đó.
 
-Khi muốn gọi DeepSeek thật, copy `.env.example` thành `.env`, điền `SDLC_LLM_API_KEY`, đặt `SDLC_LLM_MODE=deepseek`, rồi bỏ `--llm-mode fake` hoặc truyền `--llm-mode deepseek`.
+Để chạy Phase 1 với DeepSeek, đặt `SDLC_LLM_MODE=deepseek` hoặc truyền
+`--llm-mode deepseek`. Run mới dùng OpenCode v2 trên PATH và model
+`SDLC_PHASE1_OPENCODE_MODEL` đã được đăng nhập trong OpenCode. Cấu hình target
+repo trước khi start. Harness fetch base và tạo worktree của run ngay trong Phase 1.
+Harness khởi tạo CodeGraph trong worktree nếu chưa có. Refiner (một session OpenCode
+cho cả Phase 1) đọc use case và repo rồi viết bản Requirement Markdown
+`docs/sdlc-local/requirements-draft.md` gồm các câu UC (`UC-n`, trích nguyên văn), AC
+(`AC-n`, phần API, phần Web, `Covers`), việc bắt buộc ngầm từ repo (`IMP-n`) và câu hỏi
+(`Q-n`, chỉ hỏi điều quan sát được). Harness kiểm khung bằng máy (trích dẫn, mọi câu UC
+đều được trích, AC phủ đủ, file repo được dẫn có thật); lỗi thì Refiner sửa định dạng.
+Reviewer độc lập (session riêng, model `SDLC_PHASE1_OPENCODE_REVIEWER_MODEL`) chấm nghĩa,
+trả `OK` hoặc file nhận xét; Refiner sửa, tối đa 2 lần. Sau đó Refiner viết file câu hỏi,
+owner trả lời một lượt (`answer_markdown_questions`, câu bỏ trống lấy đề xuất), Refiner
+đưa câu trả lời vào Markdown. Owner không bị hỏi lại: Reviewer chấm bản đã có câu trả lời,
+lỗ hổng do câu trả lời mở ra được Refiner tự chốt thành câu `agent_decided` (ghi
+"(decided by Q-n, agent decision)" cạnh từng mục), Harness kiểm câu trả lời không bị đổi,
+tối đa 2 vòng sửa. Cuối cùng Refiner chuyển sang JSON truy vết `requirement_trace_v1`;
+Harness kiểm lại và thêm câu hỏi cùng quyết định. Checkpoint gồm Markdown và trace; Design của
+H-OC đọc Markdown (chưa cài). Các pha gọi DeepSeek API
+trực tiếp vẫn dùng `SDLC_LLM_API_KEY`.
 
 Chạy test:
 

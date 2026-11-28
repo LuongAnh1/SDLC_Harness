@@ -20,6 +20,7 @@ PHASE_ONE = "PhaseOneWorkflow"
 PHASE_TWO = "PhaseTwoWorkflow"
 PHASE_THREE = "PhaseThreeWorkflow"
 PHASE_FOUR = "PhaseFourWorkflow"
+PHASE_HOC = "HocExecutionWorkflow"
 
 # What the next step of a node is (the four task types plus the states between them).
 KINDS = (
@@ -161,6 +162,12 @@ NODES: tuple[Node, ...] = (
                  StepReview(PHASE_THREE, "plan_step_review", "continue_implementation_plan_step_review")),
     _human("waiting_implementation_plan_review", "plan",
            Approval(PHASE_FOUR, "approve_implementation_plan_checkpoint"), phase="implementation_planning"),
+    _running("hoc_executing", "execution", phase="hoc_execution", resume=(PHASE_HOC, "continue_execution")),
+    _human("waiting_hoc_base_review", "execution", Approval(PHASE_HOC, "approve_base_checkpoint"),
+           phase="hoc_execution"),
+    _human("waiting_hoc_execution_review", "execution", Approval(PHASE_HOC, "approve_final_checkpoint"),
+           phase="hoc_execution"),
+    Node("hoc_execution_approved", "hoc_execution", "execution", "terminal", PHASE_HOC),
     # Phase 4: implementation, verification, Code Validator, then the lanes (always on since 2026-11-18)
     _phase_four("implementation_ready", "developer", "agent", Route("_continue_developer_act"),
                 phase="implementation_preparing"),
@@ -276,6 +283,7 @@ STAGES = (
     ("requirement", "Requirement"),
     ("design", "Design"),
     ("plan", "Implementation Plan"),
+    ("execution", "H-OC Execution"),
     ("developer", "Developer"),
     ("verification", "Verification"),
     ("validator", "Validator"),
@@ -300,6 +308,7 @@ PHASE_STAGES = {
     "design_restarting": "design",
     "design_review": "design",
     "implementation_planning": "plan",
+    "hoc_execution": "execution",
     "implementation_plan_revalidating": "plan",
     "implementation_plan_validating": "plan",
     "implementation_plan_repairing": "plan",

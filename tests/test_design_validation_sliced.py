@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -7,10 +8,16 @@ import tempfile
 import pytest
 
 from sdlc_harness.agents.validator import DesignValidator, TraceabilityResult
+from sdlc_harness.agents.validator.design_validation import (
+    SEMANTIC_TASK_RULES_VERSION,
+    _legacy_semantic_task_cache_key,
+    semantic_task_cache_key,
+)
 from sdlc_harness.agents.validator.semantic_review import (
     _branch_entry,
     build_semantic_review_plan,
     materialize_task_context,
+    review_node_view,
     with_global_projections,
 )
 from sdlc_harness.core.errors import HarnessError
@@ -466,6 +473,8 @@ def test_plan_and_review_use_the_same_global_projections_and_approved_context() 
         assert "A claim with claim_type=global_projection projects" in prompt
     coherence = client.prompts[-1]
     assert "Global projection assessments of the same projection_of claim must be compatible across scenarios" in coherence
+    # The cross-task severity is decided from the packet, not copied from specialist findings (UC4 validation v6).
+    assert "an existing specialist finding's severity is not a\nprecedent" in coherence
     summary, _ = decoder.raw_decode(coherence.split("global_claims:\n", 1)[1])
     assert summary == result.llm_review["global_claims"]
 
@@ -2043,3 +2052,86 @@ def test_partition_rebuild_may_add_a_provider_in_another_component_of_the_findin
                 remediation_mode=mode,
                 vertical_design_graph=graph,
             )
+
+
+
+def test_data_node_declaring_a_schema_change_owns_the_schema_root() -> None:
+    """UC4 validation design_v5 blocked SC-9's published-only title index as owned by no node, although Phase 3
+    lets every data unit edit the schema and add migrations."""
+
+    def node(intent: str, path: str = "packages/db/src/article/articleCreatePrisma.ts") -> dict[str, object]:
+        return {
+            "id": "VDN-data",
+            "scenario_id": "SC-9",
+            "surface": "data",
+            "runtime_binding": {"target": {"path": path, "symbol": "articleCreatePrisma"}},
+            "surface_contract": {"migration_intent": intent},
+        }
+
+    def owned(item: dict[str, object]) -> list[str]:
+        return review_node_view(item, task_type="scenario_behavior")["owned_code"]
+
+    schema_root = "packages/db/prisma/ (database schema and new migrations)"
+    assert owned(node("alter: replace the global unique index")) == [
+        "packages/db/src/article/articleCreatePrisma.ts#articleCreatePrisma",
+        schema_root,
+    ]
+    assert schema_root in owned(node("Add Article.draft"))
+    # Reuse or no change keeps only the binding; a node bound to the schema already owns it.
+    assert schema_root not in owned(node("reuse: reads the new columns"))
+    assert schema_root not in owned(node("no change: additive columns"))
+    assert schema_root not in owned(node("alter: add Article.draft", path="packages/db/prisma/schema.prisma"))
+
+
+
+# Rules version and template hash of every semantic task prompt variant. When a template edit makes this test fail,
+# bump SEMANTIC_TASK_RULES_VERSION for that task type if the edit can change a verdict (its cached results are reviewed
+# again), otherwise keep the version (wording-only edit, cached results stay valid); then update the hash here.
+SEMANTIC_TASK_TEMPLATE_SNAPSHOT = {
+    "cross_cutting": ("2026-11-25.1", "sha256:35dcb557f2e73368cbcf9e5660c6b743166905fab9a5259eaf7890c0791c7313"),
+    "cross_cutting:boundary": (
+        "2026-11-25.1",
+        "sha256:cc2e807163bcc28b8445271849892c829f20cd75a93c5ca1a36b2e90c6edda5e",
+    ),
+    "scenario_runtime": ("2026-11-25.1", "sha256:e81d6119128bb76657c45046553bf82a011af582f5f03eb6acdc628ff064038c"),
+    "scenario_behavior": ("2026-11-25.1", "sha256:bb8600ba64fb2f8318ba440d3a3891af59f27e957e7fbcb1a69f44c51e34b707"),
+}
+_TEMPLATE_VARIANTS = {
+    "cross_cutting": ("cross_cutting", {"primary_claim_ids": ["GLOBAL:X"]}),
+    "cross_cutting:boundary": ("cross_cutting", {"coverage_keys": ["boundary:VDE-x"]}),
+    "scenario_runtime": ("scenario_runtime", {}),
+    "scenario_behavior": ("scenario_behavior", {}),
+}
+
+
+def test_semantic_task_templates_match_their_rules_version() -> None:
+    current = {}
+    for name, (task_type, extra) in _TEMPLATE_VARIANTS.items():
+        prompt = DesignValidator._semantic_task_prompt(
+            task_context={"task": {"task_type": task_type, **extra}}, rule_review={}
+        )
+        current[name] = (
+            SEMANTIC_TASK_RULES_VERSION[task_type],
+            "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        )
+    assert current == SEMANTIC_TASK_TEMPLATE_SNAPSHOT, (
+        "A semantic task prompt template changed. Bump SEMANTIC_TASK_RULES_VERSION for that task type when the edit "
+        "can change a verdict, keep it for a wording-only edit, then copy the new values into "
+        f"SEMANTIC_TASK_TEMPLATE_SNAPSHOT: {current}"
+    )
+
+
+def test_semantic_task_cache_key_follows_packet_and_rules_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = {"task": {"task_type": "scenario_behavior", "task_id": "scenario-sc-9", "focus": "note"},
+               "graph_digest": "sha256:a", "nodes": [{"id": "VDN-1"}]}
+    key = semantic_task_cache_key(task_context=context, rule_review={})
+    # The whole-graph digest and the task focus note are not part of the reviewed input.
+    moved = {**context, "graph_digest": "sha256:b", "task": {**context["task"], "focus": "other"}}
+    assert semantic_task_cache_key(task_context=moved, rule_review={}) == key
+    # Packet data and the rules version are.
+    assert semantic_task_cache_key(task_context={**context, "nodes": [{"id": "VDN-2"}]}, rule_review={}) != key
+    assert semantic_task_cache_key(task_context=context, rule_review={"findings": [1]}) != key
+    monkeypatch.setitem(SEMANTIC_TASK_RULES_VERSION, "scenario_behavior", "next")
+    assert semantic_task_cache_key(task_context=context, rule_review={}) != key
+    # The old whole-prompt key is a different identity, kept only as a read fallback.
+    assert _legacy_semantic_task_cache_key("prompt") != key

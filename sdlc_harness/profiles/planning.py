@@ -22,6 +22,9 @@ PLANNING_PATH_POLICY_VERSION = "planning_path_policy_v1"
 # shortcut: stylesheet roots are fixed like the prisma/e2e roots; move into ComponentProfile
 # when a second project profile needs stylesheets.
 STYLESHEET_ROOTS = {"apps/web/src": (".css",)}
+# Every unit with a data surface may edit the schema and add migrations under this root (component_plan).
+DATABASE_SCHEMA_ROOT = "packages/db/prisma"
+DATABASE_SCHEMA_SUFFIXES = (".prisma", ".sql")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[a-zA-Z]:")
 
 
@@ -77,8 +80,8 @@ class PlanningPathPolicy:
             ],
             "special_roots": {
                 "database_schema_and_migrations": {
-                    "root": "packages/db/prisma",
-                    "suffixes": [".prisma", ".sql"],
+                    "root": DATABASE_SCHEMA_ROOT,
+                    "suffixes": list(DATABASE_SCHEMA_SUFFIXES),
                 },
                 "browser_e2e": {
                     "root": "tests/e2e",
@@ -209,7 +212,7 @@ class PlanningPathPolicy:
         component_id, root = self._owned_root(path)
         if not component_id:
             return ""
-        if root == "packages/db/prisma":
+        if root == DATABASE_SCHEMA_ROOT:
             return path if path.endswith((".prisma", ".sql")) else ""
         if component_id == "e2e":
             return path if path.endswith((".spec.ts", ".spec.tsx")) else ""
@@ -225,7 +228,7 @@ class PlanningPathPolicy:
         if not path or self.is_test_path(path):
             return ""
         component_id, root = self._owned_root(path)
-        if component_id == "e2e" or root == "packages/db/prisma":
+        if component_id == "e2e" or root == DATABASE_SCHEMA_ROOT:
             return ""
         rule = self.rule(component_id)
         return path if path.endswith(tuple(source for source, _ in rule.suffix_pairs)) else ""
@@ -370,7 +373,7 @@ def build_planning_path_policy(
     roots = tuple((component.component_id, component.editable_roots) for component in project.components)
     available_roots = {root for _, component_roots in roots for root in component_roots}
     missing_roots = [rule.source_root for rule in rules if rule.source_root not in available_roots]
-    if missing_roots or "packages/db/prisma" not in available_roots or "tests/e2e" not in available_roots:
+    if missing_roots or DATABASE_SCHEMA_ROOT not in available_roots or "tests/e2e" not in available_roots:
         raise HarnessError(
             "planning_path_policy_mismatch",
             f"Project profile is missing planning roots: {sorted(missing_roots)}",

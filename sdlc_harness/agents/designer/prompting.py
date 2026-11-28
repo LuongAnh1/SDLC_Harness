@@ -554,7 +554,7 @@ def _designer_prompt(
         "Add the calls/returns edges that can already connect this projection to the same scenario's nodes. "
         "New edges are ordered after the scenario's existing edges, in add_edge operation order. To place them "
         "between existing edges or move the terminal marker, give each new edge a temp_ref ('tmp:...') and add one "
-        "{\"op\":\"order_edges\",\"scenario_id\":\"SC-1\",\"edges\":[...],\"terminal\":\"...\"}: edges lists every "
+        "{\"op\":\"order_edges\",\"scenario_id\":\"SC-*\",\"edges\":[...],\"terminal\":\"...\"}: edges lists every "
         "calls/returns/reads/writes edge of the scenario exactly once (VDE-* ids of existing edges, temp_refs of new "
         "ones) in behavioral order, and the optional terminal names the last of them, which becomes the only "
         "terminal=true edge. The Harness renumbers the order; structural edges such as depends_on are not listed, "
@@ -618,38 +618,64 @@ def _designer_prompt(
         if active_partition is not None
         else ""
     )
+    # The repair rules lean on what the delta may do, not on doing little: UC4 H-r1 design_v23 0017/0021/0026/0027
+    # found the gap the Validator's hint left, then cited "do not rewrite an entire chain", "use their named edges",
+    # "change only the nodes and edges the findings need" and the exact-scaffold rules of other finding kinds to follow
+    # the hint, and doubted that add_edge was allowed at all ("presumably allowed").
+    repair_codes = {
+        str(item.get("code") or item.get("category") or "") for item in _dicts((repair_task or {}).get("findings"))
+    }
+    exact_repair_rule = (
+        "Every active repair finding is boundary_contract_mismatch: submit exactly the delta_scaffold operations. "
+        "Each update_edge targets the named edge_id and replaces only changes.boundary_contract. Do not add or reorder "
+        "edges in this repair. "
+        if repair_codes and repair_codes <= {"boundary_contract_mismatch"}
+        else "Every active repair finding is runtime_operation_binding_mismatch: submit exactly the delta_scaffold "
+        "update_node operation and preserve every runtime_binding field except the corrected target symbol. Use its "
+        "exact partition identity and preserve required_coverage. "
+        if repair_codes and repair_codes <= {"runtime_operation_binding_mismatch"}
+        else "Every active repair finding is runtime_boundary_unreachable: submit exactly the delta_scaffold removals; "
+        "do not invent an API or try to mutate a node's component identity. The next construction partition will place "
+        "the still-required surface in a runtime-feasible component. "
+        if repair_codes and repair_codes <= {"runtime_boundary_unreachable"}
+        else "Preserve required_coverage; add a node only for a required surface the scenario lacks. "
+    )
     repair_instruction = (
         "Use active_repair_task for every composition or validator repair. The active_repair_task write_scope is a "
         "strict mutation boundary, but its read_scope is not: use landscape, repo, CodeGraph, and "
         "design.inspect_partition to inspect any related profile component needed to understand the path. If "
-        "active_repair_task.write_scope.allow_add_node is false, never use add_node; update a listed writable_node or "
-        "repair its edges instead. Never update or remove a read_only_node, and preserve every scenario/partition "
-        "outside write_scope. active_repair_task.graph_context.preserved_edges are structural cross-scenario edges: "
-        "never remove or re-add them; only edges_in_current_order participate in a repair reorder. "
-        "Each finding.remediation_reason is the Validator's exact routing witness. Preserve its causal constraints and "
-        "use its named existing nodes and edges to guide the repair, but never treat it as authority to change the "
-        "approved Requirement or invent evidence. "
+        "active_repair_task.write_scope.allow_add_node is false, never use add_node; you may still update a "
+        "writable_node, add edges whose endpoints are in write_scope.allowed_edge_endpoint_ids (a new edge may join "
+        "the same two nodes as an existing edge when its label differs), and update, remove or reorder the edges in "
+        "write_scope.removable_edge_ids. Never update or remove a read_only_node, and preserve every "
+        "scenario/partition outside write_scope. active_repair_task.graph_context.preserved_edges are structural "
+        "cross-scenario edges: preserve them; only edges_in_current_order participate in a repair reorder. "
+        + (
+            "active_repair_task.graph_context.other_scenario_projections are read-only contracts of other scenarios' "
+            "nodes that share a runtime target with a writable node or that a finding cites: one implementation must "
+            "satisfy them and your repaired contracts together. "
+            if _dict(_dict(repair_task).get("graph_context")).get("other_scenario_projections")
+            else ""
+        )
+        + "Each finding states a defect. Its expected_change and remediation_reason are the minimum postcondition and a "
+        "hint about how to reach it, not a limit on the repair, and never authority to change the approved "
+        "Requirement or invent evidence. When the "
+        "hinted change alone would leave the scenario wrong inside write_scope (a request without its own call/return "
+        "pair to a provider it needs, a node left with no edge in the scenario, a step its branch can never reach), "
+        "repair that too in the same delta. "
         + (
             "For remediation_mode=partition_rebuild, reconstruct the typed nodes and ordered interactions inside the "
             "exact partition; adding or replacing nodes is allowed by write_scope. "
             if str((repair_task or {}).get("remediation_mode") or "") == "partition_rebuild"
-            else "Do not rewrite an entire scenario edge chain when one named edge or node can satisfy the finding. "
+            else ""
         )
-        + "When every active repair "
-        "finding is boundary_contract_mismatch, submit exactly the delta_scaffold operations: keep each replacement "
-        "edge's from, to, kind, and label unchanged, and do not add or reorder unrelated edges. When every active "
-        "repair finding is runtime_operation_binding_mismatch, submit exactly the delta_scaffold update_node operation "
-        "and preserve every runtime_binding field except the corrected target symbol. Use its exact partition identity "
-        "and preserve required_coverage. "
-        "When every active repair finding is runtime_boundary_unreachable, submit exactly the delta_scaffold removals; "
-        "do not invent an API or try to mutate a node's component identity. The next construction partition will place "
-        "the still-required surface in a runtime-feasible component. "
-        "For other repairs, preserve required_coverage and add or update a node for every listed surface. In repair mode, assign every edge "
+        + exact_repair_rule
+        + "In repair mode, assign every edge "
         "to the scenario named by the finding, even when an endpoint is reused from another scenario partition. To "
-        "change an existing scenario order, use one order_edges operation listing every behavior edge of the scenario "
-        "in behavioral order (the IDs in active_repair_task.edges_in_current_order plus temp_refs of edges this delta "
-        "adds); remove an edge only when it is obsolete, using exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"}, "
-        "and never put an edge object inside remove_edge. "
+        "change an existing scenario order, use one {\"op\":\"order_edges\",\"scenario_id\":\"SC-*\",\"edges\":[...],\"terminal\":\"...\"}. "
+        "List every behavior edge in behavioral order (IDs in active_repair_task.edges_in_current_order plus "
+        "temp_refs of edges this delta adds). If changing the terminal marker, terminal must name the last edge. "
+        "The remove_edge shape is {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"}. "
         if repair_task is not None
         else ""
     )
@@ -756,7 +782,7 @@ def _designer_prompt(
         "{\"scenario_id\":\"SC-1\",\"surfaces\":[\"ui\",\"api\"]}; allowed surface values are ui, api, "
         "business_rule, data, and interaction. The completion_claims array must never contain bare strings. "
         "Supported operations are set_partition_coverage, "
-        "add_node, update_node, remove_node, add_edge, remove_edge, order_edges, place_surface, and not_exercised. An add_node contains "
+        "add_node, update_node, remove_node, add_edge, update_edge, remove_edge, order_edges, place_surface, and not_exercised. An add_node contains "
         "temp_ref, semantic_key, name, kind, surface, disposition, requirement_refs, evidence_refs, "
         "evidence_reason, contract, surface_contract, and for Graph V2 runtime_binding. The node key list is "
         "closed: do not add undeclared node keys, even with null values. Optional schema fields may be omitted "
@@ -796,7 +822,9 @@ def _designer_prompt(
         "fields[{name,type}], constraints and relations (arrays of non-empty strings, never objects, for example "
         "\"Article.authorUsername -> User.username (many-to-one)\") and migration_intent. "
         "interaction requires steps and outcomes. "
-        "Use update_node with changes.surface_contract to enrich an existing node during bundle repair. add_edge must be exactly "
+        "Use update_node with changes.surface_contract to enrich an existing node during bundle repair; it keeps every "
+        "surface_contract and experience_contract field you leave out, so send only the fields you change. "
+        "add_edge must be exactly "
         "{\"op\":\"add_edge\",\"edge\":{\"from\":\"VDN-* or tmp:*\",\"to\":\"VDN-* or tmp:*\","
         "\"kind\":\"calls|reads|writes|returns|contains|realized_by|depends_on\",\"label\":\"specific interaction\","
         "\"scenario_id\":\"SC-*\",\"branch_group\":\"optional-safe-key\",\"guard\":\"optional condition\","
@@ -804,6 +832,11 @@ def _designer_prompt(
         "supplied together on every consecutive edge belonging "
         "to a conditional error/alternative branch; set terminal=true on the final observable outcome edge. "
         "Multiple interactions between the same endpoints are allowed when labels differ. "
+        "Use {\"op\":\"update_edge\",\"edge_id\":\"VDE-*\",\"changes\":{\"boundary_contract\":{...},\"label\":\"...\"}} "
+        "to correct an existing edge's label or replace its whole boundary_contract. Include only the fields you "
+        "need to change. update_edge keeps the edge id and order. Use order_edges to move edges or change the "
+        "terminal marker. Use remove_edge + add_edge only when endpoints, kind or branch change. "
+        "Use remove_edge alone when an edge is obsolete. "
         "For Graph V2, every edge between nodes of different components uses the field boundary_contract; an edge "
         "between two nodes of the same component needs none, and a boundary_contract you add there is checked like any "
         "other; "
@@ -818,8 +851,8 @@ def _designer_prompt(
         "or authorization, success response, and 4xx/5xx response; 4xx/5xx statuses go only in error_mapping, and "
         "response_mapping stays empty when the API declares no success response. This full provider mapping is required on both calls "
         "and returns edges when the provider is an API; a returns edge must not map only the response. The Harness copies "
-        "input_mapping onto every new returns edge from its paired calls/reads/writes edge, so on a returns edge write "
-        "the response_mapping and error_mapping. On a returns edge, "
+        "input_mapping from the paired calls/reads/writes edge onto each new returns edge and each returns edge "
+        "whose boundary_contract you replace with update_edge. Write the response_mapping and error_mapping. On a returns edge, "
         "from is the provider and to is the consumer, so provider_operation always names the from-node operation. "
         "When the provider is a business_rule, input_mapping must map every name in its surface_contract.inputs as a "
         "required target; declare only inputs the caller can actually supply. "

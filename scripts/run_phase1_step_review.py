@@ -46,6 +46,11 @@ def main() -> int:
     parser.add_argument("--answer-question-id", help="With --run-id: answer this clarification question.")
     parser.add_argument("--answer", default="", help="Answer text or option key for --answer-question-id.")
     parser.add_argument("--answered-by", default="owner")
+    parser.add_argument(
+        "--markdown-answers",
+        help='With --run-id: one JSON object {"Q-1": "a", ...} answering the OpenCode Markdown questions; '
+        "a question left out takes its recommended option.",
+    )
     args = parser.parse_args()
     if args.answer_question_id and (not args.run_id or not str(args.answer).strip()):
         raise HarnessError(
@@ -124,7 +129,18 @@ def main() -> int:
             "note": str(args.review_note or ""),
         },
     )
-    if args.answer_question_id:
+    if args.markdown_answers:
+        if not args.run_id:
+            raise HarnessError("phase1_step_review_args_invalid", "--markdown-answers needs --run-id.")
+        answers = json.loads(args.markdown_answers)
+        if not isinstance(answers, dict):
+            raise HarnessError("phase1_step_review_args_invalid", "--markdown-answers must be a JSON object.")
+        result = workflow.answer_markdown_questions(
+            run_id=str(args.run_id),
+            answers={str(key): str(value) for key, value in answers.items()},
+            answered_by=str(args.answered_by),
+        )
+    elif args.answer_question_id:
         try:
             result = workflow.answer_clarification(
                 run_id=str(args.run_id),

@@ -8,8 +8,10 @@ còn nguyên trạng thái mới tạo/nhận nuôi. Cleanup dùng PR giả và 
 
 from __future__ import annotations
 
+from dataclasses import replace as dataclass_replace
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,7 +23,14 @@ import pytest
 from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.fake import fake_requirement_model_v2
+from sdlc_harness.sources.fixtures import load_use_case
+from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
+from sdlc_harness.agents.requirements.trace_v1 import use_case_segments
+from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
+from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.profiles import build_profile_snapshot, get_language_profile, get_project_profile
+from sdlc_harness.repo_context import CodeGraphContextProvider
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workspaces import RunWorkspaceManager, branch_name_for_run
 from tests._support import GitRepositoryTemplate
@@ -251,6 +260,262 @@ class WorkspaceGitTests(unittest.TestCase):
                 "mergeCommit": {"oid": _git(self.seed, "rev-parse", "HEAD")},
             }
         )
+
+    def test_phase1_opencode_markdown_requirements_reach_a_trace_checkpoint(self) -> None:
+        settings = dataclass_replace(self.settings, llm_mode="deepseek")
+        workflow = PhaseOneWorkflow(settings)
+        source = load_use_case(dataset="eTour", use_case="UC1", repo_root=Path(__file__).resolve().parents[1])
+        with (
+            patch("sdlc_harness.workflows.phase1.load_use_case", return_value=source),
+            patch.object(RunWorkspaceManager, "create_for_run", side_effect=HarnessError("workspace_fetch_failed", "offline")),
+            patch("sdlc_harness.llm.opencode._find_opencode") as find_opencode,
+        ):
+            paused = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        self.assertEqual(paused["status"], "requirement_paused")
+        find_opencode.assert_not_called()
+        run_id = paused["run_id"]
+        state = self.store.read_state(run_id)
+        self.assertEqual(state["requirement_opencode_flow"], "markdown_first_v3")
+        self.assertEqual(state["requirement_opencode_reviewer_model"], settings.phase1_opencode_reviewer_model)
+        worktree = self.manager.expected_worktree_path(run_id)
+        draft_ref = "docs/sdlc-local/requirements-draft.md"
+        draft_file = worktree / draft_ref
+        segments = use_case_segments(source.text)
+        clause_ids = [f"UC-{index}" for index in range(1, len(segments) + 1)]
+        framed = (
+            "# Requirements\n\n## Use-case clauses\n"
+            + "".join(f'- **{ident}** "{segment}"\n' for ident, segment in zip(clause_ids, segments))
+            + "\n## Acceptance criteria\n### AC-1 The use case\nThe system does what the use case says.\n"
+            + "- API: answers as stated.\n- Web: shows the result.\n- Covers: " + ", ".join(clause_ids) + "\n"
+            + "\n## Implied obligations\n- **IMP-1** Keep the readme. Serves: UC-1. Repo: `README.md`\n"
+            + "\n## Open questions\n### Q-1 Refusal status\nWhich status answers a refused request?\n- Affects: AC-1\n"
+        )
+        unframed = framed.replace("- Covers: " + ", ".join(clause_ids) + "\n", "")
+        revised = framed + "\n## Review responses\n\n- 1: applied.\n"
+        answered = revised + "\nQ-1 answer: HTTP 404 (decided by Q-1)\n"
+        # The owner is asked once; the gap the answer opens is settled by the Refiner as its own marked decision.
+        agent_decided = answered.replace(
+            "- Web: shows the result.\n",
+            "- Web: shows the result; an incomplete publish is refused (decided by Q-2, agent decision).\n",
+        ) + (
+            "\n### Q-2 Incomplete publish\nWhat does publishing an incomplete draft answer?\n"
+            "- Disposition: agent_decided\n- Answer: 422 with field errors\n"
+            "- Reason: published articles keep the existing validation.\n- Status: answered\n"
+        )
+        question = {
+            "id": "Q-1", "question": "Which status answers a refused request?", "source": "repository_survey",
+            "context": "The API answers 404 for missing records today.", "category": "api_contract",
+            "proposed_disposition": "human_required", "proposed_blocking": True, "affects": ["AC-1"], "depends_on": [],
+            "answer_guidance": None, "answer_mode": "multiple_choice",
+            "options": [{"key": "a", "answer": "HTTP 404", "implication": None},
+                        {"key": "b", "answer": "HTTP 403", "implication": None}],
+            "recommended_option": "a", "suggested_answer": None, "why_it_is_safe": None, "impact": "high",
+            "uncertainty": "medium", "reversible": False,
+        }
+        trace = {
+            "schema_version": "requirement_trace_v1",
+            "uc_clauses": [
+                {"id": ident, "quote": segment, "observable": True, "reason": None, "kind": "main_step", "scenario": "SC-1"}
+                for ident, segment in zip(clause_ids, segments)
+            ],
+            "acceptance_criteria": [
+                {"id": "AC-1", "title": "The use case", "text": "The system does what the use case says.",
+                 "api": "answers as stated", "web": "shows the result", "covers": clause_ids,
+                 "decided_by": ["Q-1", "Q-2"]},
+            ],
+            "implied_obligations": [
+                {"id": "IMP-1", "text": "Keep the readme.", "serves": ["UC-1"], "repo_evidence": ["README.md"],
+                 "decided_by": []},
+            ],
+        }
+        run = subprocess.run
+        calls: list[dict[str, object]] = []
+        sessions = {"refiner": "ses_testrefiner", "reviewer": "ses_testreviewer"}
+
+        def invoke(args, **kwargs):
+            if args[0] != "fake-opencode":
+                self.assertEqual(args[0], "git")
+                return run(args, **kwargs)
+            self.assertEqual(Path(kwargs["cwd"]), worktree)
+            prompt = kwargs["input"]
+            config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+            permissions = config["agents"]["sdlc-requirement"]["permissions"]
+            editable = [rule["resource"] for rule in permissions if rule["action"] == "edit"]
+            self.assertEqual(len(editable), 1)
+            self.assertIs(config["mcp"]["servers"]["codegraph"]["codemode"], False)
+            self.assertIn({"action": "codegraph*", "resource": "*", "effect": "allow"}, permissions)
+            output = editable[0]
+            self.assertIn(output, prompt)
+            session = args[args.index("--session") + 1] if "--session" in args else None
+            model_arg = args[args.index("--model") + 1]
+            answer = output
+            if "Write the requirements to" in prompt:
+                kind, role = "draft", "refiner"
+                self.assertEqual(output, draft_ref)
+                self.assertIn(source.text.strip(), prompt)
+                self.assertFalse(draft_file.exists())
+                draft_file.write_text(unframed, encoding="utf-8")
+            elif "checked the frame of your requirements" in prompt:
+                kind, role = "frame", "refiner"
+                self.assertIn("AC-1: add a 'Covers:' line", prompt)
+                self.assertEqual(draft_file.read_text(encoding="utf-8"), unframed)
+                draft_file.write_text(framed, encoding="utf-8")
+            elif "# Review the answered requirements" in prompt:
+                kind, role = "answered_review", "reviewer"
+                self.assertEqual(model_arg, settings.phase1_opencode_reviewer_model)
+                if sum(call["kind"] == "answered_review" for call in calls) == 0:
+                    self.assertEqual(draft_file.read_text(encoding="utf-8"), answered)
+                    (worktree / output).write_text("1. AC-1: an incomplete publish is open; propose 422.\n", encoding="utf-8")
+                else:
+                    self.assertEqual(draft_file.read_text(encoding="utf-8"), agent_decided)
+                    answer = "OK"
+            elif "# Revise the answered requirements" in prompt:
+                kind, role = "answered_revise", "refiner"
+                self.assertIn("agent_decided", prompt)
+                self.assertEqual(draft_file.read_text(encoding="utf-8"), answered)
+                draft_file.write_text(agent_decided, encoding="utf-8")
+            elif "You are the independent Requirement Reviewer" in prompt:
+                kind, role = "review", "reviewer"
+                self.assertEqual(model_arg, settings.phase1_opencode_reviewer_model)
+                self.assertNotIn(source.text.strip(), prompt)
+                if sum(call["kind"] == "review" for call in calls) == 0:
+                    self.assertEqual(draft_file.read_text(encoding="utf-8"), framed)
+                    (worktree / output).write_text("1. AC-1: make the criterion observable.\n", encoding="utf-8")
+                else:
+                    self.assertIn("Review responses", draft_file.read_text(encoding="utf-8"))
+                    answer = "The document now covers the use case.\n\nOK"
+            elif "Revise the requirements" in prompt:
+                kind, role = "revise", "refiner"
+                # A rejected revision restarts from the reviewed round, and the Refiner is told so.
+                self.assertEqual(draft_file.read_text(encoding="utf-8"), framed)
+                rerun = any(call["kind"] == "revise" for call in calls)
+                self.assertEqual("Your previous edit was rejected and discarded" in prompt, rerun)
+                draft_file.write_text(revised, encoding="utf-8")
+            elif "Write the open questions file" in prompt:
+                kind, role = "questions", "refiner"
+                (worktree / output).write_text(json.dumps({"questions": [question]}), encoding="utf-8")
+            elif "# Apply the answers" in prompt:
+                kind, role = "answers", "refiner"
+                self.assertIn("Q-1 (the owner accepted your recommended option): HTTP 404", prompt)
+                self.assertEqual(draft_file.read_text(encoding="utf-8"), revised)
+                draft_file.write_text(answered, encoding="utf-8")
+            elif "Convert the requirements to the trace JSON" in prompt:
+                kind, role = "convert", "refiner"
+                self.assertIn("docs/sdlc-local/source-", prompt)
+                (worktree / output).write_text("{not json", encoding="utf-8")
+            else:
+                kind, role = "fix", "refiner"
+                self.assertIn("failed these Harness checks", prompt)
+                self.assertIn("not valid JSON", prompt)
+                (worktree / output).write_text(json.dumps(trace), encoding="utf-8")
+            if role == "refiner":
+                self.assertEqual(model_arg, settings.phase1_opencode_model)
+            previous = [call for call in calls if call["role"] == role]
+            self.assertEqual(session, sessions[role] if previous else None)
+            calls.append({"kind": kind, "role": role})
+            events = [
+                {"type": "step_start", "sessionID": sessions[role]},
+                {"type": "text", "part": {"text": "Working."}},
+                {"type": "step_finish", "part": {"reason": "tool-calls"}},
+                {"type": "step_start", "sessionID": sessions[role]},
+                {"type": "text", "part": {"text": answer}},
+                {"type": "step_finish", "part": {"reason": "stop"}},
+            ]
+            return subprocess.CompletedProcess(args, 0, "\n".join(map(json.dumps, events)), "")
+
+        review_mode = {"enabled": True, "review_input": False, "review_output": True}
+        pauses: list[str] = []
+
+        def approve_all(response: dict[str, object]) -> dict[str, object]:
+            while response["status"] == "requirement_paused":
+                self.assertIn("requirement_execution", response, response.get("last_error"))
+                pending = response["requirement_execution"]["step_review"]
+                self.assertEqual(pending["review_stage"], "output")
+                pauses.append(pending["call_id"])
+                reject = pending["call_id"].startswith("requirement-markdown-revise") and pauses[-2:-1] != pauses[-1:]
+                reject = reject and not any(call.startswith("requirement-markdown-revise") for call in pauses[:-1])
+                decision = {"decision": "reject", "note": "Keep the IDs."} if reject else {"decision": "approve"}
+                response = PhaseOneWorkflow(
+                    settings, requirement_step_review={**review_mode, "call_id": pending["call_id"], **decision},
+                ).continue_requirement_run(run_id=run_id)
+            return response
+
+        def prepare_index(provider, target_path):
+            (target_path / ".codegraph").mkdir()
+            return {}
+
+        with (
+            patch("sdlc_harness.llm.opencode._find_opencode", return_value="fake-opencode"),
+            patch("sdlc_harness.llm.opencode.subprocess.run", side_effect=invoke),
+            patch.object(CodeGraphContextProvider, "prepare_index", autospec=True, side_effect=prepare_index) as index,
+        ):
+            waiting = approve_all(
+                PhaseOneWorkflow(settings, requirement_step_review=review_mode).continue_requirement_run(run_id=run_id)
+            )
+            self.assertEqual(waiting["status"], "waiting_requirement_clarification")
+            self.assertEqual([item["id"] for item in waiting["pending_checkpoint"]["questions"]], ["Q-1"])
+            with self.assertRaises(HarnessError):
+                PhaseOneWorkflow(settings).answer_clarification(
+                    run_id=run_id, question_id="Q-1", answer="a", answered_by="owner",
+                )
+            response = approve_all(
+                PhaseOneWorkflow(settings, requirement_step_review=review_mode).answer_markdown_questions(
+                    run_id=run_id, answers={}, answered_by="owner",
+                )
+            )
+            index.assert_called_once()
+
+        self.assertEqual(response["status"], "waiting_requirement_approval")
+        self.assertEqual(
+            [call_id.rsplit("-", 2)[0] for call_id in pauses],
+            [
+                "requirement-markdown-draft",
+                "requirement-markdown-frame-r2",
+                "requirement-markdown-review-r2",
+                "requirement-markdown-revise-r3",
+                "requirement-markdown-revise-r3",
+                "requirement-markdown-review-r3",
+                "requirement-markdown-questions-a1",
+                "requirement-markdown-answers",
+                "requirement-markdown-answered-review-r1",
+                "requirement-markdown-answered-revise-r2",
+                "requirement-markdown-answered-review-r2",
+                "requirement-json-conversion-a1",
+                "requirement-json-conversion-a2",
+            ],
+        )
+        self.assertEqual(
+            [call["kind"] for call in calls],
+            [
+                "draft", "frame", "review", "revise", "revise", "review", "questions", "answers",
+                "answered_review", "answered_revise", "answered_review", "convert", "fix",
+            ],
+        )
+        checkpoint = response["pending_checkpoint"]
+        self.assertEqual(checkpoint["artifact_ref"], "requirement_trace_v1_r1")
+        self.assertEqual(checkpoint["counts"]["decisions"], 2)
+        artifacts = self.store.read_state(run_id)["latest_artifacts"]
+        self.assertNotIn("requirement_model", artifacts)
+        record = json.loads((self.harness_root / artifacts["requirement_markdown_flow"]).read_text(encoding="utf-8"))
+        self.assertEqual([item["kind"] for item in record["rounds"]], ["draft", "frame_fix", "revise"])
+        self.assertEqual([item["kind"] for item in record["answered_rounds"]], ["answers", "revise"])
+        stored = json.loads((self.harness_root / artifacts["requirement_trace"]).read_text(encoding="utf-8"))
+        self.assertEqual(stored["decisions"][0]["question_id"], "Q-1")
+        self.assertEqual(stored["acceptance_criteria"][0]["decision_refs"], ["D-1", "D-2"])
+        self.assertEqual([q["status"] for q in stored["questions"]], ["resolved", "agent_decided"])
+        self.assertEqual((stored["decisions"][1]["question_id"], stored["decisions"][1]["source"]), ("Q-2", "agent_decided"))
+        self.assertEqual(stored["markdown_artifact"], artifacts["requirement_markdown_draft"])
+        # Approving the Markdown requirement freezes it and starts the Markdown design (its flow is tested on its own).
+        with patch.object(PhaseTwoWorkflow, "_run_hoc_design", return_value={"status": "design_investigating"}) as design:
+            CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=run_id)
+        design.assert_called_once_with(run_id=run_id)
+        started = self.store.read_state(run_id)
+        self.assertEqual(started["design_opencode_flow"], "design_markdown_v1")
+        self.assertEqual(started["approved_artifacts"]["requirement_trace"], artifacts["requirement_trace"])
+        self.assertEqual(started["approved_artifacts"]["requirement_markdown"], artifacts["requirement_markdown_draft"])
+        self.assertEqual(started["design_opencode_reviewer_model"], settings.phase1_opencode_reviewer_model)
+        status = [line for line in _git(worktree, "status", "--porcelain").splitlines() if ".codegraph" not in line]
+        self.assertEqual(status, [])
 
     def test_create_fetches_remote_and_preserves_canonical_checkout(self) -> None:
         canonical_branch = _git(self.canonical, "branch", "--show-current")
@@ -558,6 +823,19 @@ class WorkspaceGitTests(unittest.TestCase):
         codegraph = Path(record.worktree_path) / ".codegraph"
         codegraph.mkdir()
         (codegraph / "index.json").write_text("{}\n", encoding="utf-8")
+        # Installed dependencies: npm links a workspace package into node_modules (a junction on Windows), which
+        # `git worktree remove` would follow and empty before failing.
+        with (Path(self.canonical) / ".git/info/exclude").open("a", encoding="utf-8") as handle:
+            handle.write("node_modules/\n")
+        outside = Path(self.temp_dir.name) / "outside package"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+        link = Path(record.worktree_path) / "node_modules/@t/outside"
+        link.parent.mkdir(parents=True)
+        if os.name == "nt":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], check=True, capture_output=True)
+        else:
+            os.symlink(outside, link, target_is_directory=True)
 
         cleaned, changed = self.manager.cleanup_run(
             self.run_id,
@@ -569,6 +847,7 @@ class WorkspaceGitTests(unittest.TestCase):
         self.assertEqual(cleaned.cleanup_reason, "run_cancelled")
         self.assertTrue(cleaned.local_branch_deleted)
         self.assertFalse(Path(record.worktree_path).exists())
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep\n")
         self.assertEqual(_git(self.canonical, "branch", "--list", record.branch), "")
         self.assertEqual(_git(self.canonical, "ls-remote", "--heads", "origin", record.branch).split()[0], record.head_sha)
         self.assertEqual(self.store.read_state(self.run_id)["status"], "cancelled")

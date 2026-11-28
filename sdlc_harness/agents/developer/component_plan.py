@@ -15,6 +15,7 @@ from ...profiles import (
     PlanningPathPolicy,
 )
 from ...profiles.runtime_config import runtime_config_impact_issues
+from ...profiles.planning import DATABASE_SCHEMA_ROOT
 from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
 from ...core.coerce import dict_items as _dicts, string_items as _strings
@@ -1875,7 +1876,7 @@ def _target_allowed_for_unit(
     component_id: str,
     surfaces: list[str],
 ) -> bool:
-    if target_component == component_id or path.startswith("packages/db/prisma/"):
+    if target_component == component_id or path.startswith(f"{DATABASE_SCHEMA_ROOT}/"):
         return True
     return target_component == "contracts" and component_id == "api" and "api" in surfaces
 

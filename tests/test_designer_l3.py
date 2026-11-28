@@ -48,6 +48,9 @@ from sdlc_harness.agents.designer.execution import (
     _materialize_branch_parent,
     _repair_task_has_mutation_path,
     _reject_discontinuous_completed_scenario,
+    _reject_new_node_binding_findings,
+    _reject_stranded_scenario_nodes,
+    _reject_unserved_repeat_requests,
     _requested_read_paths,
     _route_registration_modules,
     _uiux_call_allowed,
@@ -55,6 +58,7 @@ from sdlc_harness.agents.designer.execution import (
     _unread_existing_targets,
     _mark_repair_targets_completed,
     _new_action_budgets,
+    _other_scenario_projections,
     _parse_designer_tool_action,
     _prompt_observations,
     _reconcile_stale_placeholder_partitions,
@@ -74,6 +78,7 @@ from sdlc_harness.agents.designer.graph import (
     _boundary_contract_diagnostics,
     _copy_paired_input_mappings,
     _delta_written_names,
+    _merge_surface_contract,
     _sequence_behavior_findings,
     _validate_surface_contract,
     graph_digest,
@@ -193,6 +198,47 @@ class VerticalDesignGraphTest(unittest.TestCase):
             "UI transitions reference undeclared states: success.*Declare them in states or change",
         ):
             _validate_surface_contract(contract, surface="ui", node_id="VDN-ui", run_id="run-test")
+
+    def test_update_node_keeps_surface_contract_fields_it_leaves_out(self) -> None:
+        # design_v26 designer-0002 retyped a whole UI contract to change one sentence and dropped states,
+        # transitions and outcomes; a partial update now keeps them.
+        old = {"states": ["ready"], "outcomes": ["deleted"], "experience_contract": {"screen": "s", "feedback": ["f"]}}
+        self.assertEqual(
+            _merge_surface_contract(old, {"outcomes": ["removed"], "experience_contract": {"feedback": ["g"]}}),
+            {"states": ["ready"], "outcomes": ["removed"], "experience_contract": {"screen": "s", "feedback": ["g"]}},
+        )
+        self.assertEqual(old["experience_contract"]["feedback"], ["f"])
+        self.assertEqual(_merge_surface_contract(None, {"states": []}), {"states": []})
+
+        graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
+        partition = {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "database"}
+        contract = {
+            "schema_version": SURFACE_CONTRACT_VERSION, "surface": "data", "entity": "Article",
+            "operation": "write the article", "fields": [{"name": "title", "type": "string"}], "constraints": [],
+            "relations": [], "migration_intent": "none",
+        }
+        node = {
+            "temp_ref": "tmp:data", "semantic_key": "SC-1:data", "name": "Article store", "kind": "data_entity",
+            "surface": "data", "disposition": "reuse", "requirement_refs": ["REQ-1"],
+            "evidence_refs": ["RLA-0000000000000001"], "evidence_reason": "", "contract": "Store the article.",
+            "surface_contract": contract,
+        }
+
+        def apply(operation: dict[str, object], base: dict[str, object]) -> dict[str, object]:
+            return apply_designer_delta(
+                base,
+                {"schema_version": DELTA_VERSION, "base_graph_digest": base["artifact_digest"], "partition": partition,
+                 "operations": [operation], "completion_claims": [], "unresolved_items": []},
+                valid_evidence_refs={"RLA-0000000000000001"},
+            )
+
+        graph, refs = apply({"op": "set_partition_coverage", "coverage": {"data": "covered"}}, graph)
+        graph, refs = apply({"op": "add_node", "node": node}, graph)
+        updated, _ = apply(
+            {"op": "update_node", "node_id": refs["tmp:data"], "changes": {"surface_contract": {"constraints": ["title unique"]}}},
+            graph,
+        )
+        self.assertEqual(updated["nodes"][0]["surface_contract"], {**contract, "constraints": ["title unique"]})
 
     def test_delta_is_deterministic_and_allocates_stable_ids(self) -> None:
         graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
@@ -465,6 +511,90 @@ class VerticalDesignGraphTest(unittest.TestCase):
             "unresolved_items": [],
         }
 
+    def test_update_edge_replaces_contract_and_label_in_place(self) -> None:
+        graph = self._layered_sequence_graph()
+        edge = graph["edges"][0]
+        contract = {
+            "schema_version": BOUNDARY_CONTRACT_VERSION,
+            "consumer_operation": "submit form", "provider_operation": "save form",
+            "input_mapping": [], "auth_mapping": [], "response_mapping": [], "error_mapping": [],
+        }
+        edge["boundary_contract"] = {**contract, "provider_operation": "old operation", "previous_field": "remove me"}
+        graph["artifact_digest"] = graph_digest(graph)
+        operation = {"op": "update_edge", "edge_id": edge["id"], "changes": {"boundary_contract": contract, "label": "save"}}
+
+        candidate, _ = apply_designer_delta(graph, self._order_delta(graph, operation), valid_evidence_refs=set())
+
+        self.assertEqual(candidate["edges"], [{**edge, "label": "save", "boundary_contract": contract}, *graph["edges"][1:]])
+        self.assertEqual(edge["label"], "VDE-ab")
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(candidate, self._order_delta(candidate, operation), valid_evidence_refs=set())
+        self.assertEqual(caught.exception.error_code, "designer_delta_no_effect")
+
+    def test_update_edge_rejects_invalid_changes_and_targets(self) -> None:
+        graph = self._layered_sequence_graph()
+        update = {"op": "update_edge", "edge_id": "VDE-ab", "changes": {"label": "save"}}
+        remove = {"op": "remove_edge", "edge_id": "VDE-ab"}
+        for key in ("id", "from", "to", "kind", "scenario_id", "order", "terminal", "branch_group", "guard", "temp_ref"):
+            with self.subTest(key=key):
+                with self.assertRaises(HarnessError) as caught:
+                    delta = self._order_delta(graph, {**update, "changes": {key: None}})
+                    apply_designer_delta(graph, delta, valid_evidence_refs=set())
+                self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+                self.assertIn("Use order_edges to move an edge or change the terminal marker", caught.exception.message)
+                self.assertIn("remove_edge + add_edge to change endpoints, kind or branch", caught.exception.message)
+
+        for operations, expected in (
+            (({**update, "edge_id": "VDE-missing"},), "existing Design edge"),
+            (({**update, "changes": {}},), "non-empty object"),
+            (({**update, "changes": []},), "non-empty object"),
+            (({**update, "changes": {"label": " "}},), "non-empty string"),
+            (({**update, "changes": {"label": 1}},), "non-empty string"),
+            (({**update, "changes": {"boundary_contract": []}},), "boundary_contract must be an object"),
+            ((update, update), "at most once"),
+            ((update, remove), "cannot also remove"),
+            ((remove, update), "cannot also remove"),
+            ((update, {"op": "remove_node", "node_id": "VDN-a"}), "cannot also remove"),
+        ):
+            with self.subTest(operations=operations):
+                with self.assertRaises(HarnessError) as caught:
+                    apply_designer_delta(graph, self._order_delta(graph, *operations), valid_evidence_refs=set())
+                self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+                self.assertIn(expected, caught.exception.message)
+
+        delta = self._order_delta(graph, update)
+        delta["partition"]["scenario_id"] = "SC-2"
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(graph, delta, valid_evidence_refs=set())
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("cannot update an edge outside its scenario partition", caught.exception.message)
+
+    def test_update_edge_copies_paired_request_inputs_only_for_replaced_contracts(self) -> None:
+        graph = self._layered_sequence_graph()
+        forward_mapping = [{"from": "selectedId", "to": "id", "required": True}]
+        contract = {
+            "schema_version": BOUNDARY_CONTRACT_VERSION,
+            "consumer_operation": "select an item", "provider_operation": "load an item",
+            "input_mapping": [], "auth_mapping": [], "response_mapping": [], "error_mapping": [],
+        }
+        for edge in graph["edges"][:4]:
+            edge["boundary_contract"] = {**contract, "input_mapping": forward_mapping if edge["kind"] == "calls" else []}
+        graph["artifact_digest"] = graph_digest(graph)
+        response_mapping = [{"from": "item", "to": "loadedItem", "required": True}]
+        delta = self._order_delta(
+            graph,
+            {"op": "update_edge", "edge_id": "VDE-ba", "changes": {"boundary_contract": {**contract, "response_mapping": response_mapping}}},
+            {"op": "update_edge", "edge_id": "VDE-cb", "changes": {"label": "return item"}},
+        )
+
+        candidate, _ = apply_designer_delta(graph, delta, valid_evidence_refs=set())
+
+        by_id = {edge["id"]: edge for edge in candidate["edges"]}
+        self.assertEqual(by_id["VDE-ba"]["boundary_contract"]["input_mapping"], forward_mapping)
+        self.assertEqual(by_id["VDE-ba"]["boundary_contract"]["response_mapping"], response_mapping)
+        self.assertEqual(by_id["VDE-cb"]["boundary_contract"]["input_mapping"], [])
+        self.assertEqual(delta["operations"][0]["changes"]["boundary_contract"]["input_mapping"], [])
+
     def test_order_edges_renumbers_behavior_edges_and_moves_the_terminal_marker(self) -> None:
         graph = self._layered_sequence_graph()
         self.assertEqual(
@@ -512,6 +642,166 @@ class VerticalDesignGraphTest(unittest.TestCase):
         with self.assertRaises(HarnessError) as repeated:
             apply_designer_delta(graph, self._order_delta(graph, twice, twice), valid_evidence_refs=set())
         self.assertIn("at most one order_edges", repeated.exception.message)
+
+    def _repeat_request_graph(self) -> dict[str, object]:
+        """Home and Profile request the same list node; only the Profile request runs its policy (UC4 design_v23 SC-2)."""
+
+        graph = self._layered_sequence_graph()
+        graph["nodes"] = [
+            {**graph["nodes"][0], "id": node_id, "semantic_key": node_id, "name": name}
+            for node_id, name in (("VDN-home", "Home"), ("VDN-list", "articlesList"), ("VDN-rule", "policy"),
+                                  ("VDN-profile", "Profile"))
+        ]
+        graph["edges"] = [
+            {"id": edge_id, "from": source, "to": target, "kind": kind, "label": edge_id, "scenario_id": "SC-1",
+             "order": order, "terminal": order == 7}
+            for edge_id, source, target, kind, order in (
+                ("VDE-home-call", "VDN-home", "VDN-list", "calls", 1),
+                ("VDE-home-return", "VDN-list", "VDN-home", "returns", 2),
+                ("VDE-nav", "VDN-home", "VDN-profile", "calls", 3),
+                ("VDE-profile-call", "VDN-profile", "VDN-list", "calls", 4),
+                ("VDE-rule-call", "VDN-list", "VDN-rule", "calls", 5),
+                ("VDE-rule-return", "VDN-rule", "VDN-list", "returns", 6),
+                ("VDE-profile-return", "VDN-list", "VDN-profile", "returns", 7),
+            )
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        validate_vertical_design_graph(graph, expected_run_id="run-order")
+        return graph
+
+    def test_a_repeated_request_needs_its_own_provider_messages(self) -> None:
+        graph = self._repeat_request_graph()
+        found = [
+            item for item in _sequence_behavior_findings(nodes=graph["nodes"], edges=graph["edges"])
+            if item["code"] == "sequence_request_unserved"
+        ]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["subject_ref"], "SC-1:VDN-list")
+        self.assertEqual(found[0]["partition"], {"scenario_id": "SC-1", "component_id": "web"})
+        self.assertIn("the request VDE-home-call at order 1 from VDN-home (Home) is answered by VDE-home-return", found[0]["message"])
+        self.assertIn("calls VDE-rule-call to VDN-rule (policy)", found[0]["message"])
+        self.assertIn("allowed when its label differs", found[0]["expected_change"])
+        # The delta that completes the scenario in construction is rejected with the same fact.
+        registry = SimpleNamespace(graph=graph, valid_evidence_refs=set(), valid_guidance_refs=set())
+        relabel = self._order_delta(graph, {"op": "update_edge", "edge_id": "VDE-nav", "changes": {"label": "open"}})
+        with patch("sdlc_harness.agents.designer.execution._active_partition", return_value=None):
+            with self.assertRaises(HarnessError) as caught:
+                _reject_discontinuous_completed_scenario(
+                    {"delta": relabel}, registry=registry, requirement_model={}, landscape={}, run_id="run-order"
+                )
+        self.assertIn("answers a request without any message of its own", caught.exception.message)
+        self.assertNotIn("do not form one continuous path", caught.exception.message)
+
+        # A refusal branch may answer before any provider runs; both requests served is fine.
+        for edge in graph["edges"][:2]:
+            edge.update(branch_group="refused", guard="the list is refused")
+        self.assertFalse([
+            item for item in _sequence_behavior_findings(nodes=graph["nodes"], edges=graph["edges"])
+            if item["code"] == "sequence_request_unserved"
+        ])
+
+    def test_repair_may_not_leave_a_writable_node_answering_a_request_empty_handed(self) -> None:
+        graph = self._repeat_request_graph()
+        registry = SimpleNamespace(graph=graph, valid_evidence_refs=set(), valid_guidance_refs=set())
+        task = {"write_scope": {"scenario_id": "SC-1", "writable_node_ids": ["VDN-list"]}, "delta_scaffold": {}}
+        # design_v23 designer-0026: move the only policy pair to the Home request; Profile now returns unserved.
+        reorder = self._order_delta(graph, {"op": "order_edges", "edges": [
+            "VDE-home-call", "VDE-rule-call", "VDE-rule-return", "VDE-home-return", "VDE-nav", "VDE-profile-call",
+            "VDE-profile-return"], "terminal": "VDE-profile-return"})
+        with self.assertRaises(HarnessError) as caught:
+            _reject_unserved_repeat_requests({"delta": reorder}, repair_task=task, registry=registry, run_id="run-order")
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("the request VDE-profile-call at order 6", caught.exception.message)
+        self.assertIn("Current order: 1. VDE-home-call calls", caught.exception.message)
+        # The other component's side is not this target's to fix; a Harness exact scaffold is exempt.
+        _reject_unserved_repeat_requests(
+            {"delta": reorder}, repair_task={**task, "write_scope": {"scenario_id": "SC-1", "writable_node_ids": []}},
+            registry=registry, run_id="run-order",
+        )
+        _reject_unserved_repeat_requests(
+            {"delta": reorder}, repair_task={**task, "delta_scaffold": reorder}, registry=registry, run_id="run-order"
+        )
+        # A second pair with its own labels serves the Home request.
+        fixed = self._order_delta(
+            graph,
+            {"op": "add_edge", "edge": {"from": "VDN-list", "to": "VDN-rule", "kind": "calls", "label": "home list check",
+                                        "scenario_id": "SC-1", "temp_ref": "tmp:home-rule"}},
+            {"op": "add_edge", "edge": {"from": "VDN-rule", "to": "VDN-list", "kind": "returns",
+                                        "label": "home list answer", "scenario_id": "SC-1", "temp_ref": "tmp:home-back"}},
+            {"op": "order_edges", "edges": [
+                "VDE-home-call", "tmp:home-rule", "tmp:home-back", "VDE-home-return", "VDE-nav", "VDE-profile-call",
+                "VDE-rule-call", "VDE-rule-return", "VDE-profile-return"], "terminal": "VDE-profile-return"},
+        )
+        _reject_unserved_repeat_requests({"delta": fixed}, repair_task=task, registry=registry, run_id="run-order")
+
+    def test_repair_task_shows_other_scenarios_projections_of_its_targets(self) -> None:
+        """design_v25 designer-0005 repaired SC-1's articleCreatePrisma without SC-9's projection of the same adapter."""
+
+        def node(node_id: str, scenario: str, path: str, **extra: object) -> dict[str, object]:
+            return {"id": node_id, "scenario_id": scenario, "component_id": "database", "name": node_id,
+                    "contract": f"{node_id} contract", "runtime_binding": {"target": {"path": path, "symbol": "op"}},
+                    "surface_contract": {"surface": "data", "experience_contract": {"x": 1}}, **extra}
+
+        target = node("VDN-sc1", "SC-1", "create.ts")
+        nodes = [
+            target,
+            node("VDN-sc1-other", "SC-1", "create.ts"),
+            node("VDN-sc9", "SC-9", "create.ts"),
+            node("VDN-cited", "SC-4", "list.ts"),
+            node("VDN-evidence", "SC-5", "tags.ts"),
+            node("VDN-unrelated", "SC-6", "update.ts"),
+        ]
+        findings = [{"subject_ref": "VDN-cited", "evidence": [{"source": "design", "ref": "VDN-evidence"},
+                                                               {"source": "requirement", "ref": "VDN-unrelated"}]}]
+        rows = _other_scenario_projections(target_nodes=[target], findings=findings, nodes=nodes, scenario_id="SC-1")
+        self.assertEqual([row["id"] for row in rows], ["VDN-cited", "VDN-evidence", "VDN-sc9"])
+        sc9 = rows[-1]
+        self.assertEqual(sc9["runtime_target"], "create.ts#op")
+        self.assertEqual(sc9["contract"], "VDN-sc9 contract")
+        self.assertNotIn("experience_contract", sc9["surface_contract"])
+        self.assertEqual(
+            _other_scenario_projections(target_nodes=[target], findings=[], nodes=[target], scenario_id="SC-1"), []
+        )
+
+    def test_repair_may_not_add_a_node_binding_defect(self) -> None:
+        """design_v23 designer-0042 attached a new persistence_adapter called_by its caller and was accepted."""
+
+        graph = self._layered_sequence_graph()
+        registry = SimpleNamespace(graph=graph, valid_evidence_refs=set(), valid_guidance_refs=set())
+        candidate = {**graph, "nodes": [*graph["nodes"], {"id": "VDN-new", "name": "title read",
+                     "runtime_binding": {"runtime_kind": "persistence_adapter"}}]}
+        add = self._order_delta(graph, {"op": "add_node", "node": {"temp_ref": "tmp:new"}})
+        task = {"delta_scaffold": {}}
+
+        def finding(subject: str, code: str = "runtime_attachment_missing") -> dict[str, object]:
+            return {"id": f"COMP-{subject}", "code": code, "subject_ref": subject,
+                    "message": f"{subject} attachment is wrong.", "expected_change": "Fix the attachment."}
+
+        def run(delta: dict[str, object], before: list, after: list, repair_task: dict = task) -> None:
+            with patch("sdlc_harness.agents.designer.execution.apply_designer_delta",
+                       return_value=(candidate, {"tmp:new": "VDN-new"})),                  patch("sdlc_harness.agents.designer.execution._composition_repair_findings",
+                       side_effect=[before, after]):
+                _reject_new_node_binding_findings({"delta": delta}, repair_task=repair_task, registry=registry,
+                                                  requirement_model={}, landscape={}, run_id="run-order")
+
+        with self.assertRaises(HarnessError) as caught:
+            run(add, [], [finding("VDN-new")])
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("attachment is wrong", caught.exception.message)
+        self.assertIn("Allowed attachment relations for persistence_adapter: implemented_by, injected_by.",
+                      caught.exception.message)
+        # An untouched node's defect, an older defect, another finding kind and the Harness scaffold all pass.
+        run(add, [], [finding("VDN-a")])
+        run(add, [finding("VDN-new")], [finding("VDN-new")])
+        run(add, [], [finding("VDN-new", code="boundary_contract_mismatch")])
+        with patch("sdlc_harness.agents.designer.execution.apply_designer_delta") as applied:
+            _reject_new_node_binding_findings({"delta": add}, repair_task={"delta_scaffold": add}, registry=registry,
+                                              requirement_model={}, landscape={}, run_id="run-order")
+        applied.assert_not_called()
+        # update_node counts as touching that node.
+        with self.assertRaises(HarnessError):
+            run(self._order_delta(graph, {"op": "update_node", "node_id": "VDN-a", "changes": {}}), [],
+                [finding("VDN-a")])
 
     def test_delta_completing_a_scenario_must_leave_one_continuous_path(self) -> None:
         graph = self._layered_sequence_graph()
@@ -1248,22 +1538,19 @@ class VerticalDesignGraphTest(unittest.TestCase):
         )
 
         repair_task = _active_repair_task(
-            repair_feedback=[boundary_finding],
+            repair_feedback=[boundary_finding, boundary_finding],
             graph=legacy_invalid_graph,
             completed_targets=[],
             landscape=landscape,
             source="inline_composition",
         )
-        replacement = next(
-            operation["edge"]
-            for operation in repair_task["delta_scaffold"]["operations"]
-            if operation["op"] == "add_edge"
-        )
-        self.assertEqual(
-            {key: replacement[key] for key in ("from", "to", "kind", "label")},
-            {key: legacy_invalid_graph["edges"][0][key] for key in ("from", "to", "kind", "label")},
-        )
-        repaired_contract = replacement["boundary_contract"]
+        coverage, update = repair_task["delta_scaffold"]["operations"]
+        self.assertEqual(coverage["op"], "set_partition_coverage")
+        repaired_contract = update["changes"]["boundary_contract"]
+        self.assertEqual(update, {
+            "op": "update_edge", "edge_id": legacy_invalid_graph["edges"][0]["id"],
+            "changes": {"boundary_contract": repaired_contract},
+        })
         self.assertEqual(repaired_contract["provider_operation"], "DELETE /cultural-heritage/{id}")
         self.assertEqual(repaired_contract["input_mapping"], [{"from": "selectedId", "to": "id", "required": True}])
         self.assertEqual(
@@ -1545,17 +1832,17 @@ class VerticalDesignGraphTest(unittest.TestCase):
             landscape=landscape,
             source="inline_composition",
         )
-        replacement = next(
-            item["edge"] for item in repair_task["delta_scaffold"]["operations"] if item["op"] == "add_edge"
+        scaffold = repair_task["delta_scaffold"]
+        self.assertEqual(
+            scaffold["operations"][1:],
+            [{"op": "update_edge", "edge_id": "VDE-return", "changes": {"boundary_contract": contract(forward)}}],
         )
-        self.assertEqual(replacement["boundary_contract"]["input_mapping"], forward)
-        self.assertEqual(replacement["kind"], "returns")
-
-        graph["edges"][1]["boundary_contract"] = contract(forward)
-        graph["artifact_digest"] = graph_digest(graph)
+        _validate_repair_delta_scope(arguments={"delta": scaffold}, repair_task=repair_task, graph=graph, run_id=graph["run_id"])
+        candidate, _ = apply_designer_delta(graph, scaffold, valid_evidence_refs=set())
+        self.assertEqual(candidate["edges"], [graph["edges"][0], {**graph["edges"][1], "boundary_contract": contract(forward)}])
         self.assertNotIn(
             "boundary_contract_mismatch",
-            {str(item["category"]) for item in design_bundle_findings(graph, landscape=landscape)},
+            {str(item["category"]) for item in design_bundle_findings(candidate, landscape=landscape)},
         )
 
     def test_new_returns_edge_gets_the_paired_input_mapping(self) -> None:
@@ -2283,7 +2570,10 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("Never leave out an operation the scenario names.", prompt)
         # Same run: the prompt said "component/runtime boundaries" while the gate checks only different components.
         self.assertIn("an edge between two nodes of the same component needs none", prompt)
-        self.assertIn("The Harness copies input_mapping onto every new returns edge", prompt)
+        self.assertIn(
+            "onto each new returns edge and each returns edge whose boundary_contract you replace with update_edge",
+            prompt,
+        )
         self.assertIn("a source other than none means optional authentication", prompt)
 
     def test_designer_prompt_has_unambiguous_flow_and_tool_contracts(self) -> None:
@@ -2580,7 +2870,7 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("design.inspect_partition(scenario_id?,component_id?,node_ids?)", backend_prompt)
         # Construction mode places new edges among existing ones with order_edges (design_v19 designer-0009 had to
         # remove and re-add an edge with its whole boundary contract only to move it).
-        self.assertIn('{"op":"order_edges","scenario_id":"SC-1","edges":[...],"terminal":"..."}', backend_prompt)
+        self.assertIn('{"op":"order_edges","scenario_id":"SC-*","edges":[...],"terminal":"..."}', backend_prompt)
         self.assertIn("Never remove and re-add an edge only to move it", backend_prompt)
         # design_v20 designer-0008: "an inspected existing composition owner" pointed at the router the Designer read,
         # while the only offered owner was the app root.
@@ -2600,7 +2890,7 @@ class DesignerResumeTest(unittest.TestCase):
         # design_v10 designer-0006: a save/publish scenario placed its rule in the UI because the UI chooses lists.
         self.assertIn("never by itself a reason to place the business_rule in the UI", backend_prompt)
         self.assertNotIn("default component", backend_prompt)
-        self.assertIn("remove_edge, order_edges, place_surface, and not_exercised", backend_prompt)
+        self.assertIn("add_edge, update_edge, remove_edge, order_edges, place_surface, and not_exercised", backend_prompt)
         # r7 designer-0066: SC-6 data behind a 401 had to be invented as a node for code that never runs.
         self.assertIn('add {"op":"not_exercised","surface":"<surface>"', backend_prompt)
         self.assertIn("A surface the scenario reads, writes or decides on is designed as a node", backend_prompt)
@@ -3027,7 +3317,23 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(payload["repair_feedback"], [])
         self.assertNotIn(unrelated_finding["id"], prompt)
         self.assertIn("read_scope is not", prompt)
-        self.assertIn("finding.remediation_reason is the Validator's exact routing witness", prompt)
+        # expected_change / remediation_reason are a minimum and a hint, never a limit (UC4 H-r1 design_v23 SC-2, SC-3).
+        self.assertIn("minimum postcondition and a hint about how to reach it, not a limit on the repair", prompt)
+        self.assertIn("repair that too in the same delta", prompt)
+        self.assertNotIn("exact routing witness", prompt)
+        self.assertNotIn("add or update a node for every listed surface", prompt)
+        # design_v23 0017/0021/0026/0027 cited these to follow the hint over the gap they had found, and doubted add_edge.
+        for removed in (
+            "Do not rewrite an entire scenario edge chain",
+            "use their named existing nodes and edges",
+            "otherwise change only the nodes and edges the findings need",
+            "submit exactly the delta_scaffold",
+            "Do not add or reorder edges in this repair",
+        ):
+            self.assertNotIn(removed, prompt)
+        self.assertIn("add edges whose endpoints are in write_scope.allowed_edge_endpoint_ids", prompt)
+        self.assertIn("a new edge may join the same two nodes as an existing edge when its label differs", prompt)
+        self.assertIn("Preserve required_coverage; add a node only for a required surface the scenario lacks.", prompt)
 
     def test_repair_prompt_states_real_budget_and_source_first_order(self) -> None:
         prompt = _designer_prompt(
@@ -3820,6 +4126,29 @@ class DesignerResumeTest(unittest.TestCase):
         )
         self.assertTrue(_repair_target_present(target_id="SC-1@web", findings=[finding], graph=graph))
 
+    def test_update_edge_respects_repair_write_scope(self) -> None:
+        partition = {"scenario_id": "SC-1", "component_id": "web"}
+        task = {
+            "partition": partition,
+            "write_scope": {
+                "removable_edge_ids": ["VDE-writable"],
+                "restricted_edge_pairs": [{"from": "VDN-web", "to": "VDN-api", "kind": "calls", "label": "submit"}],
+            },
+        }
+        contract_update = {"op": "update_edge", "edge_id": "VDE-writable", "changes": {"boundary_contract": {}}}
+        for operation, expected in (
+            ({**contract_update, "edge_id": "VDE-read-only"}, "cannot update edge outside write_scope: VDE-read-only"),
+            ({**contract_update, "changes": {"label": "changed"}}, "only change boundary_contract with update_edge"),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(HarnessError) as caught:
+                    _validate_repair_delta_scope(
+                        arguments={"delta": {"partition": partition, "operations": [operation]}},
+                        repair_task=task, graph={}, run_id="run-scope",
+                    )
+                self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+                self.assertIn(expected, caught.exception.message)
+
     def test_shared_edge_finding_gives_each_same_scenario_end_a_turn_and_allows_no_change(self) -> None:
         graph = {
             "schema_version": GRAPH_VERSION,
@@ -3864,6 +4193,99 @@ class DesignerResumeTest(unittest.TestCase):
                 HarnessError("designer_delta_invalid", "bad"), tool_id="design.propose_delta", repair_task=web_task
             )
         )
+
+    def test_shared_edge_claim_needs_the_other_end_routed_for_the_same_finding(self) -> None:
+        # UC4 H-r1 design_v23 SC-2@api/SC-3@web: adjudication routed a cross-component finding to one side only, yet
+        # the prompt said the other component gets its own repair turn and DeepSeek left the fix to it.
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-web", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+            ],
+            "edges": [{"id": "VDE-call", "scenario_id": "SC-3", "from": "VDN-web", "to": "VDN-api", "kind": "calls", "label": "x"}],
+            "partitions": [],
+        }
+        step = {"target_id": "SC-3@web", "diagram_ids": ["VDN-web", "VDE-call"], "expected_change": "web side"}
+        finding = {
+            "id": "runtime-sc-3:SEM-002",
+            "category": "runtime_boundary_feasibility",
+            "severity": "blocking",
+            "origin": "semantic",
+            "subject_ref": "VDE-call",
+            "diagram_ids": ["VDN-web", "VDE-call"],
+            "repair_steps": [step],
+        }
+
+        one_side = _active_repair_task(repair_feedback=[finding], graph=graph, completed_targets=[])
+        self.assertEqual(one_side["target_id"], "SC-3@web")
+        self.assertFalse(one_side["shared_edge_only"])
+        self.assertNotIn("gets its own repair turn", one_side["instruction"])
+        self.assertFalse(
+            _accepts_shared_edge_no_change(
+                HarnessError("designer_delta_no_effect", "no change"), tool_id="design.propose_delta", repair_task=one_side
+            )
+        )
+
+        both_sides = {
+            **finding,
+            "repair_steps": [step, {"target_id": "SC-3@api", "diagram_ids": ["VDN-api", "VDE-call"], "expected_change": "api"}],
+        }
+        task = _active_repair_task(repair_feedback=[both_sides], graph=graph, completed_targets=[])
+        self.assertEqual(task["target_id"], "SC-3@web")
+        self.assertTrue(task["shared_edge_only"])
+        self.assertIn("gets its own repair turn", task["instruction"])
+
+    def test_repair_delta_may_not_strand_a_scenario_node(self) -> None:
+        # UC4 H-r1 design_v23 designer-0021 removed EditArticle's only SC-3 call/return pair and every gate passed.
+        graph = {
+            "nodes": [
+                {"id": "VDN-edit", "name": "EditArticle", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-get", "name": "articlesGet", "scenario_id": "SC-3", "component_id": "api"},
+                {"id": "VDN-put", "name": "articlesUpdate", "scenario_id": "SC-3", "component_id": "api"},
+                {"id": "VDN-schema", "name": "schema", "scenario_id": "SC-3", "component_id": "database"},
+            ],
+            "edges": [
+                {"id": "VDE-put", "scenario_id": "SC-3", "from": "VDN-edit", "to": "VDN-put", "kind": "calls"},
+                {"id": "VDE-404", "scenario_id": "SC-3", "from": "VDN-put", "to": "VDN-edit", "kind": "returns"},
+                {"id": "VDE-rule", "scenario_id": "SC-3", "from": "VDN-put", "to": "VDN-get", "kind": "calls"},
+                {"id": "VDE-dep", "scenario_id": "SC-3", "from": "VDN-schema", "to": "VDN-get", "kind": "depends_on"},
+                {"id": "VDE-other", "scenario_id": "SC-4", "from": "VDN-edit", "to": "VDN-get", "kind": "calls"},
+            ],
+        }
+        task = {
+            "write_scope": {"scenario_id": "SC-3"},
+            "delta_scaffold": {"partition": {"scenario_id": "SC-3"}, "operations": [{"op": "set_partition_coverage"}]},
+        }
+        removal = [{"op": "remove_edge", "edge_id": "VDE-put"}, {"op": "remove_edge", "edge_id": "VDE-404"}]
+
+        def check(operations: list[dict[str, object]]) -> None:
+            _reject_stranded_scenario_nodes(
+                arguments={"delta": {"partition": {"scenario_id": "SC-3"}, "operations": operations}},
+                repair_task=task,
+                graph=graph,
+                run_id="run-strand",
+            )
+
+        with self.assertRaises(HarnessError) as caught:
+            check(removal)
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("VDN-edit (EditArticle) loses ['VDE-put', 'VDE-404']", caught.exception.message)
+        # The API node keeps VDE-rule; an SC-4 edge and the depends_on edge never count.
+        self.assertNotIn("VDN-put", caught.exception.message)
+        self.assertNotIn("VDN-schema", caught.exception.message)
+        # Giving the page the messages it really sends, or removing it, passes.
+        check([*removal, {"op": "add_edge", "edge": {"from": "VDN-edit", "to": "VDN-get", "kind": "calls"}}])
+        check([*removal, {"op": "remove_node", "node_id": "VDN-edit"}])
+        # Removing a node strands a peer whose only messages went to it.
+        with self.assertRaises(HarnessError) as peer:
+            check([{"op": "remove_node", "node_id": "VDN-put"}])
+        self.assertIn("VDN-edit (EditArticle)", peer.exception.message)
+        self.assertIn("VDN-get (articlesGet) loses ['VDE-rule']", peer.exception.message)
+        # A Harness-built exact scaffold (runtime_boundary_unreachable removals) is exempt.
+        task["delta_scaffold"] = {"partition": {"scenario_id": "SC-3"}, "operations": removal}
+        check(removal)
 
     def test_mixed_repair_turn_still_requires_a_real_change(self) -> None:
         graph = {
@@ -4051,15 +4473,39 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(database_task["target_id"], "SC-3@database")
         self.assertEqual(database_task["remaining_targets"], ["SC-3@database", "SC-3@api"])
         self.assertEqual(database_task["findings"][0]["diagram_ids"], ["VDN-data", "VDE-return"])
-        self.assertEqual(database_task["expected_postconditions"][0], "Declare the interrupted outcome.")
+        self.assertEqual(database_task["findings"][0]["expected_change"], "Declare the interrupted outcome.")
         self.assertEqual(database_task["write_scope"]["writable_node_ids"], ["VDN-data"])
 
         self.assertEqual(api_task["target_id"], "SC-3@api")
         self.assertEqual(api_task["remaining_targets"], ["SC-3@api"])
         self.assertEqual(api_task["findings"][0]["diagram_ids"], ["VDN-api", "VDE-call", "VDE-return"])
-        self.assertEqual(api_task["expected_postconditions"][0], "Consume interrupted and retry once.")
+        self.assertEqual(api_task["findings"][0]["expected_change"], "Consume interrupted and retry once.")
         self.assertEqual(api_task["write_scope"]["writable_node_ids"], ["VDN-api"])
-        self.assertIn("prerequisite targets are already complete", api_task["instruction"])
+        self.assertIn("prerequisite targets are", api_task["instruction"])
+        self.assertIn("scoped to this target", api_task["instruction"])
+        self.assertNotIn("authoritative", api_task["instruction"])
+        # The step text reaches the Designer once, as the finding's expected_change (UC4 H-r1 design_v23 0017/0021
+        # read five copies plus "No blocking finding remains" as the answer key).
+        for task in (database_task, api_task):
+            self.assertNotIn("expected_postconditions", task)
+            self.assertNotIn("repair_steps", task)
+            self.assertFalse({"repair_step", "repair_steps"} & set(task["findings"][0]))
+            self.assertEqual(json.dumps(task).count(task["findings"][0]["expected_change"]), 1)
+        # Each writable node lists its own scenario edges.
+        self.assertEqual(
+            api_task["graph_context"]["writable_nodes"][0]["scenario_edges"],
+            [
+                {"edge_id": "VDE-call", "order": None, "kind": "calls", "direction": "outgoing",
+                 "peer_id": "VDN-data", "peer_name": ""},
+                {"edge_id": "VDE-return", "order": None, "kind": "returns", "direction": "incoming",
+                 "peer_id": "VDN-data", "peer_name": ""},
+            ],
+        )
+        self.assertNotIn("scenario_edges", graph["nodes"][0])
+        self.assertEqual(
+            [item["op"] for item in api_task["delta_scaffold"]["operations"]],
+            [],
+        )
 
         rebuild_finding = {
             **finding,
@@ -4082,7 +4528,7 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(rebuild_task["remaining_targets"], ["SC-3@api"])
         self.assertTrue(rebuild_task["write_scope"]["allow_add_node"])
         self.assertEqual(
-            rebuild_task["expected_postconditions"][0],
+            rebuild_task["findings"][0]["expected_change"],
             "Add the API-side attempt boundary that owns interruption outcomes.",
         )
 
@@ -4163,25 +4609,16 @@ class DesignerResumeTest(unittest.TestCase):
             source="inline_composition",
         )
 
-        replacement = next(
-            operation["edge"]
-            for operation in task["delta_scaffold"]["operations"]
-            if operation["op"] == "add_edge"
-        )
-        contract = replacement["boundary_contract"]
+        coverage, update = task["delta_scaffold"]["operations"]
+        self.assertEqual(coverage["op"], "set_partition_coverage")
+        contract = update["changes"]["boundary_contract"]
+        self.assertEqual(update, {"op": "update_edge", "edge_id": "VDE-return", "changes": {"boundary_contract": contract}})
         self.assertEqual(contract["provider_operation"], "POST /cultural-heritage")
         self.assertEqual(
             [item["to"] for item in contract["input_mapping"]],
             ["name", "description", "category", "location"],
         )
         self.assertTrue(contract["auth_mapping"])
-        self.assertEqual(replacement["from"], "VDN-api")
-        self.assertEqual(replacement["to"], "VDN-ui")
-        self.assertEqual(replacement["kind"], "returns")
-        self.assertEqual(
-            replacement["label"],
-            "return duplicate rejection outcome to the operator notice",
-        )
 
         paired = [{"from": "formName", "to": "name", "required": True}]
         paired_task = _active_repair_task(
@@ -4197,12 +4634,36 @@ class DesignerResumeTest(unittest.TestCase):
             completed_targets=[],
             source="inline_composition",
         )
-        paired_replacement = next(
-            operation["edge"]
-            for operation in paired_task["delta_scaffold"]["operations"]
-            if operation["op"] == "add_edge"
+        paired_update = next(operation for operation in paired_task["delta_scaffold"]["operations"] if operation["op"] == "update_edge")
+        self.assertEqual(paired_update["changes"]["boundary_contract"]["input_mapping"], paired)
+
+    def test_repair_prompt_shows_edge_update_and_order_operations(self) -> None:
+        graph = {"nodes": [], "edges": [], "partitions": []}
+        task = _active_repair_task(
+            repair_feedback=[{
+                "code": "boundary_contract_mismatch",
+                "partition": {"scenario_id": "SC-1", "component_id": "web"},
+            }],
+            graph=graph,
+            completed_targets=[],
+            source="inline_composition",
         )
-        self.assertEqual(paired_replacement["boundary_contract"]["input_mapping"], paired)
+        prompt = _designer_prompt(
+            requirement_model={}, landscape={}, graph=graph, observations=[], repair_feedback=[],
+            active_partition=None, repair_task=task, observations_since_delta=0, last_invalid_action="",
+            source_inspected=True,
+        )
+        self.assertIn('{"op":"order_edges","scenario_id":"SC-*","edges":[...],"terminal":"..."}', prompt)
+        self.assertIn('{"op":"update_edge","edge_id":"VDE-*","changes":{"boundary_contract":{...},"label":"..."}}', prompt)
+        self.assertIn("Each update_edge targets the named edge_id and replaces only changes.boundary_contract", prompt)
+        self.assertIn("Use order_edges to move edges or change the terminal marker", prompt)
+        self.assertNotIn("Use remove_edge plus ordered add_edge", prompt)
+        # Only the active finding kind's exact rule is shown, and the task instruction no longer repeats the edit rules.
+        self.assertIn("Every active repair finding is boundary_contract_mismatch", prompt)
+        self.assertNotIn("runtime_operation_binding_mismatch: submit exactly", prompt)
+        self.assertNotIn("runtime_boundary_unreachable: submit exactly", prompt)
+        self.assertNotIn("Never remove and re-add an edge only to move or edit it", task["instruction"])
+        self.assertNotIn("Do not update read_only_nodes", task["instruction"])
 
     def test_review_feedback_only_applies_to_the_reviewed_target(self) -> None:
         session = {"last_review_feedback": "fix SC-1 mapping", "last_review_target": "repair:SC-1@api"}
@@ -4257,7 +4718,7 @@ class DesignerResumeTest(unittest.TestCase):
 
         self.assertNotIn("VDE-1", message)
         self.assertIn("VDE-2, VDE-3", message)
-        self.assertIn("remove-before-add", message)
+        self.assertIn("Use update_edge to edit existing edges or order_edges to move them", message)
 
     def test_bundle_repair_task_is_scoped_to_one_component_partition(self) -> None:
         graph = {

@@ -60,6 +60,7 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..workspaces import RunWorkspaceManager
+from .plan_graph_flow import PLAN_FLOW_VERSION, run_plan_graph
 from ..core.coerce import dict_items as _dict_items
 from ..core.coerce import dict_value as _dict_value
 from ..agents.designer.ui_context import build_ui_repo_context
@@ -112,6 +113,8 @@ class PhaseThreeWorkflow:
         """Tạo workspace rồi duyệt design để sinh implementation plan checkpoint."""
 
         state = self.store.read_state(run_id)
+        if state.get("design_opencode_flow"):
+            return self._start_hoc_plan(state=state, run_id=run_id, checkpoint_id=checkpoint_id)
         self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
         self._read_phase3_inputs(state=state, run_id=run_id)
         try:
@@ -159,11 +162,217 @@ class PhaseThreeWorkflow:
                 if self.plan_step_review.get(key) is not None
             }
             self.plan_step_review = {**pinned_review, **decision, "enabled": True}
+        if state.get("plan_opencode_flow"):
+            # OpenCode turns take the workspace lock themselves, so the H-OC plan runs without holding it.
+            return self._run_hoc_plan(run_id=run_id)
         with self.workspace_manager.locked_workspace(run_id):
             try:
                 return self._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
             except LlmStepReviewRequired as exc:
                 return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
+
+    # H-OC Phase 3 (plan graph) -------------------------------------------------------------------------------------
+
+    def _start_hoc_plan(
+        self, *, state: dict[str, object], run_id: str, checkpoint_id: str | None
+    ) -> dict[str, object]:
+        """The owner approved the Markdown design of an OpenCode run: freeze it and start the plan graph."""
+
+        checkpoint = _dict_value(state.get("pending_checkpoint"))
+        if str(state.get("status")) != "waiting_design_approval" or checkpoint.get("type") != "design_approval":
+            raise HarnessError("checkpoint_not_current", f"Run is not waiting for design approval: {run_id}", run_id=run_id)
+        if checkpoint_id and checkpoint_id != str(checkpoint.get("checkpoint_id") or ""):
+            raise HarnessError("checkpoint_not_current", f"Checkpoint is not current: {checkpoint_id}", run_id=run_id)
+        artifacts = _dict_value(state.get("latest_artifacts"))
+        for key in ("design_trace", "design_markdown"):
+            if not artifacts.get(key):
+                raise HarnessError("approved_design_not_found", f"The design checkpoint has no {key}.", run_id=run_id)
+        self.workspace_manager.create_for_run(run_id)  # the worktree exists since Phase 1; this validates it
+        now = utc_now_iso()
+        state = self.store.read_state(run_id)
+        state.update(
+            {
+                "updated_at": now,
+                "approved_artifacts": {
+                    **_dict_value(state.get("approved_artifacts")),
+                    "design_trace": artifacts["design_trace"],
+                    "design_markdown": artifacts["design_markdown"],
+                    "design_approved_at": now,
+                },
+                "pending_checkpoint": None,
+                "plan_opencode_flow": PLAN_FLOW_VERSION,
+                "plan_opencode_model": state.get("design_opencode_model") or self.settings.phase1_opencode_model,
+                "plan_parallel_agents": self.settings.hoc_parallel_agents,
+                "status": "implementation_planning",
+                "current_phase": "implementation_planning",
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": None,
+                "summary_for_user": "Design đã duyệt; Plan H-OC (đồ thị task) bắt đầu.",
+            }
+        )
+        self.store.write_state(state)
+        return self._run_hoc_plan(run_id=run_id)
+
+    def _run_hoc_plan(self, *, run_id: str) -> dict[str, object]:
+        """Run or resume the plan graph flow; pause on step review, stay resumable on transport failure, else block."""
+
+        state = self.store.read_state(run_id)
+        approved = _dict_value(state.get("approved_artifacts"))
+        root = self.store.repo_root
+        trace = json.loads((root / str(approved["design_trace"])).read_text(encoding="utf-8"))
+        markdown = (root / str(approved["design_markdown"])).read_bytes().decode("utf-8")
+        requirement = json.loads((root / str(approved["requirement_trace"])).read_text(encoding="utf-8"))
+        profile_id = str(_dict_value(state.get("profile_snapshot")).get("project_profile_id") or "")
+        if state.get("status") != "implementation_planning":
+            state.update({"updated_at": utc_now_iso(), "status": "implementation_planning",
+                          "current_phase": "implementation_planning"})
+            self.store.write_state(state)
+        try:
+            result = run_plan_graph(
+                settings=self.settings,
+                store=self.store,
+                run_id=run_id,
+                model=str(state["plan_opencode_model"]),
+                design_trace=trace,
+                design_markdown=markdown,
+                requirement_trace=requirement,
+                project_profile_id=profile_id,
+                k=int(state["plan_parallel_agents"]),
+                step_review=self.plan_step_review,
+            )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
+        except HarnessError as exc:
+            transient = exc.error_code == "llm_transport_failed"
+            state = self.store.read_state(run_id)
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    # An in-flight status resumes through continue_run (`_PLAN_RESUME`); anything else is blocked.
+                    "status": "implementation_planning" if transient else "blocked",
+                    "current_phase": "implementation_planning",
+                    "last_error": exc.to_response(),
+                    "allowed_next_actions": ["continue_run", "get_status", "cancel_run"] if transient
+                    else ["get_status", "cancel_run"],
+                    "summary_for_user": (
+                        f"Plan H-OC tạm dừng (lỗi truyền tải): {exc.message}" if transient
+                        else f"Plan H-OC bị chặn: {exc.message}"
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+        return self._finish_hoc_plan(run_id=run_id, result=result)
+
+    def restart_plan(self, *, run_id: str, reason: str) -> dict[str, object]:
+        """Owner action: rebuild an OpenCode run's plan graph from the frozen Design (plan section 11.4).
+
+        The previous plan artifacts, the Planner session and the step-review exchanges move into
+        `audit/plan_restart_<time>/` so nothing is replayed; the run plans again with a new Planner turn.
+        """
+
+        if not str(reason or "").strip():
+            raise HarnessError("plan_restart_reason_required", "A plan restart needs the owner's reason.", run_id=run_id)
+        state = self.store.read_state(run_id)
+        status = str(state.get("status") or "")
+        allowed = {"waiting_implementation_plan_review", "implementation_plan_step_review_required",
+                   "implementation_planning", "blocked"}
+        if not state.get("plan_opencode_flow") or status not in allowed or (
+            status == "blocked" and state.get("current_phase") != "implementation_planning"
+        ):
+            raise HarnessError(
+                "plan_restart_not_allowed",
+                f"Only an OpenCode run's plan can restart (plan checkpoint, plan step review or blocked plan), "
+                f"not status {status!r}.",
+                run_id=run_id,
+            )
+        run_dir = self.store.run_dir(run_id)
+        stamp = utc_now_iso().replace(":", "").replace("-", "")
+        audit = run_dir / "audit" / f"plan_restart_{stamp}"
+        audit.mkdir(parents=True, exist_ok=False)
+        (audit / "state.json").write_bytes(self.store.state_path(run_id).read_bytes())
+        moved: list[str] = []
+        artifacts = run_dir / "artifacts"
+        for path in sorted(artifacts.glob("plan_*")) + sorted(artifacts.glob("opencode_planner_session_v1.json")):
+            path.rename(audit / path.name)
+            moved.append(path.name)
+        if (run_dir / "plan_execution").is_dir():
+            (run_dir / "plan_execution").rename(audit / "plan_execution")
+            moved.append("plan_execution/")
+        state = self.store.read_state(run_id)
+        latest = {key: value for key, value in _dict_value(state.get("latest_artifacts")).items()
+                  if not key.startswith("plan_")}
+        state.setdefault("recoveries", []).append(
+            {
+                "code": "restart_plan",
+                "from_status": status,
+                "reason": reason,
+                "moved": moved,
+                "audit_dir": self.store.relative(audit),
+                "recovered_at": utc_now_iso(),
+            }
+        )
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "implementation_planning",
+                "current_phase": "implementation_planning",
+                "latest_artifacts": latest,
+                "pending_checkpoint": None,
+                "pending_step_review": None,
+                "implementation_plan_step_review": None,
+                "plan_parallel_agents": self.settings.hoc_parallel_agents,
+                "last_error": None,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "summary_for_user": "Plan H-OC đang được dựng lại theo yêu cầu của anh.",
+            }
+        )
+        self.store.write_state(state)
+        return self._run_hoc_plan(run_id=run_id)
+
+    def _finish_hoc_plan(self, *, run_id: str, result: object) -> dict[str, object]:
+        """Open the Plan checkpoint: plan graph JSON, report, task diagram and the Planner's notes."""
+
+        state = self.store.read_state(run_id)
+        plan = result.plan
+        artifacts = result.artifacts
+        latest = {**_dict_value(state.get("latest_artifacts")), **artifacts}
+        planner = _dict_value(plan.get("planner"))
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "waiting_implementation_plan_review",
+                "current_phase": "implementation_planning",
+                "latest_artifacts": latest,
+                "pending_step_review": None,
+                "pending_checkpoint": {
+                    "checkpoint_id": f"checkpoint_plan_{run_id}",
+                    "type": "implementation_plan_review",
+                    "artifact_ref": "plan_graph_v1",
+                    "artifact_path": artifacts["plan_graph"],
+                    "review_projection_ref": artifacts["plan_graph_report"],
+                    "flow_diagram_ref": artifacts["plan_task_graph"],
+                    "k": plan["k"],
+                    "counts": {
+                        "base_units": len(plan["base"]["units"]),
+                        "groups": len(plan["groups"]),
+                        "integration_units": len(plan["integration"]["units"]),
+                        "reliance_kept": planner.get("kept"),
+                        "reliance_dropped": planner.get("dropped"),
+                    },
+                    "estimated_t": plan["schedule"]["mode_b"]["T"],
+                    "planner_notes": planner.get("notes"),
+                },
+                "allowed_next_actions": ["approve_checkpoint", "get_status", "cancel_run"],
+                "last_error": None,
+                "summary_for_user": (
+                    "Plan H-OC (đồ thị task, báo cáo, sơ đồ) đã sẵn sàng để anh xem. "
+                    "Duyệt checkpoint Plan để bắt đầu thực thi H-OC."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def revalidate_implementation_plan(self, *, run_id: str) -> dict[str, object]:
         """Create a new plan version from frozen Phase 1/2 inputs and review it again."""

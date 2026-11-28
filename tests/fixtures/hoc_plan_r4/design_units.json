@@ -1,0 +1,447 @@
+{
+ "source": "run_20261126_040632_ef2c129c design_trace_v1_r1.json (units only)",
+ "units": [
+  {
+   "id": "U-1",
+   "kind": "data",
+   "status": "modify",
+   "files": [
+    "packages/db/prisma/schema.prisma"
+   ],
+   "uses": []
+  },
+  {
+   "id": "U-2",
+   "kind": "migration",
+   "status": "new",
+   "files": [
+    "packages/db/prisma/migrations/20261126000100_add_article_drafts/migration.sql"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-3",
+   "kind": "other",
+   "status": "modify",
+   "files": [
+    "packages/contracts/src/realworld.ts",
+    "apps/web/src/types/article.ts",
+    "apps/web/src/types/error.ts"
+   ],
+   "uses": []
+  },
+  {
+   "id": "U-4",
+   "kind": "component",
+   "status": "modify",
+   "files": [
+    "apps/api/src/view/articleViewer.ts"
+   ],
+   "uses": [
+    "U-1",
+    "U-3"
+   ]
+  },
+  {
+   "id": "U-5",
+   "kind": "other",
+   "status": "modify",
+   "files": [
+    "packages/db/src/slugfy.ts",
+    "packages/db/src/article/articleSlug.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-6",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/article/articleCreatePrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1",
+    "U-5"
+   ]
+  },
+  {
+   "id": "U-7",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/article/articleUpdatePrisma.ts",
+    "packages/db/src/article/articleSaveDraftPrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1",
+    "U-5"
+   ]
+  },
+  {
+   "id": "U-8",
+   "kind": "query",
+   "status": "new",
+   "files": [
+    "packages/db/src/article/articlePublishPrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1",
+    "U-5"
+   ]
+  },
+  {
+   "id": "U-9",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/article/articleDeletePrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-10",
+   "kind": "query",
+   "status": "new",
+   "files": [
+    "packages/db/src/article/articleGetVisiblePrisma.ts",
+    "packages/db/src/article/articleResolvePrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-11",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/article/articleListPrisma.ts",
+    "packages/db/src/article/articleFeedPrisma.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-12",
+   "kind": "query",
+   "status": "new",
+   "files": [
+    "packages/db/src/article/articleDraftsPrisma.ts",
+    "packages/db/src/index.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-13",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/comment/commentsGetPrisma.ts",
+    "packages/db/src/comment/commentCreatePrisma.ts",
+    "packages/db/src/comment/commentDeletePrisma.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-14",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/article/articleFavoritePrisma.ts",
+    "packages/db/src/article/articleUnFavoritePrisma.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-15",
+   "kind": "query",
+   "status": "modify",
+   "files": [
+    "packages/db/src/tag/tagsGetPrisma.ts"
+   ],
+   "uses": [
+    "U-1"
+   ]
+  },
+  {
+   "id": "U-16",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesList.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-11"
+   ]
+  },
+  {
+   "id": "U-17",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesFeed.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-11"
+   ]
+  },
+  {
+   "id": "U-18",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesGet.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-10"
+   ]
+  },
+  {
+   "id": "U-19",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesCreate.ts",
+    "apps/api/src/middleware/articlesValidator/articlesCreateValidator.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-6"
+   ]
+  },
+  {
+   "id": "U-20",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesUpdate.ts",
+    "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-5",
+    "U-7",
+    "U-8",
+    "U-10"
+   ]
+  },
+  {
+   "id": "U-21",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesDelete.ts"
+   ],
+   "uses": [
+    "U-9",
+    "U-10"
+   ]
+  },
+  {
+   "id": "U-22",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/commentsController/getComments.ts",
+    "apps/api/src/controllers/commentsController/createComment.ts",
+    "apps/api/src/controllers/commentsController/deleteComment.ts"
+   ],
+   "uses": [
+    "U-13"
+   ]
+  },
+  {
+   "id": "U-23",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesFavorite.ts",
+    "apps/api/src/controllers/articlesController/articlesUnFavorite.ts"
+   ],
+   "uses": [
+    "U-14"
+   ]
+  },
+  {
+   "id": "U-24",
+   "kind": "endpoint",
+   "status": "new",
+   "files": [
+    "apps/api/src/controllers/articlesController/articlesDrafts.ts",
+    "apps/api/src/middleware/articlesValidator/articlesDraftsValidator.ts",
+    "apps/api/src/controllers/articlesController/index.ts",
+    "apps/api/src/routes/api/articles.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-12"
+   ]
+  },
+  {
+   "id": "U-25",
+   "kind": "endpoint",
+   "status": "modify",
+   "files": [
+    "apps/api/src/controllers/tagsController/getTags.ts"
+   ],
+   "uses": [
+    "U-15"
+   ]
+  },
+  {
+   "id": "U-26",
+   "kind": "other",
+   "status": "modify",
+   "files": [
+    "apps/api/src/middleware/errorHandling/prismaErrorHandler.ts"
+   ],
+   "uses": []
+  },
+  {
+   "id": "U-27",
+   "kind": "seed",
+   "status": "modify",
+   "files": [
+    "packages/db/src/seed.ts"
+   ],
+   "uses": [
+    "U-1",
+    "U-5"
+   ]
+  },
+  {
+   "id": "U-28",
+   "kind": "seed",
+   "status": "modify",
+   "files": [
+    "packages/db/src/smoke.ts"
+   ],
+   "uses": [
+    "U-6",
+    "U-15",
+    "U-27"
+   ]
+  },
+  {
+   "id": "U-29",
+   "kind": "other",
+   "status": "modify",
+   "files": [
+    "tests/e2e/conduit.spec.ts"
+   ],
+   "uses": [
+    "U-16",
+    "U-24",
+    "U-25",
+    "U-27"
+   ]
+  },
+  {
+   "id": "U-30",
+   "kind": "other",
+   "status": "modify",
+   "files": [
+    "apps/web/src/services/conduit.ts",
+    "apps/web/src/types/error.ts"
+   ],
+   "uses": [
+    "U-3"
+   ]
+  },
+  {
+   "id": "U-31",
+   "kind": "component",
+   "status": "modify",
+   "files": [
+    "apps/web/src/components/ArticleEditor/ArticleEditor.tsx",
+    "apps/web/src/components/GenericForm/GenericForm.tsx",
+    "apps/web/src/components/ArticleEditor/ArticleEditor.slice.tsx"
+   ],
+   "uses": [
+    "U-30"
+   ]
+  },
+  {
+   "id": "U-32",
+   "kind": "screen",
+   "status": "modify",
+   "files": [
+    "apps/web/src/components/Pages/NewArticle/NewArticle.tsx",
+    "apps/web/src/components/Pages/EditArticle/EditArticle.tsx"
+   ],
+   "uses": [
+    "U-16",
+    "U-18",
+    "U-19",
+    "U-20",
+    "U-30",
+    "U-31"
+   ]
+  },
+  {
+   "id": "U-33",
+   "kind": "screen",
+   "status": "modify",
+   "files": [
+    "apps/web/src/components/Pages/ProfilePage/ProfilePage.tsx",
+    "apps/web/src/components/ArticlesViewer/ArticlesViewer.tsx"
+   ],
+   "uses": [
+    "U-16",
+    "U-24",
+    "U-30",
+    "U-34"
+   ]
+  },
+  {
+   "id": "U-34",
+   "kind": "component",
+   "status": "modify",
+   "files": [
+    "apps/web/src/components/ArticlePreview/ArticlePreview.tsx"
+   ],
+   "uses": [
+    "U-3"
+   ]
+  },
+  {
+   "id": "U-35",
+   "kind": "screen",
+   "status": "modify",
+   "files": [
+    "apps/web/src/components/Pages/ArticlePage/ArticlePage.tsx",
+    "apps/web/src/components/Pages/ArticlePage/ArticlePage.slice.ts"
+   ],
+   "uses": [
+    "U-4",
+    "U-18",
+    "U-20",
+    "U-21",
+    "U-22",
+    "U-23",
+    "U-30"
+   ]
+  }
+ ]
+}

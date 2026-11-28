@@ -1,0 +1,312 @@
+{
+ "schema_version": "plan_repo_facts_v1",
+ "package_dirs": [
+  "",
+  "apps/api",
+  "apps/web",
+  "packages/contracts",
+  "packages/db"
+ ],
+ "imports": {
+  "": [
+   ""
+  ],
+  "apps/api": [
+   "apps/api",
+   "packages/contracts",
+   "packages/db"
+  ],
+  "apps/web": [
+   "apps/web",
+   "packages/contracts"
+  ],
+  "packages/contracts": [
+   "packages/contracts"
+  ],
+  "packages/db": [
+   "packages/db"
+  ]
+ },
+ "check_files": [
+  "packages/db/src/smoke.ts",
+  "tests/e2e/conduit.spec.ts"
+ ],
+ "generate_inputs": [
+  "packages/db/prisma/schema.prisma"
+ ],
+ "generated_consumers": [
+  "apps/api",
+  "packages/db"
+ ],
+ "barrels": [
+  "apps/api/src/controllers/articlesController/index.ts",
+  "packages/db/src/index.ts"
+ ],
+ "editable_roots": [
+  "apps/api/src",
+  "apps/web/src",
+  "packages/contracts/src",
+  "packages/db/prisma",
+  "packages/db/src",
+  "tests/e2e"
+ ],
+ "protected_paths": [
+  ".sdlc",
+  ".github",
+  "package.json",
+  "package-lock.json",
+  "compose.yaml",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "vitest.config.ts",
+  "playwright.config.ts",
+  "apps/web/package.json",
+  "apps/web/tsconfig.json",
+  "apps/web/vite.config.ts",
+  "apps/api/package.json",
+  "apps/api/tsconfig.json",
+  "packages/contracts/package.json",
+  "packages/contracts/tsconfig.json",
+  "packages/db/package.json",
+  "packages/db/prisma7.config.ts",
+  "packages/db/tsconfig.json"
+ ],
+ "gate_stage_ids": [
+  "typecheck",
+  "unit"
+ ],
+ "reliance_candidates": [
+  {
+   "from": "U-4",
+   "to": "U-26"
+  },
+  {
+   "from": "U-6",
+   "to": "U-26"
+  },
+  {
+   "from": "U-7",
+   "to": "U-26"
+  },
+  {
+   "from": "U-8",
+   "to": "U-26"
+  },
+  {
+   "from": "U-9",
+   "to": "U-26"
+  },
+  {
+   "from": "U-10",
+   "to": "U-26"
+  },
+  {
+   "from": "U-11",
+   "to": "U-26"
+  },
+  {
+   "from": "U-12",
+   "to": "U-26"
+  },
+  {
+   "from": "U-13",
+   "to": "U-26"
+  },
+  {
+   "from": "U-14",
+   "to": "U-26"
+  },
+  {
+   "from": "U-15",
+   "to": "U-26"
+  },
+  {
+   "from": "U-16",
+   "to": "U-26"
+  },
+  {
+   "from": "U-17",
+   "to": "U-26"
+  },
+  {
+   "from": "U-18",
+   "to": "U-26"
+  },
+  {
+   "from": "U-19",
+   "to": "U-26"
+  },
+  {
+   "from": "U-20",
+   "to": "U-26"
+  },
+  {
+   "from": "U-21",
+   "to": "U-26"
+  },
+  {
+   "from": "U-22",
+   "to": "U-26"
+  },
+  {
+   "from": "U-23",
+   "to": "U-26"
+  },
+  {
+   "from": "U-24",
+   "to": "U-26"
+  },
+  {
+   "from": "U-25",
+   "to": "U-26"
+  }
+ ],
+ "tests": [
+  {
+   "path": "apps/api/src/controllers/articlesController/articlesFeed.test.ts",
+   "units": [
+    "U-4",
+    "U-11",
+    "U-17"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/controllers/articlesController/articlesList.test.ts",
+   "units": [
+    "U-4",
+    "U-11",
+    "U-16"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/controllers/commentsController/createComment.test.ts",
+   "units": [
+    "U-13",
+    "U-22"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/middleware/articlesValidator/articlesCreateValidator.test.ts",
+   "units": [
+    "U-19"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/middleware/articlesValidator/articlesUpdateValidator.test.ts",
+   "units": [
+    "U-20"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/api/src/view/articleViewer.test.ts",
+   "units": [
+    "U-4"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/App/App.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/ArticleEditor/ArticleEditor.test.tsx",
+   "units": [
+    "U-31"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/ArticlePreview/ArticlePreview.test.tsx",
+   "units": [
+    "U-34"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.test.tsx",
+   "units": [
+    "U-30",
+    "U-35"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx",
+   "units": [
+    "U-30",
+    "U-31",
+    "U-32"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Home/Home.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Login/Login.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/NewArticle/NewArticle.test.tsx",
+   "units": [
+    "U-30",
+    "U-31",
+    "U-32"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/ProfilePage/ProfilePage.test.tsx",
+   "units": [
+    "U-30",
+    "U-33"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Register/Register.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/components/Pages/Settings/Settings.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  },
+  {
+   "path": "apps/web/src/services/conduit.test.tsx",
+   "units": [
+    "U-30"
+   ],
+   "check": false
+  }
+ ],
+ "test_suffixes": [
+  ".test.ts",
+  ".test.tsx",
+  ".spec.ts",
+  ".spec.tsx"
+ ],
+ "check_roots": [
+  "tests/e2e"
+ ]
+}

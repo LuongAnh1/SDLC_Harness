@@ -14,12 +14,12 @@ from pathlib import Path
 
 from ..profiles import get_project_profile
 from .config_schema import (
-    CONFIG_SECTIONS,
     PHASE1_LLM_PROFILE_DEFAULTS,
     PHASE2_LLM_PROFILE_DEFAULTS,
     PHASE3_LLM_PROFILE_DEFAULTS,
     PHASE4_LLM_PROFILE_DEFAULTS,
     config_field_index,
+    normalize_config_value,
     serialize_config_value,
 )
 from .runtime_config import RuntimeConfigStore
@@ -108,6 +108,16 @@ class Settings:
     api_token: str
     api_queue_limit: int
     api_shutdown_timeout_seconds: int
+    phase1_opencode_model: str = "deepseek/deepseek-flash#high"
+    phase1_opencode_reviewer_model: str = "deepseek/deepseek-v4-pro#high"
+    hoc_parallel_agents: int = 3
+    hoc_worker: str = "codex"
+    hoc_codex_model: str = "gpt-6-luna"
+    hoc_codex_effort: str = "max"
+    hoc_codex_reviewer_model: str = "gpt-6-luna"
+    hoc_codex_reviewer_effort: str = "high"
+    hoc_execution_mode: str = "b"
+    hoc_base_review_pause: bool = True
 
 
 @dataclass(frozen=True)
@@ -467,6 +477,20 @@ def load_settings(
         llm_api_key=merged.get("SDLC_LLM_API_KEY", ""),
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
         llm_model=llm_model,
+        phase1_opencode_model=merged["SDLC_PHASE1_OPENCODE_MODEL"].strip() or Settings.phase1_opencode_model,
+        phase1_opencode_reviewer_model=(
+            merged["SDLC_PHASE1_OPENCODE_REVIEWER_MODEL"].strip() or Settings.phase1_opencode_reviewer_model
+        ),
+        hoc_parallel_agents=_int_value(merged.get("SDLC_HOC_PARALLEL_AGENTS"), default=3, minimum=1, maximum=8),
+        hoc_worker=merged.get("SDLC_HOC_WORKER", "").strip() or "codex",
+        hoc_codex_model=merged.get("SDLC_HOC_CODEX_MODEL", "").strip() or "gpt-6-luna",
+        hoc_codex_effort=merged.get("SDLC_HOC_CODEX_EFFORT", "").strip() or "max",
+        hoc_codex_reviewer_model=merged.get("SDLC_HOC_CODEX_REVIEWER_MODEL", "").strip() or "gpt-6-luna",
+        hoc_codex_reviewer_effort=merged.get("SDLC_HOC_CODEX_REVIEWER_EFFORT", "").strip() or "high",
+        hoc_execution_mode=merged.get("SDLC_HOC_EXECUTION_MODE", "").strip() or "b",
+        hoc_base_review_pause=bool(normalize_config_value(
+            config_field_index()["SDLC_HOC_BASE_REVIEW_PAUSE"], merged["SDLC_HOC_BASE_REVIEW_PAUSE"],
+        )),
         llm_thinking_mode=llm_thinking_mode,
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
